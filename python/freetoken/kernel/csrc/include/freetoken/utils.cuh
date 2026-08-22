@@ -10,14 +10,14 @@
 #include <source_location>
 #include <type_traits>
 
-// __grid_constant__ is unavailable before Volta. Kernel parameters remain
-// const by-value objects on Pascal; only the unsupported storage annotation is
-// omitted. Keep this target-dependent because the same JIT sources serve newer
-// architectures upstream.
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
-#define FREETOKEN_GRID_CONSTANT __grid_constant__
+// __grid_constant__ is compute_70+; Pascal's ptxas rejects it outright. It is only ever
+// a codegen hint -- the kernel parameter is passed identically without it -- so dropping
+// it below sm_70 costs nothing but the constant-bank optimisation. The host pass (no
+// __CUDA_ARCH__) and every sm_70+ device pass keep the annotation verbatim.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 700
+#define FT_GRID_CONSTANT
 #else
-#define FREETOKEN_GRID_CONSTANT
+#define FT_GRID_CONSTANT __grid_constant__
 #endif
 
 namespace device {
