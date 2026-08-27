@@ -1,0 +1,33 @@
+name: Pascal hardware validation
+description: Record a single- or dual-P4 hardware gate
+title: "[HARDWARE] "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: level
+    attributes:
+      label: Gate
+      options: [H2 single-P4, H3 dual-P4, H4 release]
+    validations:
+      required: true
+  - type: textarea
+    id: inventory
+    attributes:
+      label: Hardware and topology
+      description: Include nvidia-smi, PCIe, NUMA, clocks, cooling, power and memory population
+    validations:
+      required: true
+  - type: textarea
+    id: model
+    attributes:
+      label: Model and runtime
+      description: Commit, model checksum, quant census, context and exact command
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Correctness, PP/TG, cache rates, CPU/GPU split, temperatures and failure evidence
+    validations:
+      required: true

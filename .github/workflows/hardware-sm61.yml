@@ -1,0 +1,50 @@
+name: Pascal hardware gates
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_level:
+        description: Highest hardware level to run
+        type: choice
+        options: [smoke, single-p4, dual-p4, release]
+        default: smoke
+      model_path:
+        description: Optional local path to model weights on the runner
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sm61-hardware
+  cancel-in-progress: false
+
+jobs:
+  sm61:
+    runs-on: [self-hosted, linux, x64, cuda, sm61]
+    timeout-minutes: 720
+    env:
+      FREETOKEN_PASCAL_TEST_LEVEL: ${{ inputs.test_level }}
+      FREETOKEN_PASCAL_MODEL_PATH: ${{ inputs.model_path }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Record hardware inventory
+        run: |
+          mkdir -p results/hardware
+          nvidia-smi -q > results/hardware/nvidia-smi-q.txt
+          nvidia-smi topo -m > results/hardware/nvidia-topology.txt
+          lscpu > results/hardware/lscpu.txt
+          numactl -H > results/hardware/numa.txt
+      - name: Run hardware gate
+        run: bash scripts/ci/hardware_gate.sh
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sm61-${{ github.run_id }}-${{ inputs.test_level }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
