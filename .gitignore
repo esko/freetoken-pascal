@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Native/CUDA
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+*.o
+*.so
+*.a
+*.cubin
+*.ptx
+*.fatbin
+
+# Models, traces, and benchmarks
+models/
+weights/
+artifacts/
+results/private/
+*.gguf
+*.safetensors
+*.ftw
+*.trace
+*.nsys-rep
+*.qdrep
+
+# Local environment
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/

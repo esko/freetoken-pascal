@@ -1,0 +1,23 @@
+[project]
+name = "freetoken-pascal-project-tools"
+version = "0.0.0"
+requires-python = ">=3.12"
+description = "Repository tooling for the FreeToken-Pascal downstream project"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["vendor", "third_party", "upstream", "build"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+  "sm61: requires an NVIDIA Pascal sm_61 GPU",
+  "dual_p4: requires two Tesla P4 GPUs",
+  "large_model: requires external model weights",
+  "benchmark: performance measurement, not a correctness gate",
+]
