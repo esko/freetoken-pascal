@@ -1,0 +1,22 @@
+# Documentation index
+
+## Product and architecture
+
+- [Product scope](product-scope.md)
+- [System architecture](architecture.md)
+- [Hardware target](hardware-target.md)
+- [Upstream integration map](upstream-map.md)
+
+## Execution
+
+- [Implementation plan](implementation-plan.md)
+- [Orchestrator guide](orchestrator-guide.md)
+- [Backlog work breakdown](backlog.md)
+- [Testing strategy](testing-strategy.md)
+- [Benchmarking](benchmarking.md)
+- [Operations](operations.md)
+- [Release criteria](release-criteria.md)
+
+## Decisions
+
+- [Architecture decision records](adr/README.md)
