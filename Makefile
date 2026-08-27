@@ -8,10 +8,14 @@ docs-check:
 	python scripts/check_upstream_manifest.py
 
 python-check:
-	@if find src tests scripts -type f -name '*.py' -print -quit 2>/dev/null | grep -q .; then \
-		python -m compileall -q src tests scripts 2>/dev/null || true; \
-		ruff check src tests scripts; \
-		ruff format --check src tests scripts; \
+	@dirs=""; \
+	for dir in src tests scripts; do \
+		if [ -d "$$dir" ]; then dirs="$$dirs $$dir"; fi; \
+	done; \
+	if [ -n "$$dirs" ]; then \
+		python -m compileall -q $$dirs; \
+		ruff check $$dirs; \
+		ruff format --check $$dirs; \
 	else \
 		echo "No Python source directories yet"; \
 	fi
