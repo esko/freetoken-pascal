@@ -33,17 +33,20 @@ jobs:
         run: |
           python scripts/validate_docs.py
           python scripts/check_upstream_manifest.py
-      - name: Python checks when source exists
+      - name: Python checks for existing source roots
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t pyfiles < <(find src tests scripts -type f -name '*.py' 2>/dev/null || true)
-          if ((${#pyfiles[@]})); then
-            python -m compileall -q src tests scripts
-            ruff check src tests scripts
-            ruff format --check src tests scripts
+          dirs=()
+          for dir in src tests scripts; do
+            [[ -d "$dir" ]] && dirs+=("$dir")
+          done
+          if ((${#dirs[@]})); then
+            python -m compileall -q "${dirs[@]}"
+            ruff check "${dirs[@]}"
+            ruff format --check "${dirs[@]}"
           else
-            echo "No Python sources yet."
+            echo "No Python source directories yet."
           fi
       - name: Unit tests when tests exist
         shell: bash
