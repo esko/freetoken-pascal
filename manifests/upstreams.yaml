@@ -1,0 +1,75 @@
+schema_version: 1
+updated: 2026-08-28
+policy:
+  require_commit_sha: true
+  require_license: true
+  moving_refs_are_prohibited_in_release: true
+sources:
+  - id: freetoken
+    repository: https://github.com/FlashML-org/FreeToken
+    ref: TO_BE_PINNED
+    license: Apache-2.0
+    role: primary downstream base
+    imports: []
+  - id: freetoken-pascal-pr19
+    repository: https://github.com/FlashML-org/FreeToken
+    pull_request: 19
+    ref: c8e4c08e6548eb185b8d278efee5a03e26522655
+    license: Apache-2.0
+    role: sm61 compile and runtime fallbacks
+    imports: []
+  - id: freetoken-cu126-pr26
+    repository: https://github.com/FlashML-org/FreeToken
+    pull_request: 26
+    ref: fb2f80d9c52fed6417038965713d27eff3fad01b
+    license: Apache-2.0
+    role: CUDA 12.6 dependency resolution
+    imports: []
+  - id: freetoken-qwen4-pr232
+    repository: https://github.com/FlashML-org/FreeToken
+    pull_request: 232
+    ref: 856d91f049fa607111da596ba45ca78ff56c6caa
+    license: Apache-2.0
+    role: Qwen3.8 Qwen4 QSA PLE and vision source; v1 imports text only
+    imports: []
+  - id: freetoken-gguf-pr131
+    repository: https://github.com/FlashML-org/FreeToken
+    pull_request: 131
+    ref: bb432e8c473c557cdef6517abccf0c129bd8c544
+    license: Apache-2.0
+    role: generic GGUF K/I quant and qwen MoE loader
+    imports: []
+  - id: freetoken-tp-pr104
+    repository: https://github.com/FlashML-org/FreeToken
+    pull_request: 104
+    ref: 3c8b28116b027649c8394714fa70a03f862c20e4
+    license: Apache-2.0
+    role: Qwen MoE tensor-parallel patterns
+    imports: []
+  - id: llama-qwen4-pr27742
+    repository: https://github.com/ggml-org/llama.cpp
+    pull_request: 27742
+    ref: TO_BE_PINNED
+    license: MIT
+    role: GGUF and model correctness oracle
+    imports: []
+  - id: pxq-llama
+    repository: https://github.com/poisonxa16/pxq_llama.cpp
+    ref: TO_BE_PINNED
+    license: MIT
+    role: Pascal GPU and AVX2 low-bit kernel donor/reference
+    imports: []
+  - id: vllm-qwen38-pr53896
+    repository: https://github.com/vllm-project/vllm
+    pull_request: 53896
+    ref: 2a4cd640ff1a61b66124ddbaaf02a73781f7295a
+    license: Apache-2.0
+    role: Qwen3.8 model and TP oracle
+    imports: []
+  - id: vllm-ple-pr53899
+    repository: https://github.com/vllm-project/vllm
+    pull_request: 53899
+    ref: 95dc96d1d012a25ff5c3823a1e77197c8dae4654
+    license: Apache-2.0
+    role: PLE offload oracle
+    imports: []

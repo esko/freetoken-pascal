@@ -1,0 +1,29 @@
+schema_version: 1
+status: gpu-pending
+host:
+  model: Fujitsu PRIMERGY RX2530 M1
+  os: Ubuntu Server 26.04 LTS
+  cpu:
+    count: 2
+    model: Intel Xeon E5-2673 v3
+    physical_cores_total: 24
+    logical_cpus_total: 48
+    isa: [avx2]
+  numa_nodes_expected: 2
+  memory_gib_usable_approx: 123
+  model_storage:
+    kind: PCIe M.2 NVMe
+    capacity_tb: 1
+gpu:
+  expected_count: 2
+  model: NVIDIA Tesla P4
+  compute_capability: "6.1"
+  memory_gib_each: 8
+  nvlink: false
+  installed: false
+toolchain:
+  cuda: "12.6"
+  python: "3.12"
+validation:
+  actual_topology_required: true
+  self_hosted_runner_configured: false
