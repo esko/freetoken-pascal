@@ -1,12 +1,16 @@
 # FreeToken-Pascal
 
+[![CI](https://github.com/esko/freetoken-pascal/actions/workflows/ci.yml/badge.svg)](https://github.com/esko/freetoken-pascal/actions/workflows/ci.yml)
+
 FreeToken-Pascal is a downstream engineering project to run large hybrid MoE models efficiently on NVIDIA Pascal GPUs, with the first complete target being **Qwen3.8-Flash-Next on a dual Tesla P4 (`sm_61`) server**.
 
 The project keeps FreeToken's dynamic expert paging and CPU/GPU hybrid execution model, adds a reproducible CUDA 12.6 Pascal toolchain, low-bit GGUF expert banks, AVX2 CPU expert kernels, Pascal-focused GPU kernels, dual-GPU ownership, and production-grade validation.
 
 ## Status
 
-Planning and repository bootstrap. The target P4 GPUs have not arrived yet, so all hosted, CPU-only, static-analysis, converter, cache-simulation, and tiny-model work must be completed before hardware-gated tasks begin.
+The repository is implementation-ready: product scope, architecture, ADRs, agent contracts, CI and a dependency-ordered v1 backlog are in place. The first implementation item is [issue #5](https://github.com/esko/freetoken-pascal/issues/5); the complete release checklist is [epic #4](https://github.com/esko/freetoken-pascal/issues/4).
+
+The target P4 GPUs have not arrived yet. Hardware qualification issues [#9](https://github.com/esko/freetoken-pascal/issues/9) and [#29](https://github.com/esko/freetoken-pascal/issues/29) are explicitly blocked, while hosted, CPU, converter, cache-simulation, tiny-model and `sm_61` compile work proceeds.
 
 ## Product target
 
@@ -23,7 +27,17 @@ The v1 product is a text-serving runtime with:
 - long-context GDN/QSA/PLE correctness;
 - OpenAI-compatible serving, telemetry, reproducible benchmarks, and operational packaging.
 
-See [Product scope](docs/product-scope.md), [Architecture](docs/architecture.md), [Implementation plan](docs/implementation-plan.md), and [Orchestrator guide](docs/orchestrator-guide.md).
+## Documentation
+
+- [Documentation index](docs/README.md)
+- [Product scope](docs/product-scope.md)
+- [Architecture](docs/architecture.md)
+- [Implementation plan](docs/implementation-plan.md)
+- [Orchestrator guide](docs/orchestrator-guide.md)
+- [Live backlog map](docs/backlog.md)
+- [Architecture decisions](docs/adr/README.md)
+- [Testing strategy](docs/testing-strategy.md)
+- [Release criteria](docs/release-criteria.md)
 
 ## Source projects
 
