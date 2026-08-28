@@ -28,7 +28,7 @@ import mmap
 import os
 import queue
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
@@ -238,6 +238,22 @@ class HostBankPolicy:
             ):
                 raise ValueError("selected_layers must contain non-negative integer IDs")
 
+    def validate_for_config(self) -> None:
+        """Validate strategy-level requirements before a model is loaded."""
+        self._validate_configuration()
+        if self.strategy is HostBankStrategy.PINNED and self.max_pinned_bytes is None:
+            raise ValueError("pinned strategy requires finite max_pinned_bytes")
+        if self.strategy is HostBankStrategy.BOUNDED_STAGING:
+            if self.staging_bytes <= 0:
+                raise ValueError("bounded-staging requires staging_bytes > 0")
+            if self.max_staging_bytes is None:
+                raise ValueError("bounded-staging requires finite max_staging_bytes")
+            if self.staging_bytes % self.staging_slots:
+                raise ValueError(
+                    "staging_bytes must divide evenly across staging_slots "
+                    f"({self.staging_bytes} / {self.staging_slots})"
+                )
+
     def prepare(
         self,
         specs: Mapping[str, tuple[tuple[int, ...], torch.dtype]],
@@ -277,7 +293,52 @@ class HostBankPolicy:
             bytes_per_bank = _aligned_nbytes(tuple(shape), dtype)
             for layer in range(num_layers):
                 per_layer[layer] += bytes_per_bank
-        source_bytes = sum(per_layer)
+        return self._prepare_layer_bytes(per_layer)
+
+    def prepare_layer_bytes(
+        self,
+        layer_bytes: Sequence[int],
+        *,
+        source_bytes: int | None = None,
+    ) -> HostBankPlan:
+        """Prepare an exact per-layer allocation plan supplied by a checkpoint index."""
+        self._plan = None
+        # Invalidate prior telemetry before any operation that can fail.  An
+        # invalid mutated policy must not continue exposing a successful old
+        # reservation as though it were still active.
+        self.accounting = HostBankAccounting(strategy=HostBankStrategy.PAGEABLE)
+        self._validate_configuration()
+        per_layer = list(layer_bytes)
+        if not per_layer or any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in per_layer
+        ):
+            raise ValueError("layer_bytes must contain positive integers")
+        if source_bytes is None:
+            source_bytes = sum(per_layer)
+        if (
+            isinstance(source_bytes, bool)
+            or not isinstance(source_bytes, int)
+            or source_bytes < 0
+        ):
+            raise ValueError("source_bytes must be a non-negative integer")
+        return self._prepare_layer_bytes(per_layer, source_bytes=source_bytes)
+
+    def _prepare_layer_bytes(
+        self,
+        per_layer: Sequence[int],
+        *,
+        source_bytes: int | None = None,
+    ) -> HostBankPlan:
+        num_layers = len(per_layer)
+        if source_bytes is None:
+            source_bytes = sum(per_layer)
+        if self.selected_layers is not None and any(
+            layer >= num_layers for layer in self.selected_layers
+        ):
+            raise ValueError(
+                f"selected_layers {self.selected_layers} contain an ID outside [0, {num_layers})"
+            )
         selected = (
             set(range(num_layers)) if self.selected_layers is None else set(self.selected_layers)
         )

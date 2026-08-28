@@ -49,6 +49,31 @@ class ExpertBanks:
     # streamed straight to its sink instead of staying materialized here) -- set by
     # convert.py's per-format streaming gate; ``sources`` may hold released tensors.
     streamed: bool = False
+    # Explicit host-bank policy telemetry and owners are retained with the returned source
+    # tensors so a caller can report the applied policy and close resources at shutdown.
+    host_bank_accounting: dict[str, object] | None = None
+    host_bank_owners: tuple[object, ...] = field(default=(), repr=False, compare=False)
+
+    def close(self) -> None:
+        """Close retained host-bank resources, preserving the first cleanup failure."""
+        # The source views are aliases into the HostBank mappings. Drop this bundle's
+        # references before closing so mmap-backed owners can be released cleanly; the
+        # engine drops cache references before invoking this method as well.
+        object.__setattr__(self, "sources", {})
+        object.__setattr__(self, "gate_up_alpha", None)
+        object.__setattr__(self, "down_alpha", None)
+        first_error: BaseException | None = None
+        for owner in reversed(self.host_bank_owners):
+            close = getattr(owner, "close", None)
+            if close is None:
+                continue
+            try:
+                close()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
 
 _PARALLEL_CHUNK = 8 << 20  # default O_DIRECT chunk for the parallel reader
@@ -418,6 +443,7 @@ def load_expert_banks(
     decode_target: str = "gpu",
     layer_sink=None,
     layer_residency: list[str] | None = None,
+    host_bank_policy=None,
 ) -> ExpertBanks:
     """Load (or fabricate, with ``dummy=True``) the expert banks. Two paths, both returning
     the same normalized ``ExpertBanks`` and both pinning after fill:
@@ -438,17 +464,48 @@ def load_expert_banks(
 
     ``layer_residency``: per-layer ``HostResidency`` labels applied at settle time -- explicitly on the FTW fast path, ambiently (``requested_residency``) in the slow-path providers.
     Applied labels are echoed on ``ExpertBanks.layer_residency``; a loader that settles some other way leaves it ``None`` (CPU-layer decode still works on pinned banks, it just saves no pin quota).
-    """
-    from freetoken.checkpoint.ftw import is_ftw_checkpoint, load_ftw_banks
 
-    if model_path and is_ftw_checkpoint(model_path) and not dummy:
-        banks = load_ftw_banks(
-            model_path, num_layers=model_config.num_moe_layers, workers=workers, chunk=chunk,
-            layer_residency=layer_residency,
+    ``host_bank_policy`` is an explicit, fail-closed policy. This slice honors it only for
+    FTW checkpoints; unsupported provider and dummy paths are rejected before reading.
+    """
+    from freetoken.checkpoint.ftw import (
+        is_ftw_checkpoint,
+        load_ftw_banks,
+        prepare_ftw_host_bank_policy,
+    )
+
+    if host_bank_policy is not None and layer_residency is not None:
+        raise ValueError("host_bank_policy and layer_residency cannot be combined")
+    is_ftw = bool(model_path and is_ftw_checkpoint(model_path) and not dummy)
+    if host_bank_policy is not None:
+        if not is_ftw:
+            raise ValueError(
+                "explicit host_bank_policy is supported only for non-dummy FTW checkpoints"
+            )
+        # Metadata-only preflight is deliberately at this boundary so callers can prove no
+        # provider, shard read, or HostBank allocation happened before the budget decision.
+        prepare_ftw_host_bank_policy(
+            model_path,
+            num_layers=model_config.num_moe_layers,
+            policy=host_bank_policy,
         )
+
+    if is_ftw:
+        ftw_kwargs = {
+            "num_layers": model_config.num_moe_layers,
+            "workers": workers,
+            "chunk": chunk,
+        }
+        if host_bank_policy is not None:
+            ftw_kwargs["host_bank_policy"] = host_bank_policy
+        else:
+            ftw_kwargs["layer_residency"] = layer_residency
+        banks = load_ftw_banks(model_path, **ftw_kwargs)
         if banks is not None:
             logger.info_rank0(f"expert banks: FTW fast path (FTW checkpoint {model_path})")
             return banks
+        if host_bank_policy is not None:
+            raise RuntimeError("explicit host-bank policy produced no FTW expert banks")
 
     if parallel and not _PARALLEL_READER_SUPPORTED:
         logger.warning_rank0(

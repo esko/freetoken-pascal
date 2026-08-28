@@ -299,7 +299,11 @@ class OffloadMoeCache:
             f"banks {sorted(sources)} do not match the {self.quant_format!r} "
             f"schema {self.bank_schema}"
         )
-        residency = layer_residency or [HostResidency.PINNED.value] * self.num_layers
+        residency = (
+            [HostResidency.PINNED.value] * self.num_layers
+            if layer_residency is None
+            else list(layer_residency)
+        )
         assert len(residency) == self.num_layers, (len(residency), self.num_layers)
         unpinned = frozenset(
             i for i, r in enumerate(residency) if r != HostResidency.PINNED.value

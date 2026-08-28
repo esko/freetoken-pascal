@@ -320,6 +320,8 @@ class Engine:
         torch.cuda.set_stream(self.stream)
         self.dtype = config.dtype
         self.config = config  # retained for runtime cache rebuild (rebuild_runtime_cache)
+        self._expert_banks = None
+        self.host_bank_accounting = None
         # KV pool family fixed at construction from the model config: its classmethods own the
         # page-token geometry and cost arithmetic the engine needs BEFORE the pool exists
         # (num_pages sizing, --moe-cache-auto); the instance owns rebuild/validation after.
@@ -526,6 +528,11 @@ class Engine:
         # falls back to per-quant providers, and the engine wires the banks into cache.
         _guard_qwen_gguf_engine_setup(config)
         cache_factory = getattr(self.model, "make_offload_moe_cache", None)
+        if config.host_bank_policy is not None and cache_factory is not None:
+            raise NotImplementedError(
+                "explicit host-bank policy is not supported for models with a custom "
+                "make_offload_moe_cache"
+            )
         if cache_factory is not None and config.moe_cache_auto:
             raise ValueError(
                 "--moe-cache-auto is not supported for models with a custom "
@@ -561,6 +568,11 @@ class Engine:
             and config.moe_backend in ("offload", "hybrid")
             and _pin_budget_bytes() is not None
         )
+        if config.host_bank_policy is not None and split_residency:
+            raise ValueError(
+                "explicit host-bank policy cannot be combined with --moe-cpu-layers "
+                "or automatic CPU-layer residency"
+            )
         if config.moe_backend == "cpu" and not split_residency:
             # cpu mode pins every bank for the prefill double buffer; over the pin cap that dies in cudaHostRegister, so lock everything instead
             from freetoken.moe.expert_banks import bank_bytes_estimate, ftw_bank_bytes
@@ -598,16 +610,27 @@ class Engine:
                     else HostResidency.PINNED.value
                     for i in range(config.model_config.num_moe_layers)
                 ]
-            banks = load_expert_banks(
-                config.model_path,
-                config.model_config,
-                device=self.device,
-                dtype=self.dtype,
-                dummy=config.use_dummy_weight,
-                parallel=expert_parallel,
-                decode_target=("cpu" if decode_target in ("cpu", "hybrid") else "gpu"),
-                layer_residency=requested_residency,
-            )
+            load_kwargs = {
+                "device": self.device,
+                "dtype": self.dtype,
+                "dummy": config.use_dummy_weight,
+                "parallel": expert_parallel,
+                "decode_target": (
+                    "cpu" if decode_target in ("cpu", "hybrid") else "gpu"
+                ),
+                "layer_residency": requested_residency,
+            }
+            if config.host_bank_policy is not None:
+                load_kwargs["host_bank_policy"] = config.host_bank_policy
+            banks = load_expert_banks(config.model_path, config.model_config, **load_kwargs)
+            self._expert_banks = banks
+            self.host_bank_accounting = banks.host_bank_accounting
+            if config.host_bank_policy is not None:
+                if self.host_bank_accounting is None:
+                    raise RuntimeError(
+                        "explicit host-bank policy did not produce applied accounting"
+                    )
+                logger.info_rank0(f"Host bank policy applied: {self.host_bank_accounting}")
             if config.moe_cache_auto:
                 size, pages, overlap = self._resolve_auto_moe_cache_size(config, banks)
                 object.__setattr__(config, "moe_cache_size", size)
@@ -1019,6 +1042,13 @@ class Engine:
 
     def shutdown(self) -> None:
         self.graph_runner.destroy_cuda_graphs()
+        if self._expert_banks is not None:
+            try:
+                self._expert_banks.close()
+            except Exception as exc:
+                logger.error(f"Host expert-bank cleanup failed: {exc}")
+            finally:
+                self._expert_banks = None
         torch.distributed.destroy_process_group()
         destroy_distributed()
 

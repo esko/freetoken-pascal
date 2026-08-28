@@ -11,6 +11,7 @@ from freetoken.utils import cached_load_hf_config
 
 if TYPE_CHECKING:
     from freetoken.models import ModelConfig
+    from freetoken.moe.host_banks import HostBankPolicy
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,9 @@ class EngineConfig:
     # parallel reader's extra (non-reclaimable) whole-shard buffer; "serial" forces the
     # low-memory reclaimable read; "parallel" forces the fast read.
     expert_load: str = "auto"
+    # Explicit host-bank residency/budget policy. None preserves legacy loader behavior;
+    # policy construction is intentionally opt-in so an omitted flag cannot alter GPU paths.
+    host_bank_policy: "HostBankPolicy | None" = None
     # Qwen3.8 GGUF PLE page-cache policy.  Full warming is explicit because the
     # shipping table is 28.8 GB and must never be touched wholesale by default.
     ple_warm_mode: str = "cold"
@@ -83,6 +87,15 @@ class EngineConfig:
     # KV capacity in tokens; resolved into num_page_override by _adjust_config once page_size
     # is final. Mutually exclusive with num_page_override.
     num_token_override: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.host_bank_policy is None:
+            return
+        from freetoken.moe.host_banks import HostBankPolicy
+
+        if not isinstance(self.host_bank_policy, HostBankPolicy):
+            raise TypeError("host_bank_policy must be a HostBankPolicy or None")
+        self.host_bank_policy.validate_for_config()
 
     @cached_property
     def hf_config(self):

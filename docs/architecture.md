@@ -59,13 +59,13 @@ geometries into a slot pool. Source and slot offsets are bounds-checked independ
 The backing mappings are private and exposed read-only, remain unpinned, and retain the
 original artifact as their source of truth.
 
-The Issue #18 host-bank policy foundation provides an explicit pre-load gate for callers as they migrate from the legacy loader paths.
-Its default `pageable` strategy leaves every source mapping in page-backed host memory and cannot consume the CUDA pin quota.
-The explicit `pinned` strategy registers only its selected layers after fill and rejects a page-rounded source size above `max_pinned_bytes` before allocation.
+The Issue #18 host-bank policy provides an explicit pre-load gate for FTW checkpoints.
+Its omitted CLI/config value remains `None` and preserves legacy loader behavior, while an explicit `pageable` strategy leaves every source mapping in page-backed host memory and cannot consume the CUDA pin quota.
+The explicit `pinned` strategy registers only its selected layers after fill and rejects a page-rounded source size above `max_pinned_bytes` before FTW reads or allocation.
 The explicit `bounded-staging` strategy keeps all sources pageable and allocates a fixed `HostStagingRing` only within `max_staging_bytes`.
-Plans and accounting expose source bytes, requested and applied pinned/staging bytes, per-layer residency, and the selected NUMA intent.
+Plans and startup accounting expose source bytes, requested and applied pinned/staging bytes, per-layer residency, and the selected NUMA intent.
 The NUMA intent is a bounded policy hook in this slice and does not claim physical placement until target-host validation.
-Engine/CLI wiring is not part of this slice; legacy callers that do not pass a policy retain their prior residency behavior.
+The CLI and `EngineConfig` construct and validate the policy directly, and unsupported custom-provider or dummy paths reject an explicit policy instead of silently dropping it.
 
 The CPU expert boundary is model-agnostic. An immutable layout supplies layer and
 projection identities, expert count and top-k, matrix geometry, native quant type,
