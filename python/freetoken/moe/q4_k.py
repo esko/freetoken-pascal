@@ -1135,6 +1135,8 @@ class _ThreadedMixedRunner:
                 if _thread_count is None
                 else _checked_int(_thread_count, "thread_count")
             )
+            if not isinstance(accumulate, bool):
+                raise InvalidRequest("accumulate must be a bool")
             if not 1 <= selected_threads <= self.max_threads:
                 raise InvalidRequest(
                     f"thread_count={selected_threads} outside [1, {self.max_threads}]"

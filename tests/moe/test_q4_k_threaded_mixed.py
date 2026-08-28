@@ -381,6 +381,15 @@ def test_validation_and_precompute_cancellation_report_one_used_thread(
     assert cancelled.value.telemetry.thread_count == 1
 
 
+def test_threaded_rejects_non_boolean_accumulate(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_native(monkeypatch)
+    executor = Q4KExecutor(_layout(), mode="avx2", num_threads=2, required_alignment=1)
+    executor.prepare(1, 2)
+    hidden, ids, weights = _inputs(tokens=1, routes=2)
+    with pytest.raises(InvalidRequest, match="accumulate must be a bool"):
+        executor.execute(0, hidden, ids, weights, accumulate=1)
+
+
 def test_cancellation_callback_runs_only_on_owner_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_native(monkeypatch)
     executor = Q4KExecutor(_layout(), mode="avx2", num_threads=2, required_alignment=1)
