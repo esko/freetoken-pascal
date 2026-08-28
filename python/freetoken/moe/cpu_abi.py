@@ -166,14 +166,20 @@ class CpuExpertDescriptor:
             )
         if isinstance(self.quant_type, np.integer):
             object.__setattr__(self, "quant_type", int(self.quant_type))
+        derived_address = _source_address(self.source)
         if self.source_address is not None:
+            explicit_address = _checked_int(self.source_address, "source_address")
+            if derived_address is not None and explicit_address != derived_address:
+                raise InvalidRequest(
+                    f"source_address {explicit_address} disagrees with source tensor-start "
+                    f"address {derived_address}"
+                )
             object.__setattr__(
                 self,
                 "source_address",
-                _checked_int(self.source_address, "source_address"),
+                explicit_address,
             )
         else:
-            derived_address = _source_address(self.source)
             if derived_address is not None:
                 object.__setattr__(
                     self,
@@ -311,8 +317,11 @@ def _source_ranges(descriptor: CpuExpertDescriptor) -> tuple[tuple[int, int], ..
     size = getattr(source, "nbytes", None)
     if size is not None:
         size = _checked_int(size, "source nbytes")
-        if descriptor.source_offset == 0:
-            ranges.append((0, size))
+        # ``source_offset`` is an offset into the source's exposed range, even
+        # when the source is a wrapper rather than an ndarray.  Keep this
+        # independent bound instead of assuming that a descriptor's claimed
+        # tensor span is sufficient proof of the backing allocation.
+        ranges.append((0, size))
     return tuple(ranges)
 
 
@@ -373,11 +382,18 @@ class CpuExpertLayout:
     top_k: int
 
     def __post_init__(self) -> None:
+        try:
+            descriptors = tuple(self.descriptors)
+        except TypeError as error:
+            raise InvalidRequest("descriptors must be a finite iterable") from error
+        object.__setattr__(self, "descriptors", descriptors)
         object.__setattr__(self, "top_k", _checked_int(self.top_k, "top_k"))
         if self.top_k <= 0:
             raise InvalidRequest(f"top_k must be positive, got {self.top_k}")
         seen: set[tuple[int, str]] = set()
         for descriptor in self.descriptors:
+            if not isinstance(descriptor, CpuExpertDescriptor):
+                raise InvalidRequest("descriptors must contain CpuExpertDescriptor values")
             key = (descriptor.layer_id, descriptor.projection)
             if key in seen:
                 raise InvalidRequest(f"duplicate expert descriptor for {key}")
@@ -481,6 +497,26 @@ class CpuExecutionResult:
 
 
 @dataclass(frozen=True)
+class CpuMicrobenchmarkProjection:
+    """Serialized descriptor facts bound to one raw microbenchmark sample."""
+
+    projection: str
+    quant_name: str
+    quant_type: int | str
+    row_stride_bytes: int
+    expert_stride_bytes: int
+
+    def as_dict(self) -> dict[str, int | str]:
+        return {
+            "projection": self.projection,
+            "quant_name": self.quant_name,
+            "quant_type": self.quant_type,
+            "row_stride_bytes": self.row_stride_bytes,
+            "expert_stride_bytes": self.expert_stride_bytes,
+        }
+
+
+@dataclass(frozen=True)
 class CpuMicrobenchmarkSample:
     """Raw repeated execution observations for one supplied route width.
 
@@ -496,6 +532,12 @@ class CpuMicrobenchmarkSample:
     repeats: int
     elapsed_ns: tuple[int, ...]
     telemetry: tuple[CpuExecutionTelemetry, ...]
+    tokens_requested: int
+    tokens_non_padded: int
+    hidden_size: int
+    intermediate_size: int
+    workspace_bytes: int
+    projections: tuple[CpuMicrobenchmarkProjection, ...]
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -505,6 +547,12 @@ class CpuMicrobenchmarkSample:
             "repeats": self.repeats,
             "elapsed_ns": list(self.elapsed_ns),
             "telemetry": [item.as_dict() for item in self.telemetry],
+            "tokens_requested": self.tokens_requested,
+            "tokens_non_padded": self.tokens_non_padded,
+            "hidden_size": self.hidden_size,
+            "intermediate_size": self.intermediate_size,
+            "workspace_bytes": self.workspace_bytes,
+            "projections": [item.as_dict() for item in self.projections],
         }
 
 
@@ -860,6 +908,16 @@ class ReferenceCpuExpertExecutor:
                 raise InvalidRequest(
                     f"packed {descriptor.projection} expert must be a contiguous uint8 byte view"
                 )
+            if descriptor.source_address is not None:
+                actual_address = int(packed.__array_interface__["data"][0])
+                expected_address = (
+                    descriptor.source_address + expert * descriptor.expert_stride_bytes
+                )
+                if actual_address != expected_address:
+                    raise InvalidRequest(
+                        f"packed {descriptor.projection} expert address {actual_address} "
+                        f"does not match expected {expected_address}"
+                    )
             decoder = self.decoders.get(descriptor.quant_type)
             if decoder is None:
                 decoder = self.decoders.get(descriptor.quant_name)
@@ -872,6 +930,28 @@ class ReferenceCpuExpertExecutor:
             ):
                 target = decoder_workspace[: descriptor.output_dim, : descriptor.input_dim]
                 dense = decoder(packed, descriptor, out=target)
+                # A workspace-capable decoder is part of the bounded-allocation
+                # contract.  Requiring the exact target (or a view with the
+                # same pointer, shape, dtype and strides) prevents an adapter
+                # from silently allocating a replacement and leaving the
+                # caller's scratch stale.
+                try:
+                    returned = np.asarray(dense)
+                    target_address = int(target.__array_interface__["data"][0])
+                    returned_address = int(returned.__array_interface__["data"][0])
+                except (AttributeError, TypeError, ValueError, IndexError) as error:
+                    raise InvalidRequest(
+                        "workspace decoder must return the supplied target"
+                    ) from error
+                if (
+                    returned.shape != target.shape
+                    or returned.dtype != target.dtype
+                    or returned.strides != target.strides
+                    or not returned.flags.c_contiguous
+                    or returned_address != target_address
+                ):
+                    raise InvalidRequest("workspace decoder must return the supplied target")
+                dense = returned
             else:
                 dense = decoder(packed, descriptor)
         dense = np.asarray(dense, dtype=np.float32)
@@ -920,13 +1000,30 @@ class ReferenceCpuExpertExecutor:
         cancellation: Any = None,
     ) -> CpuExecutionResult:
         started = time.perf_counter_ns()
-        layer_id = _checked_int(layer_id, "layer_id")
-        if not isinstance(accumulate, bool):
-            raise InvalidRequest("accumulate must be a bool")
+        raw_layer_id = layer_id
         if not self._lock.acquire(blocking=False):
-            raise Busy("executor already has an active request")
+            error = Busy("executor already has an active request")
+            error.telemetry = CpuExecutionTelemetry(
+                backend="reference",
+                layer_id=None,
+                tokens_requested=0,
+                tokens_non_padded=0,
+                routes_requested=0,
+                routes_executed=0,
+                unique_experts=0,
+                bytes_read_packed=0,
+                elapsed_ns=time.perf_counter_ns() - started,
+                workspace_bytes=self._plan.workspace_bytes if self._plan else 0,
+                fallback_reason="busy",
+                error="Busy",
+                error_detail=str(error),
+            )
+            self._last_telemetry = error.telemetry
+            raise error
         result_output = output
+        layer_id: int | None = None
         tokens = 0
+        active_tokens = 0
         routes_requested = 0
         routes_executed = 0
         unique: set[int] = set()
@@ -934,6 +1031,9 @@ class ReferenceCpuExpertExecutor:
         source_modes: set[str] = set()
         telemetry: CpuExecutionTelemetry | None = None
         try:
+            layer_id = _checked_int(raw_layer_id, "layer_id")
+            if not isinstance(accumulate, bool):
+                raise InvalidRequest("accumulate must be a bool")
             hidden, expert_ids, routing_weights, result_output, tokens = self._validate_arrays(
                 layer_id, hidden, expert_ids, routing_weights, output
             )
@@ -949,7 +1049,7 @@ class ReferenceCpuExpertExecutor:
             up_descriptor = self.layout.descriptor(layer_id, "up")
             down_descriptor = self.layout.descriptor(layer_id, "down")
             routes_requested = active_tokens * expert_ids.shape[1]
-            routes_executed, unique = self._validate_ids(descriptor, expert_ids, active_tokens)
+            _, unique = self._validate_ids(descriptor, expert_ids, active_tokens)
             if _cancelled(cancellation):
                 raise Cancelled("CPU expert execution cancelled before compute")
 
@@ -1012,6 +1112,7 @@ class ReferenceCpuExpertExecutor:
                             out=workspace["contribution"],
                         )
                     np.add(result[token], workspace["contribution"], out=result[token])
+                    routes_executed += 1
 
             if result_output is None:
                 result_output = np.empty((tokens, self.hidden_size), dtype=self.output_dtype)
@@ -1038,7 +1139,7 @@ class ReferenceCpuExpertExecutor:
                 backend="reference",
                 layer_id=layer_id,
                 tokens_requested=tokens,
-                tokens_non_padded=0,
+                tokens_non_padded=active_tokens,
                 routes_requested=routes_requested,
                 routes_executed=routes_executed,
                 unique_experts=len(unique),
@@ -1061,7 +1162,7 @@ class ReferenceCpuExpertExecutor:
                 backend="reference",
                 layer_id=layer_id,
                 tokens_requested=tokens,
-                tokens_non_padded=0,
+                tokens_non_padded=active_tokens,
                 routes_requested=routes_requested,
                 routes_executed=routes_executed,
                 unique_experts=len(unique),
@@ -1166,6 +1267,20 @@ class ReferenceCpuExpertExecutor:
                 raise InvalidRequest("route_counts and miss_counts must have equal lengths")
 
         descriptor = self.layout.descriptor(layer_id, "gate")
+        plan = self._plan
+        assert plan is not None
+        projections = tuple(
+            CpuMicrobenchmarkProjection(
+                projection=projection,
+                quant_name=self.layout.descriptor(layer_id, projection).quant_name,
+                quant_type=self.layout.descriptor(layer_id, projection).quant_type,
+                row_stride_bytes=self.layout.descriptor(layer_id, projection).row_stride_bytes,
+                expert_stride_bytes=self.layout.descriptor(
+                    layer_id, projection
+                ).expert_stride_bytes,
+            )
+            for projection in ("gate", "up", "down")
+        )
         samples: list[CpuMicrobenchmarkSample] = []
         for route_count, expected in zip(selected_widths, expected_misses, strict=True):
             ids = expert_ids[:active_tokens, :route_count]
@@ -1198,6 +1313,12 @@ class ReferenceCpuExpertExecutor:
                     repeats=repeats,
                     elapsed_ns=tuple(observations),
                     telemetry=tuple(telemetry),
+                    tokens_requested=tokens,
+                    tokens_non_padded=active_tokens,
+                    hidden_size=self.hidden_size,
+                    intermediate_size=self.intermediate_size,
+                    workspace_bytes=plan.workspace_bytes,
+                    projections=projections,
                 )
             )
         return tuple(samples)
@@ -1213,6 +1334,7 @@ __all__ = [
     "CpuExecutionTelemetry",
     "CpuExpertDescriptor",
     "CpuExpertLayout",
+    "CpuMicrobenchmarkProjection",
     "CpuMicrobenchmarkSample",
     "ExecutionFailed",
     "ExpertSource",
