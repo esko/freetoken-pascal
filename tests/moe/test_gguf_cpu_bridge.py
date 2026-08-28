@@ -194,6 +194,17 @@ def test_bundle_thread_policy_defaults_to_safe_serial_and_reports_no_execution()
     bundle.close()
 
 
+def test_direct_bundle_constructor_keeps_legacy_serial_defaults() -> None:
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    class _Host:
+        closed = False
+
+    bundle = QwenGGUFCpuExpertBundle(_Host(), object(), object(), output_dtype=np.float32)
+    assert bundle.requested_num_threads is None
+    assert bundle.effective_num_threads == 1
+
+
 def test_bundle_zero_thread_request_is_safe_serial() -> None:
     from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
 

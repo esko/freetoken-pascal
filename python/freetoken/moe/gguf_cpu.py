@@ -217,8 +217,8 @@ class QwenGGUFCpuExpertBundle:
         executor: Q4KExecutor,
         *,
         output_dtype: Any,
-        requested_num_threads: int | None,
-        effective_num_threads: int,
+        requested_num_threads: int | None = None,
+        effective_num_threads: int = 1,
     ) -> None:
         self.host = host
         self.layout = layout
