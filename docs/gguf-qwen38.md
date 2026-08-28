@@ -125,3 +125,14 @@ over the same three fetched byte ranges. Oracle identity, packed and dense outpu
 tolerances are recorded separately from raw timing, and missing or mismatched gguf versions fail a real probe
 clearly. The report labels the partial payload as `range_evidence: measured/artifact-byte`, remains H0/no-P4
 evidence, and makes no cache, hybrid-split or full-engine performance claim.
+
+For a target-CPU timing comparison over those same ranges, use
+`benchmarks/bench_qwen38_real_expert.py` with `--offline` after populating the probe cache.
+Run `--layer 0` and `--layer 2` separately. Each run is fixed to one token, one route and
+one selected expert. The report keeps the exact commit/command, CPU ISA, BLAS environment,
+process affinity, manifest revision, range hashes, warmups, raw samples, selected kernels
+and fallbacks. It separately compares native packed execution with a dense-resident
+reference (dequantization once outside timing) and a cold dequantize-plus-dense reference
+(dequantization inside every timed repetition). It requires five or more warmups and fails
+closed on scalar fallback or any output mismatch; this is preliminary H0 target-CPU evidence,
+not a P4 or full-engine performance claim.
