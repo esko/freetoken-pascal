@@ -35,10 +35,58 @@ sources:
     ref: c8e4c08e6548eb185b8d278efee5a03e26522655
     license: Apache-2.0
     role: sm61 compile and runtime fallbacks
-    usage: planned
+    usage: imported
     responsible_issue: 10
-    notice_required: false
-    imports: []
+    notice_required: true
+    imports:
+      - source_path: python/freetoken/kernel/csrc
+        destination_path: python/freetoken/kernel/csrc
+        source_ref: c8e4c08e6548eb185b8d278efee5a03e26522655
+        method: cherry-pick
+        local_modifications:
+          - replayed from upstream commit 1b330573d763eb2de93c73be76851fd7e9da2f32
+          - retain the downstream CUDA source census while preserving the upstream architecture guard
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 10
+      - source_path: python/freetoken/kernel/triton/activation.py
+        destination_path: python/freetoken/kernel/triton/activation.py
+        source_ref: c8e4c08e6548eb185b8d278efee5a03e26522655
+        method: cherry-pick
+        local_modifications:
+          - replayed from upstream commit b9a8edbd4dec1a8be132eb568e396e49116d0238
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 10
+      - source_path: python/freetoken/moe/fused.py
+        destination_path: python/freetoken/moe/fused.py
+        source_ref: c8e4c08e6548eb185b8d278efee5a03e26522655
+        method: adapted
+        local_modifications:
+          - replayed from upstream commit 745974b01420fb0ed170718bd453a3b98f3e293e
+          - gate optional packages by compute capability and report incompatible-package fallback
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 10
+      - source_path: python/freetoken/kernel/triton/attention.py
+        destination_path: python/freetoken/kernel/triton/attention.py
+        source_ref: c8e4c08e6548eb185b8d278efee5a03e26522655
+        method: cherry-pick
+        local_modifications:
+          - replayed from upstream commit cbad20c4d82a4b9bf2b3e2c712cae1ce432c2fb5
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 10
+      - source_path: python/freetoken/engine/sample.py
+        destination_path: python/freetoken/engine/sample.py
+        source_ref: c8e4c08e6548eb185b8d278efee5a03e26522655
+        method: adapted
+        local_modifications:
+          - replayed from upstream commit c8e4c08e6548eb185b8d278efee5a03e26522655
+          - gate FlashInfer selection by compute capability
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 10
   - id: freetoken-cu126-pr26
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 26
