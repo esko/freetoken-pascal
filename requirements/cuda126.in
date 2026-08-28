@@ -2,5 +2,9 @@
 
 apache-tvm-ffi==0.1.13.post3
 cmake==4.1.0
+einops>=0.8,<1
+huggingface_hub>=1.5,<2
 ninja==1.13.0
+safetensors>=0.6,<1
 torch==2.11.0+cu126
+transformers>=5.5,<6
