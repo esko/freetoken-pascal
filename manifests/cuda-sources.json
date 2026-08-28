@@ -10,20 +10,20 @@
     {
       "path": "python/freetoken/kernel/csrc/jit/index.cu",
       "include_profile": "tvm-ffi",
-      "expects_device_code": false,
-      "note": "Template definitions are instantiated by runtime-generated wrappers."
+      "expects_device_code": true,
+      "note": "Template kernels must retain an sm_61 cubin even before runtime-generated wrappers specialize them."
     },
     {
       "path": "python/freetoken/kernel/csrc/jit/store.cu",
       "include_profile": "tvm-ffi",
-      "expects_device_code": false,
-      "note": "Template definitions are instantiated by runtime-generated wrappers."
+      "expects_device_code": true,
+      "note": "Template kernels must retain an sm_61 cubin even before runtime-generated wrappers specialize them."
     },
     {
       "path": "python/freetoken/kernel/csrc/src/pynccl.cu",
       "include_profile": "tvm-ffi",
-      "expects_device_code": false,
-      "note": "This CUDA-compiled translation unit currently contains host NCCL bindings only."
+      "expects_device_code": true,
+      "note": "The CUDA-compiled NCCL binding must retain the sm_61 device image emitted by its CUDA helpers."
     }
   ]
 }
