@@ -89,6 +89,24 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
 
+### Host expert-bank policy (Issue #18 H0/H1 slice)
+
+These flags are opt-in.
+When `--host-bank-strategy` is omitted, `EngineConfig.host_bank_policy` is `None` and the legacy expert-bank loader behavior is preserved exactly.
+The explicit policy is preflighted from FTW metadata before host-bank allocation or shard reads.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--host-bank-strategy` | omitted (`None`) | `pinned` is the only operational Engine strategy in this slice; `pageable` and `bounded-staging` are preflight-only and fail clearly if requested for serving |
+| `--host-bank-max-pinned-bytes` | unset | Required finite byte limit for `pinned`; the page-rounded complete FTW bank set must fit before loading |
+| `--host-bank-max-staging-bytes` | unset | Required finite bound for `bounded-staging` preflight |
+| `--host-bank-staging-bytes`, `--host-bank-staging-slots` | 0, 2 | Fixed staging-ring geometry for the preflight primitive; the serving transfer path is not wired in this slice |
+| `--host-bank-selected-layers` | all | Metadata accepted by the policy foundation, but Engine serving rejects selective pinned residency until per-layer routing is wired |
+| `--host-bank-numa-policy`, `--host-bank-numa-node` | `preferred`, unset | Record NUMA intent for telemetry; no physical binding or affinity claim is made |
+
+Pinned policy never honors `FREETOKEN_SKIP_BANK_PIN=1`; serving fails closed rather than reporting requested pinning as applied.
+Unsupported dummy, custom-provider, and non-FTW paths reject an explicit policy instead of silently falling back.
+
 ### API behaviour
 
 | Flag | Default | Meaning |

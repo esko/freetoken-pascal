@@ -101,6 +101,101 @@ def _elsize(dt: torch.dtype) -> int:
     return torch.empty((), dtype=dt).element_size()
 
 
+def prepare_ftw_host_bank_policy(
+    path: str,
+    *,
+    num_layers: int,
+    policy,
+):
+    """Preflight every FTW expert-bank allocation from index metadata only."""
+    if policy is None:
+        return None
+    if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers <= 0:
+        raise ValueError(f"num_layers must be a positive integer, got {num_layers}")
+    with open(os.path.join(path, INDEX_NAME), encoding="utf-8") as f:
+        index = json.load(f)
+    if index.get("format") != FORMAT_TAG:
+        raise ValueError(f"not a {FORMAT_TAG}: {path}")
+    meta_layers = index.get("expert_bank_num_layers")
+    if meta_layers is not None and meta_layers != num_layers:
+        raise RuntimeError(
+            f"{path!r} was converted with {meta_layers} expert-bank layers but the "
+            f"model config says num_moe_layers={num_layers}; the checkpoint does not "
+            "match its config"
+        )
+    entries = [entry for entry in index.get("tensors", []) if entry.get("kind") == "experts_bank"]
+    if not entries:
+        raise ValueError(f"{path!r} contains no experts_bank entries")
+    alpha_entries = [entry for entry in entries if entry["name"] in _ALPHA_NAMES]
+    row_entries = [entry for entry in entries if entry["name"] not in _ALPHA_NAMES]
+    flat_entries = []
+    per_layer_groups: dict[str, dict[int, dict]] = {}
+    for entry in row_entries:
+        match = _LAYER_ENTRY_RE.match(entry["name"])
+        if match is None:
+            flat_entries.append(entry)
+            continue
+        by_layer = per_layer_groups.setdefault(match.group("base"), {})
+        layer_id = int(match.group("layer"))
+        if layer_id in by_layer:
+            raise ValueError(
+                f"FTW bank {match.group('base')!r} has duplicate layer {layer_id}"
+            )
+        by_layer[layer_id] = entry
+    mixed = set(entry["name"] for entry in flat_entries) & per_layer_groups.keys()
+    if mixed:
+        raise ValueError(f"FTW bank(s) mix flat and per-layer row layouts: {sorted(mixed)}")
+
+    layer_bytes = [0] * num_layers
+    for entry in alpha_entries:
+        shape = tuple(entry["shape"])
+        dtype = _dtype_of(entry["dtype"])
+        expected = math.prod(shape) * _elsize(dtype)
+        if expected != int(entry["nbytes"]):
+            raise ValueError(f"FTW alpha {entry['name']!r} byte count is invalid")
+        if int(entry["global_off"]) % ALIGN:
+            raise ValueError(f"FTW alpha {entry['name']!r} offset is not {ALIGN}-byte aligned")
+        layer_bytes[0] += max(ALIGN, _align_up(expected))
+    for entry in flat_entries:
+        shape = tuple(entry["shape"])
+        if not shape:
+            raise ValueError(f"FTW expert bank {entry['name']!r} has an empty shape")
+        total, *row_shape = shape
+        if total % num_layers:
+            raise ValueError(
+                f"FTW bank {entry['name']!r} has {total} rows, not divisible by "
+                f"{num_layers} layers"
+            )
+        dtype = _dtype_of(entry["dtype"])
+        if int(entry["global_off"]) % ALIGN:
+            raise ValueError(f"FTW bank {entry['name']!r} offset is not {ALIGN}-byte aligned")
+        row_bytes = (math.prod(row_shape) if row_shape else 1) * _elsize(dtype)
+        per_layer = (total // num_layers) * row_bytes
+        if per_layer * num_layers != int(entry["nbytes"]):
+            raise ValueError(f"FTW bank {entry['name']!r} byte count does not match its shape")
+        for layer_id in range(num_layers):
+            off = int(entry["global_off"]) + layer_id * per_layer
+            layer_bytes[layer_id] += _align_up(off + per_layer) - (off // ALIGN) * ALIGN
+    for base, by_layer in per_layer_groups.items():
+        if sorted(by_layer) != list(range(num_layers)):
+            raise ValueError(
+                f"FTW bank {base!r} has per-layer entries for layers {sorted(by_layer)}, "
+                f"expected exactly range({num_layers})"
+            )
+        for layer_id in range(num_layers):
+            entry = by_layer[layer_id]
+            if int(entry["global_off"]) % ALIGN:
+                raise ValueError(
+                    f"FTW bank {base!r} layer {layer_id} offset is not {ALIGN}-byte aligned"
+                )
+            dtype = _dtype_of(entry["dtype"])
+            expected = math.prod(tuple(entry["shape"])) * _elsize(dtype)
+            if expected != int(entry["nbytes"]):
+                raise ValueError(f"FTW bank {base!r} layer {layer_id} byte count is invalid")
+            layer_bytes[layer_id] += max(ALIGN, _align_up(expected))
+    return policy.prepare_layer_bytes(layer_bytes)
+
+
 def is_ftw_checkpoint(path: str) -> bool:
     """True if ``path`` is a directory holding a FreeToken Weight (FTW) index."""
     return os.path.isfile(os.path.join(path, INDEX_NAME))
@@ -415,6 +510,7 @@ def iter_ftw_weights(path: str, *, kinds=("weight",), workers: int = 8,
 def load_ftw_banks(
     path: str, *, num_layers: int, workers: int = 8, chunk: int = _DEFAULT_CHUNK,
     layer_residency: list[str] | None = None,
+    host_bank_policy=None,
 ):
     """Reconstruct the offload :class:`ExpertBanks` from the FTW's ``experts_bank``
     entries, on the per-layer host bank contract (one ``[num_experts, ...]``
@@ -445,23 +541,70 @@ def load_ftw_banks(
     vectors, unaffected by the row split (fixed GPU residency; see
     ``cache_budget.expert_bytes_per_slot``).
     """
-    from freetoken.moe.host_banks import (
-        HostBank, HostResidency, PinPipeline, alloc_banks, born_pinned_default,
-    )
+    from freetoken.moe.host_banks import HostBank, HostResidency, PinPipeline, born_pinned_default
     from freetoken.utils.progress import byte_bar
 
-    residency = layer_residency or [HostResidency.PINNED.value] * num_layers
+    if host_bank_policy is not None and layer_residency is not None:
+        raise ValueError("host_bank_policy and layer_residency cannot be combined")
+    if host_bank_policy is not None:
+        prepare_ftw_host_bank_policy(
+            path,
+            num_layers=num_layers,
+            policy=host_bank_policy,
+        )
+        residency = list(host_bank_policy.plan.layer_residency)
+    else:
+        residency = (
+            [HostResidency.PINNED.value] * num_layers
+            if layer_residency is None
+            else list(layer_residency)
+        )
     assert len(residency) == num_layers, (len(residency), num_layers)
 
+    staging_ring = None
+    if (
+        host_bank_policy is not None
+        and host_bank_policy.strategy.value == "bounded-staging"
+    ):
+        staging_ring = host_bank_policy.staging_ring()
+
+    allocated_banks: list[HostBank] = []
+
+    def _new_bank(shape, dtype, backing):
+        try:
+            bank = HostBank(shape, dtype, backing=backing)
+        except BaseException:
+            _rollback_allocations()
+            raise
+        allocated_banks.append(bank)
+        return bank
+
+    def _rollback_allocations() -> None:
+        for bank in reversed(allocated_banks):
+            try:
+                bank.close()
+            except BaseException as exc:
+                logger.warning(f"FTW host-bank rollback failed: {exc}")
+        if staging_ring is not None:
+            try:
+                staging_ring.close()
+            except BaseException as exc:
+                logger.warning(f"FTW staging-ring rollback failed: {exc}")
+
     # PINNED layers are born-pinned (cudaHostAlloc) where that wins (see born_pinned_default); LOCKED/PAGEABLE layers stay lazy mmaps
-    born = born_pinned_default()
+    born = host_bank_policy is None and born_pinned_default()
 
     def _backing(layer_id: int) -> str:
         if born and residency[layer_id] == HostResidency.PINNED.value:
             return "cuda"
         return "mmap"
 
-    reader = FTWReader(path)
+    try:
+        reader = FTWReader(path)
+    except BaseException:
+        if staging_ring is not None:
+            staging_ring.close()
+        raise
     bank_entries = reader.entries("experts_bank")
     if not bank_entries:
         reader.close()
@@ -481,7 +624,10 @@ def load_ftw_banks(
 
     # Alphas: unchanged, one flat HostBank per entry.
     alpha_specs = {e["name"]: (tuple(e["shape"]), _dtype_of(e["dtype"])) for e in alpha_entries}
-    alpha_hb = alloc_banks(alpha_specs)
+    alpha_hb = {
+        name: _new_bank(shape, dtype, _backing(0))
+        for name, (shape, dtype) in alpha_specs.items()
+    }
 
     # Split row entries into the two layouts by name.
     flat_entries: list[dict] = []
@@ -520,7 +666,9 @@ def load_ftw_banks(
             win_off = (off // ALIGN) * ALIGN
             win_end = _align_up(off + layer_bytes)
             head_pad = off - win_off
-            bank = HostBank((win_end - win_off,), torch.uint8, backing=_backing(layer_id))
+            bank = _new_bank(
+                (win_end - win_off,), torch.uint8, _backing(layer_id)
+            )
             row_hb[name].append(bank)
             row_view_args[name].append((head_pad, layer_bytes, num_experts, tuple(row_shape), dtype))
             row_jobs.append((name, bank, win_off, win_end - win_off, layer_bytes, layer_id))
@@ -535,13 +683,16 @@ def load_ftw_banks(
         for layer_id in range(num_layers):
             e = by_layer[layer_id]
             assert e["global_off"] % ALIGN == 0, (base, layer_id, e["global_off"])  # writer invariant
-            bank = HostBank(tuple(e["shape"]), _dtype_of(e["dtype"]), backing=_backing(layer_id))
+            bank = _new_bank(
+                tuple(e["shape"]), _dtype_of(e["dtype"]), _backing(layer_id)
+            )
             row_hb[base].append(bank)
             row_view_args[base].append(None)
             layer_jobs.append((base, bank, e, layer_id))
 
     total_bytes = sum(e["nbytes"] for e in bank_entries)
     bar = byte_bar(total_bytes, "Loading expert banks (FTW)")
+    completed = False
 
     # Jobs are per (bank, layer) -- many small reads, so a wider pool; each bank pins
     # as its read completes, overlapping cudaHostRegister with the remaining reads.
@@ -552,7 +703,10 @@ def load_ftw_banks(
             def _read_alpha(e):
                 bank = alpha_hb[e["name"]]
                 reader.read_into(bank.memoryview(), e, workers=workers, chunk=chunk)
-                pins.submit(bank)
+                pins.submit(
+                    bank,
+                    residency[0] if host_bank_policy is not None else HostResidency.PINNED.value,
+                )
                 bar.update(e["nbytes"])
 
             def _read_row(job):
@@ -577,18 +731,27 @@ def load_ftw_banks(
     finally:
         bar.close()
         reader.close()
+        if host_bank_policy is not None and not completed:
+            _rollback_allocations()
 
-    sources: dict[str, list] = {}
-    for name, banks in row_hb.items():
-        views = []
-        for bank, view_args in zip(banks, row_view_args[name]):
-            if view_args is None:  # per-layer entry: already shaped [num_experts, ...]
-                views.append(bank.tensor)
-                continue
-            head_pad, layer_bytes, num_experts, row_shape, dtype = view_args
-            raw = bank.tensor[head_pad:head_pad + layer_bytes].view(dtype)
-            views.append(raw.view(num_experts, *row_shape) if row_shape else raw.view(num_experts))
-        sources[name] = views
+    try:
+        sources: dict[str, list] = {}
+        for name, banks in row_hb.items():
+            views = []
+            for bank, view_args in zip(banks, row_view_args[name]):
+                if view_args is None:  # per-layer entry: already shaped [num_experts, ...]
+                    views.append(bank.tensor)
+                    continue
+                head_pad, layer_bytes, num_experts, row_shape, dtype = view_args
+                raw = bank.tensor[head_pad:head_pad + layer_bytes].view(dtype)
+                views.append(
+                    raw.view(num_experts, *row_shape) if row_shape else raw.view(num_experts)
+                )
+            sources[name] = views
+    except BaseException:
+        if host_bank_policy is not None:
+            _rollback_allocations()
+        raise
 
     from freetoken.moe.expert_banks import ExpertBanks
 
@@ -627,14 +790,41 @@ def load_ftw_banks(
     # alphas are the small per-expert scale vectors, distinguished by their reserved names
     # (not a separate kind); everything else under experts_bank is a weight source.
     alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
-    return ExpertBanks(
-        reader.meta("quant_format"), sources, **alpha_kw,
-        layer_residency=applied,
-    )
+    owners = tuple(alpha_hb.values()) + tuple(
+        bank for banks in row_hb.values() for bank in banks
+    ) + (() if staging_ring is None else (staging_ring,))
+    if host_bank_policy is not None:
+        host_bank_policy.accounting.applied_layers = tuple(applied)
+        host_bank_policy.accounting.applied_pinned_bytes = sum(
+            bank.allocated_nbytes
+            for bank in owners
+            if getattr(bank, "residency", None) is HostResidency.PINNED
+        )
+        accounting = host_bank_policy.accounting.as_dict()
+        if host_bank_policy.strategy.value == "bounded-staging":
+            # The ring is allocated below the policy gate and retained with the source owners.
+            accounting["applied_staging_bytes"] = host_bank_policy.plan.staging_bytes
+    else:
+        accounting = None
+    retained_owners = owners if host_bank_policy is not None else ()
+    try:
+        result = ExpertBanks(
+            reader.meta("quant_format"), sources, **alpha_kw,
+            layer_residency=applied,
+            host_bank_accounting=accounting,
+            host_bank_owners=retained_owners,
+        )
+    except BaseException:
+        if host_bank_policy is not None:
+            _rollback_allocations()
+        raise
+    completed = True
+    return result
 
 
 __all__ = [
     "INDEX_NAME", "FORMAT_TAG", "FORMAT_VERSION", "ALIGN", "DEFAULT_SHARD_LIMIT",
     "is_ftw_checkpoint", "FTWWriter", "FTWReader",
     "iter_ftw_weights", "load_ftw_banks", "layer_bank_entry_name",
+    "prepare_ftw_host_bank_policy",
 ]

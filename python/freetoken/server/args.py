@@ -500,6 +500,57 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--host-bank-strategy",
+        choices=["pageable", "pinned", "bounded-staging"],
+        default=None,
+        help=(
+            "Opt in to host expert-bank residency policy. Omitted preserves legacy "
+            "loader behavior; Engine serving currently accepts pinned FTW policy only."
+        ),
+    )
+    parser.add_argument(
+        "--host-bank-max-pinned-bytes",
+        type=int,
+        default=None,
+        help="Finite byte budget for explicitly pinned host banks.",
+    )
+    parser.add_argument(
+        "--host-bank-max-staging-bytes",
+        type=int,
+        default=None,
+        help="Finite byte budget for an explicitly bounded staging ring.",
+    )
+    parser.add_argument(
+        "--host-bank-staging-bytes",
+        type=int,
+        default=0,
+        help="Total bytes in an explicitly bounded staging ring.",
+    )
+    parser.add_argument(
+        "--host-bank-staging-slots",
+        type=_positive_int,
+        default=2,
+        help="Number of slots in an explicitly bounded staging ring.",
+    )
+    parser.add_argument(
+        "--host-bank-selected-layers",
+        default=None,
+        help="Comma-separated non-negative MoE layer IDs to pin under the pinned policy.",
+    )
+    parser.add_argument(
+        "--host-bank-numa-policy",
+        choices=["preferred", "bind", "interleave"],
+        default="preferred",
+        help="NUMA policy metadata for host banks; binding is not performed in this slice.",
+    )
+    parser.add_argument(
+        "--host-bank-numa-node",
+        type=int,
+        default=None,
+        help="Optional NUMA node metadata for host banks.",
+    )
+
+    parser.add_argument(
         "--ple-warm-mode",
         default=ServerArgs.ple_warm_mode,
         choices=["cold", "page-cache-warm", "targeted", "full-model-warm"],
@@ -644,6 +695,64 @@ def parse_args(
 
     # Parse arguments
     kwargs = parser.parse_args(args).__dict__.copy()
+
+    def _parse_layers(value: str | None) -> tuple[int, ...] | None:
+        if value is None or value == "":
+            return None
+        try:
+            layers = tuple(sorted({int(item) for item in value.split(",")}))
+        except ValueError as exc:
+            parser.error("--host-bank-selected-layers must be comma-separated integers")
+            raise AssertionError from exc
+        if any(layer < 0 for layer in layers):
+            parser.error("--host-bank-selected-layers must contain non-negative integers")
+        return layers
+
+    strategy = kwargs.pop("host_bank_strategy")
+    max_pinned = kwargs.pop("host_bank_max_pinned_bytes")
+    max_staging = kwargs.pop("host_bank_max_staging_bytes")
+    staging_bytes = kwargs.pop("host_bank_staging_bytes")
+    staging_slots = kwargs.pop("host_bank_staging_slots")
+    selected_layers = _parse_layers(kwargs.pop("host_bank_selected_layers"))
+    numa_policy = kwargs.pop("host_bank_numa_policy")
+    numa_node = kwargs.pop("host_bank_numa_node")
+    auxiliary_policy_values = (
+        max_pinned is not None,
+        max_staging is not None,
+        staging_bytes != 0,
+        staging_slots != 2,
+        selected_layers is not None,
+        numa_policy != "preferred",
+        numa_node is not None,
+    )
+    if strategy is None:
+        if any(auxiliary_policy_values):
+            parser.error("host-bank policy options require --host-bank-strategy")
+    else:
+        from freetoken.moe.host_banks import HostBankPolicy
+
+        if strategy == "pinned" and max_pinned is None:
+            parser.error("--host-bank-strategy pinned requires --host-bank-max-pinned-bytes")
+        if strategy == "bounded-staging" and max_staging is None:
+            parser.error(
+                "--host-bank-strategy bounded-staging requires "
+                "--host-bank-max-staging-bytes"
+            )
+        try:
+            policy = HostBankPolicy(
+                strategy=strategy,
+                max_pinned_bytes=max_pinned,
+                max_staging_bytes=max_staging,
+                staging_bytes=staging_bytes,
+                staging_slots=staging_slots,
+                selected_layers=selected_layers,
+                numa_policy=numa_policy,
+                numa_node=numa_node,
+            )
+            policy.validate_for_config()
+        except (TypeError, ValueError) as exc:
+            parser.error(str(exc))
+        kwargs["host_bank_policy"] = policy
 
     # reject a too-long list here with a clear reason, not as a dead rank later
     if len(kwargs["gpu"]) not in (0, kwargs["tensor_parallel_size"]):
