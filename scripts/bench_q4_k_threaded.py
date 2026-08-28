@@ -147,57 +147,58 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         num_threads=max(args.thread_counts),
         required_alignment=args.required_alignment,
     )
-    executor.prepare(args.tokens, max(10, max(args.route_counts)))
-    rng = np.random.default_rng(args.seed + 10_000)
-    hidden = rng.normal(size=(args.tokens, args.hidden_size)).astype(np.float32)
-    expert_ids = rng.integers(0, args.experts, size=(args.tokens, 10), dtype=np.int32)
-    routing_weights = rng.normal(size=(args.tokens, 10)).astype(np.float32)
-    executed_threads = args.thread_counts if executor.parallel_enabled else (1,)
-    benchmark_args: dict[str, object] = {
-        "repeats": args.repeats,
-        "route_counts": args.route_counts,
-    }
-    if executor.parallel_enabled:
-        benchmark_args["thread_counts"] = executed_threads
-    samples = executor.microbenchmark(
-        layer_id, hidden, expert_ids, routing_weights, **benchmark_args
-    )
-    document = {
-        "schema_name": "qwen38-mixed-threaded-raw-samples",
-        "schema_version": 1,
-        "evidence_status": "synthetic",
-        "claim_status": "observation_only",
-        "commit": _git_commit(),
-        "command": " ".join(sys.argv),
-        "workload": {
-            "profile": args.profile,
-            "seed": args.seed,
-            "tokens": args.tokens,
-            "experts": args.experts,
-            "hidden_size": args.hidden_size,
-            "intermediate_size": args.intermediate_size,
-            "route_counts_requested": list(args.route_counts),
-            "thread_counts_requested": list(args.thread_counts),
-            "thread_counts_executed": list(executed_threads),
+    try:
+        executor.prepare(args.tokens, max(10, max(args.route_counts)))
+        rng = np.random.default_rng(args.seed + 10_000)
+        hidden = rng.normal(size=(args.tokens, args.hidden_size)).astype(np.float32)
+        expert_ids = rng.integers(0, args.experts, size=(args.tokens, 10), dtype=np.int32)
+        routing_weights = rng.normal(size=(args.tokens, 10)).astype(np.float32)
+        executed_threads = args.thread_counts if executor.parallel_enabled else (1,)
+        benchmark_args: dict[str, object] = {
             "repeats": args.repeats,
-        },
-        "host": {
-            "platform": platform.platform(),
-            "machine": platform.machine(),
-            "processor": platform.processor(),
-        },
-        "selected_behavior": {
-            "parallel_enabled": executor.parallel_enabled,
-            "backend": executor.backend,
-            "kernel_census": list(executor._kernel_census(layer_id)),
-            "required_alignment": args.required_alignment,
-        },
-        "raw_samples": [
-            {**sample.as_dict(), "thread_count": sample.thread_count or 1} for sample in samples
-        ],
-    }
-    executor.close()
-    return document
+            "route_counts": args.route_counts,
+        }
+        if executor.parallel_enabled:
+            benchmark_args["thread_counts"] = executed_threads
+        samples = executor.microbenchmark(
+            layer_id, hidden, expert_ids, routing_weights, **benchmark_args
+        )
+        return {
+            "schema_name": "qwen38-mixed-threaded-raw-samples",
+            "schema_version": 1,
+            "evidence_status": "synthetic",
+            "claim_status": "observation_only",
+            "commit": _git_commit(),
+            "command": " ".join(sys.argv),
+            "workload": {
+                "profile": args.profile,
+                "seed": args.seed,
+                "tokens": args.tokens,
+                "experts": args.experts,
+                "hidden_size": args.hidden_size,
+                "intermediate_size": args.intermediate_size,
+                "route_counts_requested": list(args.route_counts),
+                "thread_counts_requested": list(args.thread_counts),
+                "thread_counts_executed": list(executed_threads),
+                "repeats": args.repeats,
+            },
+            "host": {
+                "platform": platform.platform(),
+                "machine": platform.machine(),
+                "processor": platform.processor(),
+            },
+            "selected_behavior": {
+                "parallel_enabled": executor.parallel_enabled,
+                "backend": executor.backend,
+                "kernel_census": list(executor._kernel_census(layer_id)),
+                "required_alignment": args.required_alignment,
+            },
+            "raw_samples": [
+                {**sample.as_dict(), "thread_count": sample.thread_count or 1} for sample in samples
+            ],
+        }
+    finally:
+        executor.close()
 
 
 def _parser() -> argparse.ArgumentParser:

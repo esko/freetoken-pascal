@@ -1025,6 +1025,26 @@ class _ThreadedMixedRunner:
         self._last_telemetry = telemetry
         return error
 
+    def _invalidate_prepared_state(self) -> None:
+        """Drop every owner and worker workspace after a failed re-prepare."""
+        # Owner and workers must never advertise different plans.  Restoring a
+        # previous plan would require restoring every private allocation as well,
+        # so failed preparation takes the safer fail-closed path.
+        for executor in (self.owner._reference, *self._workers):
+            executor._plan = None
+            executor._workspace = None
+            executor._last_telemetry = None
+        self._plan = None
+        self._route_ids = None
+        self._route_weights = None
+        self._outputs = None
+        self._merged = None
+        self._results = None
+        self._result_cursor = 0
+        self._thread_workspace_bytes = 0
+        self._worker_workspace_bytes = 0
+        self._last_telemetry = None
+
     def prepare(self, max_tokens: int, max_routes: int):
         started = time.perf_counter_ns()
         if self._closed:
@@ -1062,6 +1082,9 @@ class _ThreadedMixedRunner:
                 + sum(result.nbytes for result in self._results)
             )
             return plan
+        except BaseException:
+            self._invalidate_prepared_state()
+            raise
         finally:
             self._lock.release()
 

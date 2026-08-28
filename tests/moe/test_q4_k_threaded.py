@@ -9,7 +9,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 from freetoken.moe import q4_k
-from freetoken.moe.cpu_abi import Cancelled, CpuExpertLayout, InvalidRequest
+from freetoken.moe.cpu_abi import (
+    Cancelled,
+    CpuExpertLayout,
+    InvalidRequest,
+    WorkspaceNotPrepared,
+)
 from freetoken.moe.q4_k import (
     Q4KExecutor,
     partition_q4_k_routes,
@@ -253,6 +258,37 @@ def test_threaded_q4_k_owned_pool_lifecycle_is_idempotent(
         executor.execute(0, hidden[:1], expert_ids[:, :1], weights[:, :1])
 
 
+def test_threaded_q4_k_failed_reprepare_invalidates_every_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_avx2(monkeypatch)
+    layout = _threaded_layout()
+    executor = Q4KExecutor(layout, mode="avx2", num_threads=4, required_alignment=1)
+    executor.prepare(max_tokens=1, max_routes=4)
+    runner = executor._threaded_runner
+    assert runner is not None
+    failing_worker = runner._workers[1]
+    original_prepare = failing_worker.prepare
+
+    def fail_prepare(max_tokens: int, max_routes: int):
+        if max_routes == 2:
+            raise RuntimeError("synthetic worker prepare failure")
+        return original_prepare(max_tokens, max_routes)
+
+    monkeypatch.setattr(failing_worker, "prepare", fail_prepare)
+    with pytest.raises(RuntimeError, match="synthetic worker prepare failure"):
+        executor.prepare(max_tokens=1, max_routes=2)
+
+    assert runner._plan is None
+    assert runner._route_ids is None
+    assert runner._results is None
+    assert executor._reference._plan is None
+    assert all(worker._plan is None for worker in runner._workers)
+    hidden, expert_ids, weights = _threaded_inputs()
+    with pytest.raises(WorkspaceNotPrepared, match="prepare"):
+        executor.execute(0, hidden[:1], expert_ids[:1], weights[:1])
+
+
 def test_threaded_q4_k_microbenchmark_records_raw_route_and_thread_sweeps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -363,6 +399,37 @@ def test_q4_k_benchmark_harness_records_serial_fallback_threads(
         (1, 1),
         (2, 1),
     }
+
+
+def test_q4_k_benchmark_harness_closes_executor_when_prepare_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    benchmark = _benchmark_module()
+    real_executor = benchmark.Q4KExecutor
+    created: list[object] = []
+
+    class TrackingExecutor:
+        def __init__(self, *args, **kwargs):
+            self.inner = real_executor(*args, **kwargs)
+            self.closed = False
+            created.append(self)
+
+        def prepare(self, *args, **kwargs):
+            raise RuntimeError("synthetic prepare failure")
+
+        def close(self):
+            self.closed = True
+            self.inner.close()
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    monkeypatch.setattr(benchmark, "Q4KExecutor", TrackingExecutor)
+    args = benchmark._parser().parse_args(["--mode", "scalar", "--experts", "2", "--tokens", "1"])
+    with pytest.raises(RuntimeError, match="synthetic prepare failure"):
+        benchmark.collect(args)
+    assert len(created) == 1
+    assert created[0].closed
 
 
 def test_q4_k_benchmark_harness_records_parallel_thread_sweep(
