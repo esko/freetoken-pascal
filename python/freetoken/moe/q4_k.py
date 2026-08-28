@@ -1421,8 +1421,9 @@ class _ThreadedMixedRunner:
         self, requests: Iterable[CpuExecutionRequest]
     ) -> tuple[CpuExecutionResult, ...]:
         """Execute grouped requests serially at the public request boundary."""
-        return tuple(
-            self.execute(
+        results: list[CpuExecutionResult] = []
+        for request in requests:
+            result = self.execute(
                 request.layer_id,
                 request.hidden,
                 request.expert_ids,
@@ -1432,8 +1433,13 @@ class _ThreadedMixedRunner:
                 accumulate=request.accumulate,
                 cancellation=request.cancellation,
             )
-            for request in requests
-        )
+            if request.output is None:
+                # The standalone API deliberately uses a bounded prepared ring;
+                # grouped callers may supply an unbounded iterable, so detach
+                # each omitted-output result before the next request can reuse it.
+                result = CpuExecutionResult(result.output.copy(), result.telemetry)
+            results.append(result)
+        return tuple(results)
 
     def microbenchmark(
         self,
