@@ -27,7 +27,7 @@ jobs:
           docker run --rm \
             --volume "${PWD}/build/toolchain-cpu:/workspace/freetoken-pascal/build/toolchain-cpu" \
             freetoken-pascal:cpu \
-            bash -lc 'make docs-check python-check hosted-tests && python scripts/write_toolchain_inventory.py --output build/toolchain-cpu/inventory.json'
+            bash -lc 'python scripts/validate_docs.py && python scripts/check_upstream_manifest.py && python scripts/check_toolchain.py && python -m compileall -q python tests scripts && ruff check scripts && ruff format --check scripts && PYTHONPATH=python pytest -q tests/project tests/daemon && python scripts/write_toolchain_inventory.py --output build/toolchain-cpu/inventory.json'
       - name: Upload CPU environment evidence
         uses: actions/upload-artifact@v4
         with:
@@ -48,7 +48,7 @@ jobs:
           docker run --rm \
             --volume "${PWD}/build/toolchain:/workspace/freetoken-pascal/build/toolchain" \
             freetoken-pascal:cuda126 \
-            bash -lc 'make docs-check python-check hosted-tests && scripts/ci/verify_cuda126.sh'
+            bash -lc 'python scripts/validate_docs.py && python scripts/check_upstream_manifest.py && python scripts/check_toolchain.py && python -m compileall -q python tests scripts && ruff check scripts && ruff format --check scripts && PYTHONPATH=python pytest -q tests/project tests/daemon && scripts/ci/verify_cuda126.sh'
       - name: Upload toolchain evidence
         uses: actions/upload-artifact@v4
         with:

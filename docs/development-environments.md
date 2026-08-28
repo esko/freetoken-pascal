@@ -48,7 +48,10 @@ Run the same H0 checks CI uses:
 
 ```bash
 docker run --rm freetoken-pascal:cpu \
-  bash -lc 'make docs-check python-check hosted-tests'
+  bash -lc 'python scripts/validate_docs.py && python scripts/check_upstream_manifest.py && \
+  python scripts/check_toolchain.py && python -m compileall -q python tests scripts && \
+  ruff check scripts && ruff format --check scripts && \
+  PYTHONPATH=python pytest -q tests/project tests/daemon'
 ```
 
 The CPU image installs `requirements/cpu.lock` with hash verification. It does not install Torch
