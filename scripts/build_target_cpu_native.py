@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INCLUDE_DIR = ROOT / "python/freetoken/moe"
 BASELINE_FLAGS = ("-mno-avx", "-mno-avx2", "-mno-fma")
 AVX2_FLAGS = ("-mavx2", "-mfma")
-COMMON_FLAGS = ("-std=c++17", "-O2", "-fPIC")
+COMMON_FLAGS = ("-std=c++17", "-O3", "-fPIC")
 
 
 def _sha256(path: Path) -> str:
