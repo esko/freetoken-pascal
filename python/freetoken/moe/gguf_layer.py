@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+from freetoken.moe.cpu_abi import CpuAbiError, CpuExecutionTelemetry
+from freetoken.moe.gguf_cpu import (
+    QwenGGUFCpuExpertBundle,
+    UnsupportedGGUFCpuConfiguration,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -44,7 +48,7 @@ class QwenGGUFCpuMoELayer:
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        renormalize: bool = True,
+        renormalize: bool = False,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
     ) -> None:
@@ -67,6 +71,8 @@ class QwenGGUFCpuMoELayer:
         self.renormalize = renormalize
         self.activation = activation
         self.apply_router_weight_on_input = apply_router_weight_on_input
+        self._last_telemetry: CpuExecutionTelemetry | None = None
+        self._last_error_telemetry: CpuExecutionTelemetry | None = None
 
         info = self._tp_info()
         if info is not None and info.size != 1:
@@ -170,13 +176,51 @@ class QwenGGUFCpuMoELayer:
 
     @property
     def last_telemetry(self):
-        return self._bundle.last_telemetry
+        return self._last_telemetry
+
+    @property
+    def last_error_telemetry(self) -> CpuExecutionTelemetry | None:
+        """Telemetry for the most recent rejected or failed adapter request."""
+        return self._last_error_telemetry
 
     @property
     def host_weight_telemetry(self) -> dict[str, object]:
-        return self._bundle.host_weight_telemetry()
+        telemetry = self._bundle.host_weight_telemetry()
+        execution = self._last_telemetry
+        error = self._last_error_telemetry
+        telemetry["actual_thread_count"] = None if execution is None else execution.thread_count
+        telemetry["threading_fallback_reason"] = (
+            None if execution is None else self._bundle.threading_fallback_reason
+        )
+        telemetry["fallback_reason"] = None if execution is None else execution.fallback_reason
+        telemetry["execution_telemetry"] = None if execution is None else execution.as_dict()
+        telemetry["adapter_error_telemetry"] = None if error is None else error.as_dict()
+        return telemetry
 
     def forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor | None = None,
+        debug_observer: DebugObserver | None = None,
+        *,
+        num_token_non_padded: int | np.integer | None = None,
+        phase: str = "decode",
+        group_size: int = 1,
+    ) -> torch.Tensor:
+        self._begin_request()
+        try:
+            self._validate_request_mode(phase, group_size)
+            return self._forward_impl(
+                hidden_states,
+                router_logits,
+                debug_observer,
+                num_token_non_padded=num_token_non_padded,
+            )
+        except Exception as error:
+            self._record_error(error, hidden_states=hidden_states)
+            raise
+
+    def _forward_impl(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor | None = None,
@@ -230,6 +274,35 @@ class QwenGGUFCpuMoELayer:
         )
 
     def routed_forward(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        *,
+        num_token_non_padded: int | np.integer | None = None,
+        debug_observer: DebugObserver | None = None,
+        phase: str = "decode",
+        group_size: int = 1,
+    ) -> torch.Tensor:
+        self._begin_request()
+        try:
+            self._validate_request_mode(phase, group_size)
+            return self._routed_forward_impl(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                num_token_non_padded=num_token_non_padded,
+                debug_observer=debug_observer,
+            )
+        except Exception as error:
+            self._record_error(
+                error,
+                hidden_states=hidden_states,
+                topk_ids=topk_ids,
+            )
+            raise
+
+    def _routed_forward_impl(
         self,
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
@@ -324,7 +397,72 @@ class QwenGGUFCpuMoELayer:
                 "Qwen GGUF CPU bundle changed the result dtype: "
                 f"got {result.dtype}, expected {hidden_states.dtype}"
             )
+        self._last_telemetry = self._bundle.last_telemetry
+        self._last_error_telemetry = None
         return result
+
+    def _begin_request(self) -> None:
+        """Discard telemetry from an earlier request before validating this one."""
+        self._last_telemetry = None
+        self._last_error_telemetry = None
+
+    @staticmethod
+    def _validate_request_mode(phase: str, group_size: int) -> None:
+        if phase != "decode":
+            raise UnsupportedGGUFCpuConfiguration(
+                f"Qwen GGUF CPU MoE layer is decode-only; phase={phase!r} is unsupported"
+            )
+        if isinstance(group_size, bool) or not isinstance(group_size, Integral):
+            raise UnsupportedGGUFCpuConfiguration(
+                f"Qwen GGUF CPU MoE layer requires group_size=1, got {group_size!r}"
+            )
+        if int(group_size) != 1:
+            raise UnsupportedGGUFCpuConfiguration(
+                "Qwen GGUF CPU MoE layer does not support grouped execution; "
+                f"group_size={group_size}"
+            )
+
+    def _record_error(
+        self,
+        error: Exception,
+        *,
+        hidden_states: Any,
+        topk_ids: Any = None,
+    ) -> None:
+        telemetry = error.telemetry if isinstance(error, CpuAbiError) else None
+        if telemetry is None:
+            token_count = self._safe_shape_dim(hidden_states, 0)
+            route_width = self._safe_shape_dim(topk_ids, 1)
+            try:
+                kernel_census = tuple(self._bundle.kernel_census)
+            except Exception:
+                kernel_census = ()
+            telemetry = CpuExecutionTelemetry(
+                backend="qwen_gguf_cpu_layer",
+                layer_id=self.layer_id,
+                tokens_requested=token_count,
+                tokens_non_padded=0,
+                routes_requested=token_count * route_width,
+                routes_executed=0,
+                unique_experts=0,
+                bytes_read_packed=0,
+                elapsed_ns=0,
+                workspace_bytes=0,
+                fallback_reason="adapter_validation",
+                error=type(error).__name__,
+                error_detail=str(error),
+                kernel_census=kernel_census,
+                thread_count=1,
+            )
+        self._last_telemetry = None
+        self._last_error_telemetry = telemetry
+
+    @staticmethod
+    def _safe_shape_dim(value: Any, axis: int) -> int:
+        try:
+            return max(0, int(value.shape[axis]))
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _torch():

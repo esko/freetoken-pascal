@@ -128,8 +128,9 @@ It rejects GPU, hybrid, offload, nonzero-cache, prefill, grouped, and closed-map
 The CUDA `Engine` registration seam fails closed for Qwen GGUF rather than constructing the homogeneous `OffloadMoeCache`.
 The standalone `QwenGGUFCpuMoELayer` adapts one layer's bundle to the existing routed-expert
 interface for H0 CPU decode probes. It accepts explicit CPU router logits or a precomputed
-CPU route, preserves full-softmax and observer semantics, and returns the bundle's CPU
-result without creating a cache. It is an explicit test/reference seam only: it is not
+CPU route, preserves full-softmax and observer semantics (Qwen's default is no selected-
+route renormalization), and returns the bundle's CPU result without creating a cache.
+The adapter requires an explicit decode phase and a single request group. It is an explicit test/reference seam only: it is not
 attached during Qwen model construction, does not transfer CUDA tensors, and does not
 enable the serving Engine. End-to-end model-layer registration remains blocked until
 `OffloadMoELayer` accepts this per-projection mapped-bank ABI without allocating GPU slots.

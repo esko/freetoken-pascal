@@ -2,19 +2,138 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pytest
-from freetoken.gguf_host import GGUFExpertLayout, QwenGGUFHostWeights, QwenHostLayout
-
-from tests.moe.test_gguf_cpu_bridge import (
-    Q4_K,
-    Q5_1,
-    _Bank,
-    _Banks,
-    _descriptor,
-    _geometry_host,
-    _Ple,
+from freetoken.gguf_host import (
+    ExpertBankDescriptor,
+    GGUFExpertLayout,
+    QwenGGUFHostWeights,
+    QwenHostLayout,
 )
+
+Q4_K = 12
+Q5_K = 13
+Q5_1 = 7
+Q8_0 = 8
+
+
+@dataclass
+class _Mapping:
+    length: int
+    source_address: int
+
+
+class _Bank:
+    def __init__(self, descriptor: ExpertBankDescriptor, values: np.ndarray) -> None:
+        self.descriptor = descriptor
+        self.values = values
+        self.mapping = _Mapping(
+            length=int(values.nbytes),
+            source_address=int(values.__array_interface__["data"][0]),
+        )
+
+    def expert_packed(self, expert: int) -> np.ndarray:
+        result = self.values[expert]
+        result.flags.writeable = False
+        return result
+
+    def close(self) -> None:
+        self.values = np.empty((0, 0), dtype=np.uint8)
+
+
+class _Banks:
+    def __init__(self, layout: GGUFExpertLayout, banks: dict[tuple[int, str], _Bank]) -> None:
+        self.layout = layout
+        self._banks = banks
+
+    def bank(self, layer: int, projection: str) -> _Bank:
+        return self._banks[(layer, projection)]
+
+    def close(self) -> None:
+        for bank in self._banks.values():
+            bank.close()
+
+
+class _Ple:
+    tensor_bytes = 0
+
+    def close(self) -> None:
+        return None
+
+
+def _descriptor(
+    layer: int,
+    projection: str,
+    quant_type: int,
+    quant_name: str,
+    *,
+    input_dim: int = 256,
+    output_dim: int = 256,
+    experts: int = 2,
+) -> tuple[ExpertBankDescriptor, np.ndarray]:
+    block_bytes = {"Q4_K": 144, "Q5_K": 176, "Q5_1": 24, "Q8_0": 34}[quant_name]
+    block_elements = 256 if quant_name in {"Q4_K", "Q5_K"} else 32
+    row_bytes = input_dim // block_elements * block_bytes
+    values = np.ascontiguousarray(
+        np.arange(experts * output_dim * row_bytes, dtype=np.uint8).reshape(
+            experts, output_dim, row_bytes
+        )
+    )
+    descriptor = ExpertBankDescriptor(
+        layer=layer,
+        projection=projection,
+        tensor_name=f"blk.{layer}.ffn_{projection}_exps.weight",
+        quant_type=quant_type,
+        quant_name=quant_name,
+        experts=experts,
+        output_dim=output_dim,
+        input_dim=input_dim,
+        row_bytes=row_bytes,
+        bytes_per_expert=output_dim * row_bytes,
+        tensor_bytes=int(values.nbytes),
+        shard_index=0,
+        shard_path="synthetic.gguf",
+        data_offset=0,
+    )
+    return descriptor, values
+
+
+def _geometry_host(*, promoted: bool, experts: int = 2) -> QwenGGUFHostWeights:
+    descriptors = []
+    banks = {}
+    gate_up = (Q5_K, "Q5_K") if promoted else (Q4_K, "Q4_K")
+    down = (8, "Q8_0") if promoted else (Q5_1, "Q5_1")
+    for projection, (quant_type, quant_name) in (
+        ("gate", gate_up),
+        ("up", gate_up),
+        ("down", down),
+    ):
+        descriptor, values = _descriptor(
+            0,
+            projection,
+            quant_type,
+            quant_name,
+            input_dim=2560 if projection != "down" else 640,
+            output_dim=640 if projection != "down" else 2560,
+            experts=experts,
+        )
+        descriptors.append(descriptor)
+        banks[(0, projection)] = _Bank(descriptor, values)
+    expert_layout = GGUFExpertLayout(
+        descriptors=tuple(descriptors),
+        slot_pools=(),
+        num_layers=1,
+        num_experts=experts,
+    )
+    layout = QwenHostLayout(
+        experts=expert_layout,
+        ple=_Ple(),
+        total_tensor_bytes=sum(item.tensor_bytes for item in descriptors),
+        shard_paths=("synthetic.gguf",),
+    )
+    return QwenGGUFHostWeights(layout, _Banks(expert_layout, banks), _Ple())
 
 
 def _fast_primitives(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,7 +229,6 @@ def _adapter(bundle):
         top_k=10,
         hidden_size=2560,
         intermediate_size=640,
-        renormalize=True,
         activation="silu",
         apply_router_weight_on_input=False,
     )
@@ -208,6 +326,41 @@ def test_forward_uses_exact_cpu_softmax_topk_and_preserves_semantic_observer(bun
         router_bundle.close()
 
 
+def test_forward_defaults_to_qwen_unrenormalized_router_weights() -> None:
+    torch = pytest.importorskip("torch")
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+    from freetoken.moe.gguf_layer import QwenGGUFCpuMoELayer
+
+    router_bundle = QwenGGUFCpuExpertBundle.from_host(
+        _router_host(),
+        top_k=2,
+        mode="avx2",
+        max_tokens=1,
+        max_routes=2,
+        required_alignment=1,
+    )
+    layer = QwenGGUFCpuMoELayer(
+        router_bundle,
+        layer_id=0,
+        num_experts=10,
+        top_k=2,
+        hidden_size=256,
+        intermediate_size=256,
+        activation="silu",
+        apply_router_weight_on_input=False,
+    )
+    try:
+        assert layer.renormalize is False
+        hidden = torch.ones((1, 256), dtype=torch.float32)
+        logits = torch.arange(10, dtype=torch.float32).reshape(1, 10)
+        actual = layer.forward(hidden, router_logits=logits)
+        weights, ids = torch.topk(torch.softmax(logits, dim=-1), 2, dim=-1)
+        expected = router_bundle.decode(0, hidden, weights, ids.to(torch.int32))
+        torch.testing.assert_close(actual, expected)
+    finally:
+        router_bundle.close()
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -264,6 +417,20 @@ def test_adapter_rejects_invalid_routes_and_runtime_modes(bundle) -> None:
             torch.zeros((1, 1), dtype=torch.int32),
             num_token_non_padded=2,
         )
+    with pytest.raises(ValueError, match="decode-only"):
+        layer.routed_forward(
+            hidden,
+            weights,
+            torch.zeros((1, 1), dtype=torch.int32),
+            phase="prefill",
+        )
+    with pytest.raises(ValueError, match="grouped"):
+        layer.routed_forward(
+            hidden,
+            weights,
+            torch.zeros((1, 1), dtype=torch.int32),
+            group_size=2,
+        )
     with pytest.raises(ValueError, match="CPU"):
         layer.routed_forward(
             hidden,
@@ -288,6 +455,16 @@ def test_adapter_exposes_bundle_telemetry_and_fails_after_bundle_close(bundle) -
     )
     assert layer.last_telemetry is bundle.last_telemetry
     assert layer.host_weight_telemetry["execution_telemetry"] is not None
+    with pytest.raises(ValueError, match="expert id"):
+        layer.routed_forward(
+            torch.ones((1, 2560), dtype=torch.float32),
+            torch.ones((1, 1), dtype=torch.float32),
+            torch.tensor([[2]], dtype=torch.int32),
+        )
+    assert layer.last_telemetry is None
+    assert layer.last_error_telemetry is not None
+    assert layer.host_weight_telemetry["execution_telemetry"] is None
+    assert layer.host_weight_telemetry["adapter_error_telemetry"]["error"] == "ValueError"
     bundle.close()
     with pytest.raises(RuntimeError, match="closed"):
         layer.routed_forward(

@@ -145,7 +145,9 @@ The H0 routed-layer adapter is available to CPU correctness probes through
 `freetoken.moe.QwenGGUFCpuMoELayer`. Construct it with an already-open
 `QwenGGUFCpuExpertBundle` and the exact layer geometry, then use `routed_forward` for a
 precomputed route or `forward` with CPU router logits. The adapter preserves the complete
-softmax denominator, accepts route widths up to the configured Qwen top-k, and forwards
-padding and bundle telemetry. Its caller owns the shared bundle and must close it after
-all layer adapters finish. It rejects CUDA, prefill, grouped, nonzero-cache and TP>1
-execution; it is not wired into Qwen model construction or the serving Engine.
+softmax denominator, defaults to the Qwen unrenormalized selected probabilities, accepts
+route widths up to the configured Qwen top-k, and forwards padding and bundle telemetry.
+The optional `phase` and `group_size` keywords must be `decode` and `1`. Its caller owns
+the shared bundle and must close it after all layer adapters finish. It rejects CUDA,
+prefill, grouped, nonzero-cache and TP>1 execution; it is not wired into Qwen model
+construction or the serving Engine.
