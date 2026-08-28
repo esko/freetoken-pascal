@@ -20,9 +20,10 @@ Issue #16 pins FreeToken commit
 `6f6c8640145eeca9df013e383ff51bf6bbff22f9` as the Q4_K W4A16 arithmetic oracle.
 The pinned llama.cpp `eaf93765572e794b8e3754fe45adbe12d381e997` and PXQ
 `066a37e9540a1ca21375fdeb377836fe69ecb729` implementations confirm the packed
-Q4_K layout, but their AVX2 vector-dot paths require Q8_K activations and are not copied
-into this backend. The downstream AVX2 W4A16 implementation is original code; these
-sources remain reference-only and therefore add no NOTICE entry.
+Q4_K, Q5_K, Q5_1 and Q8_0 layouts. Their AVX2 vector-dot paths require Q8_K
+activations and are not copied into this backend. The downstream AVX2 W4A16
+implementation and the Torch-free mixed-format reference decoders are original code;
+these sources remain reference-only and therefore add no NOTICE entry.
 
 ## Primary upstreams
 

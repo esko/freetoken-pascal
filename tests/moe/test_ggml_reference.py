@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from freetoken.moe.ggml_reference import (
     Q5_1_BLOCK_BYTES,
     Q5_1_BLOCK_ELEMENTS,
@@ -126,4 +125,3 @@ def test_reference_decoders_fail_closed_on_wrong_block_views(decoder, block_byte
         decoder(np.zeros(block_bytes - 1, dtype=np.uint8))
     with pytest.raises((TypeError, ValueError)):
         decoder(np.zeros(block_bytes, dtype=np.float32))
-

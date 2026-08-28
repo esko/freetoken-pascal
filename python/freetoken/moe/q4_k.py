@@ -38,6 +38,7 @@ from freetoken.moe.cpu_abi import (
     UnsupportedQuantType,
     UnsupportedShape,
 )
+from freetoken.moe.ggml_reference import BUILTIN_REFERENCE_DECODERS
 
 Q4K_BLOCK_ELEMENTS = 256
 Q4K_BLOCK_BYTES = 144
@@ -535,6 +536,8 @@ class Q4KExecutor:
             if _is_q4_k_descriptor(descriptor) and _has_q4_k_geometry(descriptor)
         )
         decoders = dict(reference_decoders or {})
+        for quant_key, decoder in BUILTIN_REFERENCE_DECODERS.items():
+            decoders.setdefault(quant_key, decoder)
         for descriptor in layout.descriptors:
             if _is_q4_k_descriptor(descriptor):
                 decoders[descriptor.quant_type] = self._decode_rows
