@@ -41,7 +41,7 @@ def _nonfinite_paths(value: Any, path: str = "$") -> list[str]:
 
 
 def _finite_number(value: Any) -> bool:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         return False
     try:
         return math.isfinite(value)
