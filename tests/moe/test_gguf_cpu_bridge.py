@@ -545,6 +545,7 @@ def test_config_registration_guard_is_fail_closed() -> None:
         device = "cpu"
 
     assert qwen_gguf_cpu_bridge_supported(Config())
+    assert qwen_gguf_cpu_bridge_supported(Config(), num_threads=0)
     Config.moe_backend = "hybrid"
     assert not qwen_gguf_cpu_bridge_supported(Config())
     Config.moe_backend = "cpu"
