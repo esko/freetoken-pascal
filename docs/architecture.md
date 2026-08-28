@@ -59,6 +59,27 @@ geometries into a slot pool. Source and slot offsets are bounds-checked independ
 The backing mappings are private and exposed read-only, remain unpinned, and retain the
 original artifact as their source of truth.
 
+The CPU expert boundary is model-agnostic. An immutable layout supplies layer and
+projection identities, expert count and top-k, matrix geometry, native quant type,
+row/expert strides, and the bounded mapped source span. Callers prepare a fixed-size
+workspace before execution, then submit routed IDs and weights either as one request or
+as an explicitly ordered group. The executor returns a partial hidden-state contribution
+that may be accumulated by the caller. Invalid IDs, unsupported layouts, cancellation,
+and workspace overflow fail closed and publish telemetry without committing partial
+output.
+
+`Busy` is a rejection before request ownership, not a failed execution. It carries
+telemetry but does not mutate the supplied output buffer because that buffer may alias
+the request already executing. Callers must treat output as unreadable unless execution
+returns successfully.
+
+The dense/dequantize executor is the permanent CPU correctness oracle. Its packed
+decoder may use separately declared bounded scratch; production backends must not
+allocate per token or route. Thread-pool and NUMA objects are policy hooks rather than
+implicit global state. The Issue #15 reference executor is serial, so later parallel
+backends must preserve request isolation, cancellation, accumulation, and telemetry
+semantics when those hooks become active.
+
 ## MoE decode operation
 
 For each layer and decode step:
@@ -94,6 +115,12 @@ T(q) = max(
 ```
 
 The scheduler uses tables measured under concurrent contention, not theoretical DRAM or PCIe bandwidth.
+
+Router weights follow the upstream MoE contract exactly. With
+`apply_router_weight_on_input=false`, the route weight scales the down-projection output.
+With it enabled, the weight scales both gate and up projection outputs before the
+activation. Because the activation is nonlinear, these modes are deliberately distinct
+and reference tests cover both.
 
 ## Cache design
 

@@ -94,6 +94,19 @@ Compare:
 - current-step fetch disabled;
 - same routed IDs and weights.
 
+Before optimized CPU kernels are accepted, the model-agnostic expert ABI is tested with
+the pinned Qwen3.8 Q4 and 3-bit census layouts, arbitrary and duplicate expert IDs,
+empty and maximum-width selections, padded rows, both router-weight placements, caller
+accumulation, cancellation rollback, malformed sources, workspace limits, and
+independent concurrent executors. Dense fixtures are compared with an independently
+written reference. Packed decoders must declare and stay within reusable scratch bounds;
+allocation-free claims apply only to paths measured by an allocation test.
+
+CPU expert microbenchmarks retain every raw repeat and separately report the supplied
+matrix geometry, quant layout, token count, route/miss count, workspace size, and
+executor telemetry. Later performance comparisons must use identical inputs and may not
+infer an AVX2 speedup from the reference executor.
+
 ### Router operation
 
 Compare the fused Pascal router with the permanent FP32 Torch reference using the same

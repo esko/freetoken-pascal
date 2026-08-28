@@ -44,6 +44,13 @@ A tiny Qwen4 model passes CPU/reference tests. When the P4 arrives, a single P4 
 - bounded pinned-memory and NUMA-aware host bank;
 - parity and microbenchmark suite.
 
+The ABI slice precedes AVX2 kernels. It defines immutable heterogeneous expert-bank
+descriptors, prepare/execute/group/cancel/telemetry contracts, caller-owned partial
+accumulation, bounded workspace and explicit decoder/thread-pool/NUMA hooks. Its
+microbenchmark interface records raw repeated timings for the supplied production
+geometry and every requested miss width from 1 through top-k; it does not by itself
+constitute a performance claim.
+
 ### Exit gate
 
 For each shipping quant and shape, the CPU expert output passes error tolerances against dequantize-plus-reference matmul. End-to-end cache-zero output remains correct.
