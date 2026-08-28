@@ -171,6 +171,9 @@ def test_bundle_keeps_host_alive_and_closes_owned_mapping_once() -> None:
     assert bundle.closed
     with pytest.raises(RuntimeError, match="closed"):
         bundle.decode(0, None, None, None)  # type: ignore[arg-type]
+    # A retained host reference or an enclosing host context may close again
+    # after the owner bundle has completed cleanup; that call is idempotent.
+    bundle.host.close()
 
 
 def test_bundle_preserves_mixed_layout_and_kernel_census() -> None:

@@ -812,10 +812,6 @@ class QwenGGUFHostWeights:
     def close(self) -> None:
         with self._cpu_bridge_lock:
             if self._closed:
-                if self._cpu_bridge_claimed:
-                    raise RuntimeError(
-                        "Qwen GGUF host is owned by a CPU expert bundle; use its close method"
-                    )
                 return
             if self._cpu_bridge_claimed:
                 raise RuntimeError(
