@@ -132,7 +132,7 @@ def validate_gguf_cpu_attachment(model: Any, bundle: QwenGGUFCpuExpertBundle) ->
 
 def attach_gguf_cpu_expert_bundle(model: Any, bundle: QwenGGUFCpuExpertBundle) -> None:
     """Validate, construct, and atomically install all layer adapters."""
-    if model._gguf_cpu_attachment is not None:
+    if getattr(model, "_gguf_cpu_attachment", None) is not None:
         raise RuntimeError("Qwen GGUF CPU expert bundle is already attached")
     layers = validate_gguf_cpu_attachment(model, bundle)
     config = model._config
