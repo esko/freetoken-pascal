@@ -304,6 +304,19 @@ class ForwardOutput(NamedTuple):
 
 class Engine:
     def __init__(self, config: EngineConfig):
+        try:
+            self._initialize(config)
+        except BaseException:
+            # Host-bank resources may already be live when any later startup step
+            # (KV, backend attachment, graph capture, or warmup) fails.  Cleanup is
+            # best-effort and must never mask the startup exception.
+            try:
+                self._cleanup_host_bank_resources()
+            except BaseException as cleanup_error:
+                logger.error(f"Host expert-bank startup rollback failed: {cleanup_error}")
+            raise
+
+    def _initialize(self, config: EngineConfig):
         assert not torch.cuda.is_initialized()
         set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
         _ensure_expandable_segments()  # before the first CUDA allocation below
@@ -361,11 +374,7 @@ class Engine:
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
         if is_offload_moe_backend(config.moe_backend):
-            try:
-                self._init_offload_moe_cache(config)
-            except BaseException:
-                self._cleanup_host_bank_resources()
-                raise
+            self._init_offload_moe_cache(config)
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
 
@@ -534,6 +543,11 @@ class Engine:
         cache_factory = getattr(self.model, "make_offload_moe_cache", None)
         if config.host_bank_policy is not None:
             config.host_bank_policy.validate_for_config()
+            if config.host_bank_policy.selected_layers is not None:
+                raise NotImplementedError(
+                    "selected host-bank layers are not supported by Engine yet; "
+                    "pinned FTW serving currently requires all layers"
+                )
             strategy = config.host_bank_policy.strategy.value
             if strategy == "pageable":
                 raise NotImplementedError(
@@ -680,12 +694,16 @@ class Engine:
                 decode_target=decode_target,
                 hybrid_max_fetch=config.moe_hybrid_max_fetch,
             )
+            # Publish ownership before any subsequent setup can fail so the outer
+            # Engine initialization guard can release source references.
+            self.moe_offload_cache = cache
             # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
             cache.cpu_layer_ids = cpu_layer_ids
             cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
             cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
         else:
             cache = cache_factory(config, self.device)
+            self.moe_offload_cache = cache
             cache.decode_target = decode_target
             cache.hybrid_max_fetch = config.moe_hybrid_max_fetch
             cache.cpu_layer_ids = cpu_layer_ids
@@ -701,7 +719,6 @@ class Engine:
         if cache.decode_target in ("cpu", "hybrid"):
             self._init_cpu_moe_executor(config, cache, layers)
         self.ctx.moe_offload_cache = cache
-        self.moe_offload_cache = cache
         return cache
 
     def _resolve_hybrid_fetch(self, config: EngineConfig, cache) -> None:
@@ -767,8 +784,10 @@ class Engine:
             swiglu_alpha=getattr(sample, "hidden_act_alpha", 1.702),
             swiglu_limit=getattr(sample, "swiglu_limit", None),
         )
-        cache.set_cpu_executor(executor)
+        # Track the executor before attaching it to the cache; a failing attach or
+        # later startup step must still drop the C++ worker and its host buffers.
         self.cpu_moe_executor = executor
+        cache.set_cpu_executor(executor)
 
     def _sync_get_memory(self) -> Tuple[int, int]:
         """Get the min and max free memory across TP ranks."""
@@ -1077,9 +1096,10 @@ class Engine:
             cache._copy_dst_ptrs = None
             cache._copy_feat_bytes = None
         self.cpu_moe_executor = None
-        if self._expert_banks is not None:
+        expert_banks = getattr(self, "_expert_banks", None)
+        if expert_banks is not None:
             try:
-                self._expert_banks.close()
+                expert_banks.close()
             except Exception as exc:
                 logger.error(f"Host expert-bank cleanup failed: {exc}")
             finally:

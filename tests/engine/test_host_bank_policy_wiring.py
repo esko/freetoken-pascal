@@ -155,6 +155,44 @@ def test_engine_cleanup_drops_cache_references_before_bank_owners():
     assert engine._expert_banks is None
 
 
+def test_engine_rejects_selective_pinned_policy():
+    from freetoken.engine.engine import Engine
+    from freetoken.moe.host_banks import HostBankPolicy
+
+    engine = Engine.__new__(Engine)
+    engine.model = SimpleNamespace()
+    config = SimpleNamespace(
+        host_bank_policy=HostBankPolicy(
+            strategy="pinned", max_pinned_bytes=4096, selected_layers=(0,)
+        ),
+        model_config=SimpleNamespace(num_moe_layers=1),
+        moe_cache_auto=False,
+    )
+    with patch("freetoken.engine.engine._guard_qwen_gguf_engine_setup"):
+        with pytest.raises(NotImplementedError, match="selected host-bank layers"):
+            engine._init_offload_moe_cache(config)
+
+
+def test_engine_constructor_rolls_back_late_startup_failure():
+    from freetoken.engine.engine import Engine
+
+    cleanup = []
+
+    def fail(_self, _config):
+        raise RuntimeError("late startup failure")
+
+    def rollback(_self):
+        cleanup.append(True)
+
+    with patch.object(Engine, "_initialize", fail), patch.object(
+        Engine, "_cleanup_host_bank_resources", rollback
+    ):
+        with pytest.raises(RuntimeError, match="late startup failure"):
+            Engine(object())
+
+    assert cleanup == [True]
+
+
 def test_ftw_policy_preflight_runs_before_loader_and_reports_page_rounded_bytes(tmp_path):
     from freetoken.moe.expert_banks import ExpertBanks, load_expert_banks
     from freetoken.moe.host_banks import HostBankPolicy
