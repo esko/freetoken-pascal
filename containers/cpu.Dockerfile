@@ -3,6 +3,10 @@ FROM --platform=linux/amd64 python:3.12.11-slim-bookworm@sha256:c00fc7b44d844b6d
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes binutils g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace/freetoken-pascal
 COPY requirements/cpu.lock requirements/cpu.lock
 RUN python -m pip install --no-cache-dir --require-hashes -r requirements/cpu.lock

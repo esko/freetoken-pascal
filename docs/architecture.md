@@ -80,6 +80,22 @@ implicit global state. The Issue #15 reference executor is serial, so later para
 backends must preserve request isolation, cancellation, accumulation, and telemetry
 semantics when those hooks become active.
 
+Issue #16 adds a Torch/CUDA-independent Q4_K adapter at this boundary. It decodes the
+GGML 144-byte, 256-value block layout and uses direct packed-row GEMV for compatible
+gate, up, or down descriptors, with a scalar implementation retained as the reference
+and runtime fallback. The optional native helper is loaded from
+`FREETOKEN_Q4K_NATIVE_LIB` or the package extension after AVX2 and FMA capability
+checks; it is split into
+baseline dispatch, baseline scalar, and `-mavx2 -mfma` translation units so the shipping
+baseline does not require newer instructions. A descriptor is eligible only when its
+quant type and quant name both identify Q4_K and its input width and packed row stride
+match complete 256-value blocks; inconsistent or partial packed descriptors fail closed.
+The Q4 artifact remains heterogeneous: layer 2 gate/up Q5_K and Q5_1/Q8_0 down banks
+stay on the supplied reference decoder until their dedicated format work lands.
+This is an H0 pre-integration slice: the adapter is not yet wired into
+`python/freetoken/moe/cpu_executor.py`, and it does not replace the production
+runtime until the mixed-format decoder and runtime integration work is complete.
+
 ## MoE decode operation
 
 For each layer and decode step:

@@ -739,6 +739,7 @@ class ReferenceCpuExpertExecutor:
             elements = (
                 4 * self.intermediate_size
                 + self.hidden_size
+                + max(self.hidden_size, self.intermediate_size)
                 + max_tokens * self.hidden_size
                 + 3 * self.hidden_size * self.intermediate_size
             )
@@ -755,6 +756,7 @@ class ReferenceCpuExpertExecutor:
                 "activated": np.empty(self.intermediate_size, dtype=np.float32),
                 "exp": np.empty(self.intermediate_size, dtype=np.float32),
                 "contribution": np.empty(self.hidden_size, dtype=np.float32),
+                "input": np.empty(max(self.hidden_size, self.intermediate_size), dtype=np.float32),
                 "result": np.empty((max_tokens, self.hidden_size), dtype=np.float32),
                 "decoded_gate": np.empty(
                     (self.intermediate_size, self.hidden_size), dtype=np.float32
@@ -991,6 +993,25 @@ class ReferenceCpuExpertExecutor:
                 )
         np.multiply(activated, up, out=activated)
 
+    def _matvec(
+        self,
+        descriptor: CpuExpertDescriptor,
+        expert: int,
+        vector: np.ndarray,
+        out: np.ndarray,
+        *,
+        decoder_workspace: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Compute one expert row-matrix vector product into ``out``.
+
+        This protected seam is the Issue #15 reference/optimized boundary:
+        the reference implementation decodes to its prepared scratch matrix,
+        while format-specific executors may consume packed rows directly.
+        """
+        dense = self._dense_expert(descriptor, expert, decoder_workspace=decoder_workspace)
+        np.matmul(dense, vector, out=out)
+        return out
+
     def execute(
         self,
         layer_id: int,
@@ -1077,15 +1098,6 @@ class ReferenceCpuExpertExecutor:
                     weight = float(routing_weights[token, route])
                     route_descriptors = (descriptor, up_descriptor, down_descriptor)
                     source_modes.update(self._source_mode(item) for item in route_descriptors)
-                    gate = self._dense_expert(
-                        descriptor, expert, decoder_workspace=workspace["decoded_gate"]
-                    )
-                    up = self._dense_expert(
-                        up_descriptor, expert, decoder_workspace=workspace["decoded_up"]
-                    )
-                    down = self._dense_expert(
-                        down_descriptor, expert, decoder_workspace=workspace["decoded_down"]
-                    )
                     bytes_read += sum(
                         item.expert_stride_bytes
                         for item in route_descriptors
@@ -1097,8 +1109,20 @@ class ReferenceCpuExpertExecutor:
                     # nonlinear, this intentionally is not equivalent to scaling
                     # the final down output once; the latter is the false-mode
                     # contract used by the current production path.
-                    np.matmul(gate, hidden[token], out=workspace["gate"])
-                    np.matmul(up, hidden[token], out=workspace["up"])
+                    self._matvec(
+                        descriptor,
+                        expert,
+                        hidden[token],
+                        workspace["gate"],
+                        decoder_workspace=workspace["decoded_gate"],
+                    )
+                    self._matvec(
+                        up_descriptor,
+                        expert,
+                        hidden[token],
+                        workspace["up"],
+                        decoder_workspace=workspace["decoded_up"],
+                    )
                     if self.apply_router_weight_on_input:
                         np.multiply(workspace["gate"], weight, out=workspace["gate"])
                         np.multiply(workspace["up"], weight, out=workspace["up"])
@@ -1108,7 +1132,13 @@ class ReferenceCpuExpertExecutor:
                         workspace["activated"],
                         workspace["exp"],
                     )
-                    np.matmul(down, workspace["activated"], out=workspace["contribution"])
+                    self._matvec(
+                        down_descriptor,
+                        expert,
+                        workspace["activated"],
+                        workspace["contribution"],
+                        decoder_workspace=workspace["decoded_down"],
+                    )
                     if not self.apply_router_weight_on_input:
                         np.multiply(
                             workspace["contribution"],

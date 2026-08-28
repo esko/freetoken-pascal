@@ -228,6 +228,17 @@ sources:
         header_policy: preserved
         responsible_issue: 12
         responsible_pull_request: 36
+  - id: freetoken-q4k-w4a16-reference
+    repository: https://github.com/FlashML-org/FreeToken
+    pull_request: 131
+    upstream_ref: refs/pull/131/head
+    ref: 6f6c8640145eeca9df013e383ff51bf6bbff22f9
+    license: Apache-2.0
+    role: Q4_K W4A16 CPU arithmetic correctness oracle
+    usage: reference
+    responsible_issue: 16
+    notice_required: false
+    imports: []
   - id: freetoken-tp-pr104
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 104
