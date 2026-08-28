@@ -110,9 +110,10 @@ only when the selected layer has native AVX2 coverage for all three projections
 and valid census geometry. It partitions route columns into private worker
 requests, reduces partials in partition order, and commits once on the owner
 thread. Scalar helpers, unavailable native libraries, unsupported geometries,
-and partial layers remain serial. The runner owns a persistent pool and
-prepared private buffers; omitted caller output is allocated fresh only after
-success so results never alias worker scratch.
+and partial layers remain serial. The runner owns a persistent pool, prepared
+private buffers, and a bounded public-result ring; omitted caller output is
+returned from that prepared ring only after success, so results never alias
+worker scratch.
 
 The standalone `QwenGGUFCpuExpertBundle` owns a `QwenGGUFHostWeights` mapping, builds the exact heterogeneous `CpuExpertLayout`, and owns a `Q4KExecutor` for decode-only CPU use.
 Its Torch adapter accepts only CPU tensors, copies through explicit NumPy float32/int32 buffers, and returns a CPU tensor in the hidden-state dtype.

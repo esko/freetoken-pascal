@@ -293,6 +293,31 @@ def test_output_without_caller_buffer_is_fresh_and_group_is_safe(
     assert grouped[0].output is not grouped[1].output
 
 
+def test_group_outputs_remain_stable_beyond_prepared_result_ring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_native(monkeypatch)
+    executor = Q4KExecutor(_layout(), mode="avx2", num_threads=2, required_alignment=1)
+    executor.prepare(1, 2)
+    hidden, ids, weights = _inputs(tokens=1, routes=2)
+    requests = tuple(
+        CpuExecutionRequest(
+            0,
+            hidden,
+            ids,
+            weights + np.float32(index),
+        )
+        for index in range(4)
+    )
+
+    grouped = executor.execute_group(requests)
+    snapshots = tuple(result.output.copy() for result in grouped)
+    pointers = tuple(result.output.__array_interface__["data"][0] for result in grouped)
+    assert len(set(pointers)) == len(grouped)
+    for result, snapshot in zip(grouped, snapshots, strict=True):
+        np.testing.assert_array_equal(result.output, snapshot)
+
+
 def test_threaded_accumulate_zeros_padded_rows_like_serial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
