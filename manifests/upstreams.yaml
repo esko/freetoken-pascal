@@ -7,10 +7,17 @@ policy:
 sources:
   - id: freetoken
     repository: https://github.com/FlashML-org/FreeToken
-    ref: TO_BE_PINNED
+    ref: 9ef3651309fe4058672f2cc92069238dea06be1b
     license: Apache-2.0
     role: primary downstream base
-    imports: []
+    imports:
+      - source_path: .
+        destination_path: .
+        method: unrelated-history merge
+        local_modifications:
+          - preserve downstream README, CONTRIBUTING, CI, governance, and project docs
+          - publish downstream distribution metadata while retaining the freetoken import package
+          - combine upstream and downstream ignore rules and Apache attribution
   - id: freetoken-pascal-pr19
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 19

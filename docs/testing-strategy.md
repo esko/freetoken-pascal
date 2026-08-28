@@ -116,3 +116,9 @@ Every hardware run uploads:
 - failure artifacts.
 
 Do not commit model weights, private prompts or secrets.
+
+## Imported baseline at Issue #5
+
+The initial FreeToken history import runs the 31 tests under `tests/daemon` as the CPU-safe, no-model-weight upstream baseline. They exercise daemon state, process management, accounting, logs, checkpoint metadata, and import safety without importing Torch or CUDA.
+
+The remainder of the imported upstream suite is not deleted or reported as passing. It currently requires one or more of the upstream CUDA 13/Torch dependency set, GPU kernels, or external weights. Issue #7 owns the pinned CUDA 12.6/Python 3.12 environment, and issue #8 owns classification of the full suite into H0, H1, and deferred H2-H4 jobs plus a source-wide lint baseline. Tests requiring real P4 execution remain blocked under issues #9 and #29.

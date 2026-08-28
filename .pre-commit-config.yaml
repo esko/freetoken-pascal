@@ -1,4 +1,6 @@
-exclude: '^(vendor|third_party|upstream|build)/'
+# Preserve the imported upstream tree byte-for-byte in the history-import PR. Issue #8
+# establishes the source-wide downstream formatting baseline after the toolchain is pinned.
+exclude: '^(assets/|benchmarks/|freetoken-kernel-cache/|python/|tests/|docs/(cli|install|models|quickstart)\.md$|scripts/(build-release-wheels|publish-wheels)\.sh$|scripts/ci/(manylinux-build\.sh|retag-manylinux\.py)$|\.github/workflows/(nightly-wheels|release)\.yml$|install\.sh$|setup\.py$|vendor/|third_party/|upstream/|build/)'
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

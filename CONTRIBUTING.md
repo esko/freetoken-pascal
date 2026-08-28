@@ -1,6 +1,6 @@
-# Contributing
+# Contributing to FreeToken-Pascal
 
-FreeToken-Pascal is a hardware-focused downstream project. Changes must remain reviewable, reproducible, and attributable.
+FreeToken-Pascal is a hardware-focused downstream of [FlashML-org/FreeToken](https://github.com/FlashML-org/FreeToken). Changes must remain reviewable, reproducible, and attributable. This repository is independently maintained and does not imply upstream endorsement.
 
 ## Start here
 
@@ -12,19 +12,24 @@ Read:
 4. `docs/testing-strategy.md`
 5. the ADRs relevant to the issue
 
-Select an unblocked GitHub issue. Do not start a downstream optimization before its correctness dependency is complete.
+Select an unblocked GitHub issue. Do not start a downstream optimization before its correctness dependency is complete. Problems that reproduce on an unmodified upstream checkout should also be reported to upstream according to its contribution policy.
 
 ## Development environment
 
-The supported development environment is Linux x86-64, Python 3.12, and CUDA 12.6 for CUDA compilation. Hosted tests must run without a GPU. Pascal runtime tests require a self-hosted runner labelled `sm61`.
+The supported downstream development environment is Linux x86-64, Python 3.12, and CUDA 12.6 for CUDA compilation. Hosted tests must run without a GPU. Pascal runtime tests require a self-hosted runner labelled `sm61`.
 
-The exact environment will be created by the bootstrap backlog. Until then, the repository-level checks are:
+The imported upstream revision still declares its own CUDA 13 dependency set. Until issue #7 lands the downstream environment, use the repository-level H0 checks without interpreting upstream CUDA requirements as Pascal support:
 
 ```bash
 make check
 ```
 
-## Pull requests
+## Branches and pull requests
+
+- Downstream issue branches use `issue-<number>-<short-name>`.
+- The remote-tracking branch `upstream/main` is the fetched FreeToken mainline; documentation may call this upstream line `upstream/freetoken` conceptually, but no local work is committed directly on it.
+- Focused upstream PR imports use `import/freetoken-pr-<number>-<short-name>` and pin the source head SHA before adaptation.
+- Broad upstream synchronization uses `sync/freetoken-<YYYYMMDD>` and must not include downstream performance work.
 
 A PR must:
 
