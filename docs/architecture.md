@@ -117,6 +117,13 @@ worker scratch.
 
 The standalone `QwenGGUFCpuExpertBundle` owns a `QwenGGUFHostWeights` mapping, builds the exact heterogeneous `CpuExpertLayout`, and owns a `Q4KExecutor` for decode-only CPU use.
 Its Torch adapter accepts only CPU tensors, copies through explicit NumPy float32/int32 buffers, and returns a CPU tensor in the hidden-state dtype.
+Its bridge-local thread policy resolves an omitted request or `num_threads=0` to one
+serial worker, and rejects a positive request above the physical-core count visible
+through the process affinity.  The bundle reports the requested and effective counts,
+the actual participating partitions from the last decode, the selected kernel census,
+and any threading fallback reason; this policy does not reinterpret the existing
+`EngineConfig.moe_cpu_threads` value.  The physical-core check is an admission guard
+only; it does not pin workers or claim NUMA placement.
 It rejects GPU, hybrid, offload, nonzero-cache, prefill, grouped, and closed-mapping requests before execution.
 The CUDA `Engine` registration seam fails closed for Qwen GGUF rather than constructing the homogeneous `OffloadMoeCache`.
 End-to-end model-layer registration remains blocked until `OffloadMoELayer` accepts this per-projection mapped-bank ABI without allocating GPU slots.

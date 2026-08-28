@@ -83,11 +83,19 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--moe-cache-size` / `--moe-cache-rate` / `--moe-cache-auto` | auto | GPU expert-cache size as slots / fraction of all experts / sized from free VRAM (mutually exclusive; auto is enabled by default for offload-family backends) |
 | `--kv-reserve-tokens` | 8192 | KV token floor reserved before `--moe-cache-auto` fills experts |
 | `--ple-warm-mode` | `cold` | Qwen3.8 GGUF PLE policy: `cold`, `page-cache-warm`, selected-row `targeted`, or explicit `full-model-warm` |
-| `--moe-cpu-threads` | physical cores | CPU worker threads for the cpu/hybrid executor |
+| `--moe-cpu-threads` | physical cores | CPU worker threads for the compiled cpu/hybrid executor |
 | `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, or a fraction) |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
 | `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
+
+The standalone Qwen GGUF CPU bridge is not registered by `ft serve` yet, so
+`--moe-cpu-threads` does not change that bridge.  Its explicit Python
+`num_threads` argument uses a separate safe policy: omitted or `0` means one
+serial worker, while a positive value must fit within the process's
+affinity-visible physical-core capacity.  The bridge reports both the selected
+policy and the actual participating thread partitions after decode.  This is an
+admission check only; it does not pin workers or claim NUMA placement.
 
 ### Host expert-bank policy (Issue #18 H0/H1 slice)
 

@@ -8,6 +8,7 @@ CPU boundary until the model layer can consume that boundary directly.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Collection
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,7 +16,13 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from freetoken.gguf_host import QwenGGUFHostWeights, open_qwen_host_weights
-from freetoken.moe.cpu_abi import CpuAbiError, CpuExpertLayout, cpu_layout_from_source_layout
+from freetoken.moe.cpu_abi import (
+    CpuAbiError,
+    CpuExecutionTelemetry,
+    CpuExpertLayout,
+    _checked_int,
+    cpu_layout_from_source_layout,
+)
 from freetoken.moe.q4_k import Q4KExecutor
 
 if TYPE_CHECKING:
@@ -32,6 +39,68 @@ class UnsupportedGGUFCpuConfiguration(ValueError):
 
 _SUPPORTED_QUANTS = frozenset({"Q4_K", "Q5_K", "Q5_1", "Q8_0"})
 _UNSET = object()
+
+
+def _affinity_visible_physical_core_count() -> int:
+    """Return physical cores visible to this process's CPU affinity.
+
+    The Qwen GGUF bridge is a standalone Python adapter and must not import the
+    compiled homogeneous CPU executor just to resolve its thread policy.  Keep
+    the same one-logical-CPU-per-core policy here, including the conservative
+    affinity and sysfs fallbacks used by that executor.
+    """
+    try:
+        allowed = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        allowed = list(range(os.cpu_count() or 1))
+    representatives: list[int] = []
+    seen: set[str] = set()
+    for cpu in allowed:
+        try:
+            with open(
+                f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list",
+                encoding="ascii",
+            ) as source:
+                sibling_key = source.read().strip()
+        except OSError:
+            representatives.append(cpu)
+            continue
+        if sibling_key not in seen:
+            seen.add(sibling_key)
+            representatives.append(cpu)
+    return len(representatives or allowed or [0])
+
+
+def _resolve_bridge_num_threads(
+    requested: int | None,
+) -> tuple[int | None, int]:
+    """Resolve the standalone bridge policy without changing engine semantics.
+
+    ``None`` means omitted and ``0`` is the bridge's explicit auto value.  Both
+    intentionally select one serial worker until a production Engine adapter
+    owns a separate policy.  Positive values are bounded by the physical cores
+    visible through this process's affinity; silently creating an oversized pool
+    would hide an oversubscription decision from the caller.
+    """
+    if requested is None:
+        return None, 1
+    try:
+        value = _checked_int(requested, "num_threads")
+    except CpuAbiError as error:
+        raise UnsupportedGGUFCpuConfiguration(str(error)) from error
+    if value < 0:
+        raise UnsupportedGGUFCpuConfiguration(
+            f"Qwen GGUF CPU bridge num_threads must be non-negative, got {value}"
+        )
+    if value == 0:
+        return 0, 1
+    capacity = _affinity_visible_physical_core_count()
+    if value > capacity:
+        raise UnsupportedGGUFCpuConfiguration(
+            "Qwen GGUF CPU bridge num_threads="
+            f"{value} exceeds affinity-visible physical-core capacity of {capacity}"
+        )
+    return value, value
 
 
 def _device_type(device: Any) -> str:
@@ -125,8 +194,10 @@ def _validate_cpu_bridge_config(
 
 def qwen_gguf_cpu_bridge_supported(config: Any = None, **kwargs: Any) -> bool:
     """Return whether a config can use the standalone CPU-only bridge."""
+    requested_num_threads = kwargs.pop("num_threads", None)
     try:
         _validate_cpu_bridge_config(config, **kwargs)
+        _resolve_bridge_num_threads(requested_num_threads)
     except (TypeError, ValueError):
         return False
     return True
@@ -146,11 +217,16 @@ class QwenGGUFCpuExpertBundle:
         executor: Q4KExecutor,
         *,
         output_dtype: Any,
+        requested_num_threads: int | None = None,
+        effective_num_threads: int = 1,
     ) -> None:
         self.host = host
         self.layout = layout
         self.executor = executor
         self.output_dtype = output_dtype
+        self._requested_num_threads = requested_num_threads
+        self._effective_num_threads = effective_num_threads
+        self._last_execution_telemetry: CpuExecutionTelemetry | None = None
         self._closed = False
         self._host_owner_token: object | None = None
 
@@ -163,7 +239,7 @@ class QwenGGUFCpuExpertBundle:
         mode: str = "auto",
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
-        num_threads: int = 1,
+        num_threads: int | None = None,
         max_tokens: int = 1,
         max_routes: int | None = None,
         required_alignment: int = 32,
@@ -180,6 +256,7 @@ class QwenGGUFCpuExpertBundle:
             prefill=prefill,
             grouped=grouped,
         )
+        requested_num_threads, effective_num_threads = _resolve_bridge_num_threads(num_threads)
         if host is None or not hasattr(host, "layout") or not hasattr(host, "experts"):
             raise TypeError("Qwen GGUF CPU bridge requires a QwenGGUFHostWeights-like host")
         if not callable(getattr(host, "claim_cpu_bridge", None)):
@@ -218,7 +295,7 @@ class QwenGGUFCpuExpertBundle:
                 # Torch conversion is explicit at decode and the ABI always computes in f32.
                 output_dtype=np.float32,
                 required_alignment=required_alignment,
-                num_threads=num_threads,
+                num_threads=effective_num_threads,
             )
             executor.prepare(
                 max_tokens=max_tokens,
@@ -234,7 +311,14 @@ class QwenGGUFCpuExpertBundle:
             # failed constructor.  The path factory below transfers ownership only after success.
             raise
         try:
-            bundle = cls(host, layout, executor, output_dtype=np.float32)
+            bundle = cls(
+                host,
+                layout,
+                executor,
+                output_dtype=np.float32,
+                requested_num_threads=requested_num_threads,
+                effective_num_threads=effective_num_threads,
+            )
             bundle._host_owner_token = host.claim_cpu_bridge()
             return bundle
         except BaseException:
@@ -252,6 +336,46 @@ class QwenGGUFCpuExpertBundle:
     def backend(self) -> str:
         self._require_open()
         return self.executor.backend
+
+    @property
+    def requested_num_threads(self) -> int | None:
+        """The bridge request before resolving omitted/zero to serial execution."""
+        self._require_open()
+        return self._requested_num_threads
+
+    @property
+    def effective_num_threads(self) -> int:
+        """The prepared worker-pool size selected by the bridge policy."""
+        self._require_open()
+        return self._effective_num_threads
+
+    @property
+    def last_telemetry(self) -> CpuExecutionTelemetry | None:
+        """Telemetry from the most recent decode accepted by the Torch adapter."""
+        self._require_open()
+        return self._last_execution_telemetry
+
+    @property
+    def actual_thread_count(self) -> int | None:
+        """Actual participating partitions from the most recent decode, if any."""
+        telemetry = self.last_telemetry
+        return None if telemetry is None else telemetry.thread_count
+
+    @property
+    def threading_fallback_reason(self) -> str | None:
+        """Explain why an opted-in request is still using the serial executor."""
+        self._require_open()
+        if self._effective_num_threads <= 1:
+            return None
+        if not bool(getattr(self.executor, "parallel_enabled", False)):
+            return "native_avx2_or_layout_ineligible"
+        telemetry = self._last_execution_telemetry
+        if telemetry is None or telemetry.layer_id is None:
+            return None
+        layer_eligible = getattr(self.executor, "_layer_direct_eligible", None)
+        if callable(layer_eligible) and not layer_eligible(telemetry.layer_id):
+            return "native_avx2_or_layout_ineligible"
+        return None
 
     @property
     def kernel_census(self) -> tuple[str, ...]:
@@ -335,8 +459,11 @@ class QwenGGUFCpuExpertBundle:
                 weights_np,
                 num_token_non_padded=num_token_non_padded,
             )
-        except CpuAbiError:
+        except CpuAbiError as error:
+            if error.telemetry is not None:
+                self._last_execution_telemetry = error.telemetry
             raise
+        self._last_execution_telemetry = result.telemetry
         return torch.from_numpy(np.array(result.output, dtype=np.float32, copy=True)).to(
             device="cpu",
             dtype=hidden_states.dtype,
@@ -361,10 +488,17 @@ class QwenGGUFCpuExpertBundle:
 
     def host_weight_telemetry(self) -> dict[str, object]:
         self._require_open()
+        execution = self._last_execution_telemetry
         return {
             "source": "gguf-mmap",
             "memory": self.host.memory_report(),
             "kernel_census": self.kernel_census,
+            "requested_num_threads": self._requested_num_threads,
+            "effective_num_threads": self._effective_num_threads,
+            "actual_thread_count": None if execution is None else execution.thread_count,
+            "threading_fallback_reason": self.threading_fallback_reason,
+            "fallback_reason": (None if execution is None else execution.fallback_reason),
+            "execution_telemetry": None if execution is None else execution.as_dict(),
         }
 
     def _require_open(self) -> None:
@@ -398,7 +532,7 @@ def open_qwen_gguf_cpu_expert_bundle(
     mode: str = "auto",
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
-    num_threads: int = 1,
+    num_threads: int | None = None,
     max_tokens: int = 1,
     max_routes: int | None = None,
     required_alignment: int = 32,
@@ -456,7 +590,12 @@ def register_qwen_gguf_cpu_expert_bundle(
     The regular CUDA engine must not call this until its model MoE layer accepts the bundle;
     registering it today is deliberately explicit and never creates a homogeneous cache.
     """
-    _validate_cpu_bridge_config(config, **kwargs)
+    bridge_config_kwargs = {
+        name: kwargs[name]
+        for name in ("backend", "device", "cache_size", "prefill", "grouped")
+        if name in kwargs
+    }
+    _validate_cpu_bridge_config(config, **bridge_config_kwargs)
     path = getattr(config, "model_path", None)
     if host is None:
         if not path:
