@@ -11,6 +11,7 @@ from typing import Any
 from freetoken.gguf_validation import inspect_gguf
 
 _EXPERT_RE = re.compile(r"^blk\.(?P<layer>[0-9]+)\.ffn_(?P<projection>[^.]+)_exps\.weight$")
+_PLE_TENSOR = "per_layer_token_embd.weight"
 
 
 def sha256_file(path: Path, *, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -27,10 +28,58 @@ def model_sha256(shards: list[dict[str, Any]]) -> str:
         return str(shards[0]["sha256"])
     digest = hashlib.sha256()
     for shard in shards:
-        digest.update(
-            f"{shard['name']}\0{shard['size']}\0{shard['sha256']}\n".encode()
-        )
+        digest.update(f"{shard['name']}\0{shard['size']}\0{shard['sha256']}\n".encode())
     return digest.hexdigest()
+
+
+def add_host_layout_sections(document: dict[str, Any]) -> dict[str, Any]:
+    """Add deterministic slot-pool geometry and file-backed memory accounting."""
+    pools_by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for pool in document["expert_pools"]:
+        tensor = next(item for item in document["tensors"] if item["name"] == pool["tensor"])
+        shape = tuple(int(value) for value in pool["shape"])
+        bytes_per_slot = int(pool["bytes"]) // int(pool["experts"])
+        key = (
+            str(pool["projection"]),
+            str(pool["quant_type"]),
+            shape[1:],
+            int(tensor["row_bytes"]),
+            bytes_per_slot,
+        )
+        pools_by_key[key].append(pool)
+    slot_pools = []
+    for pool_id, key in enumerate(sorted(pools_by_key)):
+        projection, quant_type, shape, packed_row_bytes, bytes_per_slot = key
+        slot_pools.append(
+            {
+                "pool_id": pool_id,
+                "projection": projection,
+                "quant_type": quant_type,
+                "shape_per_expert": list(shape),
+                "packed_row_bytes": packed_row_bytes,
+                "bytes_per_slot": bytes_per_slot,
+                "layers": sorted(int(pool["layer"]) for pool in pools_by_key[key]),
+            }
+        )
+
+    expert_bytes = sum(int(pool["bytes"]) for pool in document["expert_pools"])
+    ple_records = [item for item in document["tensors"] if item["name"] == _PLE_TENSOR]
+    if len(ple_records) > 1:
+        raise ValueError(f"census contains multiple {_PLE_TENSOR} tensors")
+    ple_bytes = int(ple_records[0]["nbytes"]) if ple_records else 0
+    total = int(document["total_bytes"])
+    if expert_bytes + ple_bytes > total:
+        raise ValueError("expert and PLE byte accounting exceeds total tensor bytes")
+    document["expert_slot_pools"] = slot_pools
+    document["host_memory"] = {
+        "total_file_backed_tensor_bytes": total,
+        "ordinary_tensor_bytes": total - expert_bytes - ple_bytes,
+        "expert_mapped_bytes": expert_bytes,
+        "ple_mapped_bytes": ple_bytes,
+        "anonymous_host_source_bytes": 0,
+        "pinned_host_source_bytes": 0,
+    }
+    return document
 
 
 def build_quant_census(
@@ -63,8 +112,7 @@ def build_quant_census(
                 raise ValueError(f"no declared identity for GGUF shard {name}")
             if int(declared["size"]) != shard["size"]:
                 raise ValueError(
-                    f"{name}: local size {shard['size']} does not match declared "
-                    f"{declared['size']}"
+                    f"{name}: local size {shard['size']} does not match declared {declared['size']}"
                 )
             digest = str(declared["sha256"])
             if not re.fullmatch(r"[0-9a-f]{64}", digest):
@@ -73,9 +121,7 @@ def build_quant_census(
             if verify_sha256:
                 actual = sha256_file(shard_path)
                 if actual != digest:
-                    raise ValueError(
-                        f"{name}: sha256 {actual} does not match declared {digest}"
-                    )
+                    raise ValueError(f"{name}: sha256 {actual} does not match declared {digest}")
                 status = "verified"
             identity = {
                 "name": name,
@@ -141,12 +187,10 @@ def build_quant_census(
             }
         )
 
-    all_verified = all(
-        shard["sha256_status"] == "verified" for shard in shard_identities
-    )
-    return {
+    all_verified = all(shard["sha256_status"] == "verified" for shard in shard_identities)
+    document = {
         "schema_name": "quant-census.schema.json",
-        "schema_version": 2,
+        "schema_version": 3,
         "evidence_status": "measured" if all_verified else "artifact-metadata",
         "architecture": inspected["architecture"],
         "model_sha256": model_sha256(shard_identities),
@@ -159,6 +203,7 @@ def build_quant_census(
         "expert_pools": sorted(pools, key=lambda entry: (entry["layer"], entry["projection"])),
         "tensors": tensors,
     }
+    return add_host_layout_sections(document)
 
 
-__all__ = ["build_quant_census", "model_sha256", "sha256_file"]
+__all__ = ["add_host_layout_sections", "build_quant_census", "model_sha256", "sha256_file"]
