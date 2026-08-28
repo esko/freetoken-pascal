@@ -22,8 +22,9 @@ Runs on GitHub-hosted Linux without a GPU:
 - pinned Qwen3.8 Q4/Q3 byte-range row references, with declared artifact hashes kept
   distinct from payload-verified evidence;
 - bounded real-artifact expert probes that verify HTTP ranges and descriptor geometry,
-  then retain raw scalar/forced-AVX2 A/B timings and kernel telemetry as H0
-  `range_evidence: measured/artifact-byte` (never P4 evidence);
+  then retain raw scalar/native A/B timings and kernel telemetry plus separate comparisons of
+  both outputs against the pinned gguf-py 0.19.0 dense FP32 SwiGLU oracle over the exact fetched
+  bytes as H0 `range_evidence: measured/artifact-byte` (never P4 evidence);
 - host simulators for CUDA kernel arithmetic where feasible;
 - cache policy and q-star scheduler simulation;
 - source-provenance checks;
