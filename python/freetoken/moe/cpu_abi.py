@@ -355,6 +355,10 @@ def _validate_source_range(descriptor: CpuExpertDescriptor) -> None:
     source = descriptor.source
     if source is None:
         return
+    if isinstance(source, np.ndarray) and descriptor.source_offset != 0:
+        raise InvalidRequest(
+            "dense ndarray sources are already tensor-start views and require source_offset=0"
+        )
     packed = callable(getattr(source, "expert_packed", None))
     ranges = _source_ranges(descriptor)
     if packed and not ranges:

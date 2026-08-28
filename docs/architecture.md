@@ -68,6 +68,11 @@ that may be accumulated by the caller. Invalid IDs, unsupported layouts, cancell
 and workspace overflow fail closed and publish telemetry without committing partial
 output.
 
+`Busy` is a rejection before request ownership, not a failed execution. It carries
+telemetry but does not mutate the supplied output buffer because that buffer may alias
+the request already executing. Callers must treat output as unreadable unless execution
+returns successfully.
+
 The dense/dequantize executor is the permanent CPU correctness oracle. Its packed
 decoder may use separately declared bounded scratch; production backends must not
 allocate per token or route. Thread-pool and NUMA objects are policy hooks rather than

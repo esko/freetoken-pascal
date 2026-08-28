@@ -1069,9 +1069,9 @@ def test_packed_source_without_a_provable_range_fails_closed() -> None:
         )
 
 
-def test_source_range_bounds_include_absolute_offset() -> None:
+def test_dense_ndarray_source_rejects_nonzero_file_offset() -> None:
     source = np.zeros((2, 2, 2), dtype=np.float32)
-    with pytest.raises(InvalidRequest, match="outside"):
+    with pytest.raises(InvalidRequest, match="tensor-start views"):
         CpuExpertDescriptor(
             layer_id=0,
             projection="gate",

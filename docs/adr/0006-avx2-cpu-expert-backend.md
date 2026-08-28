@@ -27,6 +27,8 @@ Grouped execution is ordered and serial in the initial reference implementation;
 not an atomic multi-request transaction. Optimized parallel implementations may use the
 injected hooks but must retain request isolation, fail-closed output commit, and the same
 observable telemetry contract.
+An executor that rejects a concurrent request as busy attaches telemetry but leaves its
+unowned caller buffer untouched; only an accepted request may commit or clear its output.
 
 ## Alternatives considered
 
