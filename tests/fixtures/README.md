@@ -13,8 +13,9 @@ prompts and deterministic long-context templates.
 - `routing/` contains a locality-positive trace and a cyclic adversarial trace for host cache
   simulation.
 - `qwen38-reference-corpus.json` pins the tokenizer revision and deterministic prompt cases used
-  for independent correctness evidence. Long-context cases are materialized and tokenizer-counted
-  by the reference harness; the metadata alone is never treated as measured evidence.
+  for independent correctness evidence. The reference harness hashes and tokenizer-counts the exact
+  rendered chat-template prompt, and verifies each long-context needle; metadata alone is never
+  treated as measured evidence.
 - `kernels/` contains arithmetic values checked against simple independent scalar formulas.
 - `results/` contains schema-valid synthetic evidence. The `evidence_status` field prevents these
   examples from being confused with measured release results.

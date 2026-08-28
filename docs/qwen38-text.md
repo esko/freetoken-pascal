@@ -31,12 +31,16 @@ forwards. The model's debug hook is disabled by default. When explicitly enabled
 run, it captures cloned semantic observations at stable boundaries: global router IDs and weights,
 GDN recurrent state, logical QSA selections/state, PLE contribution/state, and selected logits.
 Capture allocations therefore cannot affect production runs, and captured route IDs precede any
-cache-slot remapping.
+cache-slot remapping. Observation payloads use active request UIDs, logical positions, and sequence
+boundaries; padded rows and physical allocator/page-table identities are excluded from compared
+state.
 
 `tests/fixtures/qwen38-reference-corpus.json` defines the synthetic, deterministic prompt matrix and
-pins its tokenizer revision. Long-context templates must be materialized with that tokenizer and
-must prove their exact 32K, 128K, or 262K token count; declaring a target in fixture metadata is not
-evidence. `scripts/write_qwen38_observations.py` writes non-pickle semantic array bundles, and
+pins its tokenizer revision. Every case must be rendered with the exact serving chat template, and
+the evidence hashes and token-counts that rendered byte string rather than the intermediate message
+objects. Long-context templates must prove their exact 32K, 128K, or 262K token count and their
+single retrieval-needle position; declaring a target in fixture metadata is not evidence.
+`scripts/write_qwen38_observations.py` writes non-pickle semantic array bundles, and
 `scripts/compare_qwen38_observations.py` binds both implementations to the same artifact, quant
 census, corpus, prompt, context length, cache mode, and quantization before comparing them. Exact
 routing/state observations and documented numeric tolerances are both required. Synthetic bundles
