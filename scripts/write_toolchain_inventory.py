@@ -53,7 +53,8 @@ def collect_inventory() -> dict[str, Any]:
         import torch
 
         inventory["torch_cuda"] = torch.version.cuda
-        inventory["torch_arch_list"] = torch.cuda.get_arch_list()
+        arch_flags = torch._C._cuda_getArchFlags()
+        inventory["torch_arch_list"] = arch_flags.split() if arch_flags else []
     except (ImportError, OSError):
         inventory["torch_cuda"] = None
         inventory["torch_arch_list"] = []

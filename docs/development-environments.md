@@ -37,7 +37,7 @@ CUDA compiler, Torch wheel, and generated `sm_61` cubin with:
 docker run --rm freetoken-pascal:cuda126 scripts/ci/verify_cuda126.sh
 ```
 
-The gate records Python, compiler, CUDA, Torch, Triton, and architecture selections in
+The gate records Python, compiler, CUDA, Torch, Triton, and the wheel's compiled architecture list in
 `build/toolchain/inventory.json` and copies the authoritative manifest beside it. A mounted output
 directory is required if the evidence must survive container removal; the CI workflow demonstrates
 that invocation.

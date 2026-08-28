@@ -40,7 +40,8 @@ if torch.version.cuda != "12.6":
 if triton.__version__ != manifest["triton"]:
     raise SystemExit(f"Triton {manifest['triton']} required, got {triton.__version__}")
 
-available = set(torch.cuda.get_arch_list())
+arch_flags = torch._C._cuda_getArchFlags()
+available = set(arch_flags.split()) if arch_flags else set()
 allowed = set(manifest["torch_pascal_architectures"])
 if not available.intersection(allowed):
     raise SystemExit(f"Torch wheel has no Pascal cubins: {sorted(available)}")
