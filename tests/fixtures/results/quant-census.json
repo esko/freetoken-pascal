@@ -1,10 +1,86 @@
 {
   "schema_name": "quant-census.schema.json",
-  "schema_version": 1,
-  "evidence_status": "synthetic",
-  "model_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "schema_version": 2,
+  "evidence_status": "measured",
+  "architecture": "qwen4",
+  "model_sha256": "6758491ef14294390bc79952eab2a7989b5066ed33d018296e6aa750d8783874",
+  "shard_count": 1,
+  "shards": [
+    {
+      "name": "valid-heterogeneous.gguf",
+      "size": 896,
+      "sha256": "6758491ef14294390bc79952eab2a7989b5066ed33d018296e6aa750d8783874",
+      "sha256_status": "verified"
+    }
+  ],
   "tensor_count": 3,
-  "total_bytes": 278,
-  "by_quant_type": {"F32": {"tensors": 1, "bytes": 32}, "Q4_0": {"tensors": 1, "bytes": 36}, "Q6_K": {"tensors": 1, "bytes": 210}},
-  "expert_layers": [{"layer": 0, "experts": 2, "quant_types": ["Q4_0", "Q6_K"]}]
+  "total_bytes": 488,
+  "by_quant_type": {
+    "F32": {"tensors": 1, "bytes": 32},
+    "Q4_0": {"tensors": 1, "bytes": 36},
+    "Q6_K": {"tensors": 1, "bytes": 420}
+  },
+  "expert_layers": [
+    {
+      "layer": 0,
+      "experts": 2,
+      "projections": ["down", "gate"],
+      "quant_types": ["Q4_0", "Q6_K"]
+    }
+  ],
+  "expert_pools": [
+    {
+      "layer": 0,
+      "projection": "down",
+      "tensor": "blk.0.ffn_down_exps.weight",
+      "experts": 2,
+      "shape": [2, 256],
+      "quant_type": "Q6_K",
+      "bytes": 420
+    },
+    {
+      "layer": 0,
+      "projection": "gate",
+      "tensor": "blk.0.ffn_gate_exps.weight",
+      "experts": 2,
+      "shape": [2, 32],
+      "quant_type": "Q4_0",
+      "bytes": 36
+    }
+  ],
+  "tensors": [
+    {
+      "name": "blk.0.ffn_gate_exps.weight",
+      "shape": [2, 32],
+      "quant_type": 2,
+      "quant_name": "Q4_0",
+      "shard_index": 0,
+      "offset": 352,
+      "nbytes": 36,
+      "rows": 2,
+      "row_bytes": 18
+    },
+    {
+      "name": "blk.0.ffn_down_exps.weight",
+      "shape": [2, 256],
+      "quant_type": 14,
+      "quant_name": "Q6_K",
+      "shard_index": 0,
+      "offset": 416,
+      "nbytes": 420,
+      "rows": 2,
+      "row_bytes": 210
+    },
+    {
+      "name": "output_norm.weight",
+      "shape": [8],
+      "quant_type": 0,
+      "quant_name": "F32",
+      "shard_index": 0,
+      "offset": 864,
+      "nbytes": 32,
+      "rows": 1,
+      "row_bytes": 32
+    }
+  ]
 }

@@ -12,13 +12,15 @@ This product currently includes source from the following upstream distribution:
   c8e4c08e6548eb185b8d278efee5a03e26522655; Pascal compile and runtime fallbacks replayed
 - freetoken-qwen4-pr232: FlashML-org/FreeToken pull request 232 (Apache-2.0), commit
   ad752c9970e0dc3f1b09aeec38235332149336ed; Qwen3.8 text architecture and QSA adapted
+- freetoken-gguf-pr131: FlashML-org/FreeToken pull request 131 (Apache-2.0), commit
+  bb432e8c473c557cdef6517abccf0c129bd8c544; generic GGUF K/I tables, shard loading,
+  mixed-projection handling, and Qwen converter reversals adapted
 
 The complete FreeToken history was merged into this repository. Its original source files,
 copyright notices, and Apache-2.0 license remain reachable through that history. Root files changed
 by the downstream integration are recorded in `manifests/upstreams.yaml`.
 
 Other projects listed in the provenance manifest with `usage: planned` or `usage: reference` are
-not currently copied into the downstream tree and therefore are not included in this NOTICE. Add
-them here only when an issue imports or adapts their source.
+not currently copied into the downstream tree and therefore are not included in this NOTICE.
 
 No endorsement by FlashML or any other upstream project is implied.

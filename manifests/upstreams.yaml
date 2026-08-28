@@ -175,10 +175,54 @@ sources:
     ref: bb432e8c473c557cdef6517abccf0c129bd8c544
     license: Apache-2.0
     role: generic GGUF K/I quant and qwen MoE loader
-    usage: planned
+    usage: imported
     responsible_issue: 12
-    notice_required: false
-    imports: []
+    notice_required: true
+    imports:
+      - source_path: python/freetoken/models/gguf/dequant.py
+        destination_path: python/freetoken/gguf_types.py
+        source_ref: bb432e8c473c557cdef6517abccf0c129bd8c544
+        method: adapted
+        local_modifications:
+          - split torch-free block and capability tables from runtime dequantization
+          - validate tables against both gguf-py and the vendored CUDA switches
+          - add declared-versus-verified artifact identity handling
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 12
+      - source_path: python/freetoken/models/gguf/reader.py
+        destination_path: python/freetoken/models/gguf/reader.py
+        source_ref: bb432e8c473c557cdef6517abccf0c129bd8c544
+        method: adapted
+        local_modifications:
+          - fail closed on missing and inconsistent split metadata
+          - support a metadata-only zero-tensor first shard
+          - expose shard provenance and absolute tensor offsets
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 12
+      - source_path: python/freetoken/layers/gguf.py
+        destination_path: python/freetoken/layers/gguf.py
+        source_ref: bb432e8c473c557cdef6517abccf0c129bd8c544
+        method: adapted
+        local_modifications:
+          - use the complete K and IQ capability tables
+          - preserve mixed projection parts in independent packed buffers
+          - add converter-order input permutation without materializing dense weights
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 12
+      - source_path: python/freetoken/models/qwen3_5_moe/gguf.py
+        destination_path: python/freetoken/models/qwen4_exp/gguf.py
+        source_ref: bb432e8c473c557cdef6517abccf0c129bd8c544
+        method: adapted
+        local_modifications:
+          - map the qwen4exp tensor vocabulary from the pinned Qwen3.8 artifacts
+          - reverse V-head tiling and the stored A equals negative exp of A-log transform
+          - keep PLE and routed expert payloads reserved for Issue 13 host banks
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 12
   - id: freetoken-tp-pr104
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 104

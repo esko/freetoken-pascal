@@ -19,6 +19,8 @@ Runs on GitHub-hosted Linux without a GPU:
 - Python/unit tests;
 - GGUF metadata and tensor-census tests;
 - quant block-size/row-stride tests;
+- pinned Qwen3.8 Q4/Q3 byte-range row references, with declared artifact hashes kept
+  distinct from payload-verified evidence;
 - host simulators for CUDA kernel arithmetic where feasible;
 - cache policy and q-star scheduler simulation;
 - source-provenance checks;
