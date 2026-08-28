@@ -24,7 +24,7 @@ def load(name: str) -> dict:
 def test_all_example_evidence_is_schema_valid() -> None:
     paths = sorted(RESULT_DIR.glob("*.json"))
 
-    assert len(paths) == 4
+    assert len(paths) == 6
     assert VALIDATE_EVIDENCE.validate_paths(paths, schema_dir=SCHEMA_DIR) == []
 
 
