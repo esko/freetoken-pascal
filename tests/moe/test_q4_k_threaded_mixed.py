@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import Future
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -150,6 +151,45 @@ def test_partition_is_balanced_and_index_ordered() -> None:
     assert partition_q4_k_routes(10, 1) == ((0, 10),)
     assert partition_q4_k_routes(10, 3) == ((0, 4), (4, 7), (7, 10))
     assert partition_q4_k_routes(3, 10) == ((0, 1), (1, 2), (2, 3))
+
+
+def test_threaded_runner_closes_owned_pool_if_worker_construction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TrackedPool:
+        def __init__(self, **_kwargs) -> None:
+            self.shutdown_calls = 0
+
+        def shutdown(self, *, wait: bool) -> None:
+            assert wait
+            self.shutdown_calls += 1
+
+    pool = _TrackedPool()
+    monkeypatch.setattr(q4_k, "ThreadPoolExecutor", lambda **_kwargs: pool)
+
+    def fail_worker(*_args, **_kwargs):
+        raise RuntimeError("worker construction failed")
+
+    monkeypatch.setattr(q4_k, "_MixedReferenceExecutor", fail_worker)
+    owner = SimpleNamespace(
+        num_threads=2,
+        layout=object(),
+        _reference=SimpleNamespace(decoders={}),
+        primitive=None,
+        mixed_primitive=None,
+        _q4_descriptors=frozenset(),
+        _mixed_descriptors=frozenset(),
+    )
+    with pytest.raises(RuntimeError, match="worker construction failed"):
+        q4_k._ThreadedMixedRunner(
+            owner,
+            thread_pool=None,
+            activation="silu",
+            apply_router_weight_on_input=False,
+            output_dtype=np.float32,
+            required_alignment=1,
+        )
+    assert pool.shutdown_calls == 1
 
 
 def test_exact_qwen_census_geometry_gates_every_normal_and_promoted_layer(

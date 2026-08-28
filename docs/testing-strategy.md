@@ -84,6 +84,8 @@ dequantize to float + torch/reference matmul
 Report maximum absolute error, relative RMS and cosine similarity. Use adversarial values as well as random tensors.
 The Issue #16 mixed direct GEMV tests exercise Q5_1 and Q8_0 down rows at input width 640 and Q5_K gate/up rows at input width 2560.
 
+The CPU-only Qwen GGUF bridge tests cover host lifetime and idempotent close, exact mixed-layout and kernel-census preservation, explicit Torch/NumPy decode conversion, unsupported runtime modes, cache-size zero, and the engine's fail-closed homogeneous-cache guard.
+
 ### MoE operation
 
 Compare:

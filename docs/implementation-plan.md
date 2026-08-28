@@ -53,6 +53,11 @@ constitute a performance claim. The Issue #16 threaded route adapter is opt-in,
 native-only, and census-gated per layer; it keeps serial execution for scalar,
 unsupported, and mixed-reference configurations.
 
+The standalone Qwen GGUF CPU bridge is decode-only and owns its mapped host weights for the
+life of its heterogeneous CPU layout and Q4 executor. The CUDA engine rejects this GGUF
+combination until the production layer ABI can consume per-projection mappings without a
+homogeneous GPU cache; this is an integration blocker, not a hardware-performance claim.
+
 ### Exit gate
 
 For each shipping quant and shape, the CPU expert output passes error tolerances against dequantize-plus-reference matmul. End-to-end cache-zero output remains correct.
