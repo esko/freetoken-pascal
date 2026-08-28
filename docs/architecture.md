@@ -90,11 +90,12 @@ baseline dispatch, baseline scalar, and `-mavx2 -mfma` translation units so the 
 baseline does not require newer instructions. A descriptor is eligible only when its
 quant type and quant name both identify Q4_K and its input width and packed row stride
 match complete 256-value blocks; inconsistent or partial packed descriptors fail closed.
-The Q4 artifact remains heterogeneous: layer 2 gate/up Q5_K and Q5_1/Q8_0 down banks
-use the built-in bounded scalar reference decoders, while Q4_K remains the only direct
-packed GEMV path. Mixed-format execution is therefore explicit reference fallback for
-the promoted projections. This is an H0 pre-integration slice: the adapter is not yet
-wired into
+The Q4 artifact remains heterogeneous: layer 2 gate/up uses Q5_K and the promoted
+down banks use Q5_1 or Q8_0. The separate `mixed_gemv` primitive now provides direct
+packed-row GEMV for those three formats, with format-tagged AVX2 dispatch and the
+same scalar reference fallback. Its optional helper is loaded from
+`FREETOKEN_MIXED_GEMV_NATIVE_LIB` or the package extension. This is an H0
+pre-integration slice: neither direct CPU path is yet wired into
 `python/freetoken/moe/cpu_executor.py`, and it does not replace the production
 runtime until the mixed-format runtime integration work is complete.
 

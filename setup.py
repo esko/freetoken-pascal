@@ -46,6 +46,15 @@ setup(
             ],
             extra_compile_args=["-O3", "-std=c++17"],
         ),
+        Extension(
+            name="freetoken.moe._mixed_gemv_native",
+            sources=[
+                "python/freetoken/moe/mixed_gemv_native.cpp",
+                "python/freetoken/moe/mixed_gemv_scalar.cpp",
+                "python/freetoken/moe/mixed_gemv_avx2.cpp",
+            ],
+            extra_compile_args=["-O3", "-std=c++17"],
+        ),
         CppExtension(
             name="freetoken.kernel._pinned_tensor",
             sources=[
