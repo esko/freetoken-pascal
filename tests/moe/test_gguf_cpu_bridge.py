@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -57,6 +58,8 @@ class _Banks:
 
 
 class _Ple:
+    tensor_bytes = 0
+
     def close(self) -> None:
         return None
 
@@ -174,6 +177,141 @@ def test_bundle_keeps_host_alive_and_closes_owned_mapping_once() -> None:
     # A retained host reference or an enclosing host context may close again
     # after the owner bundle has completed cleanup; that call is idempotent.
     bundle.host.close()
+
+
+def test_bundle_thread_policy_defaults_to_safe_serial_and_reports_no_execution() -> None:
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    bundle = QwenGGUFCpuExpertBundle.from_host(_host(), top_k=1, mode="scalar")
+    assert bundle.requested_num_threads is None
+    assert bundle.effective_num_threads == 1
+    assert bundle.actual_thread_count is None
+    telemetry = bundle.host_weight_telemetry()
+    assert telemetry["requested_num_threads"] is None
+    assert telemetry["effective_num_threads"] == 1
+    assert telemetry["actual_thread_count"] is None
+    assert telemetry["threading_fallback_reason"] is None
+    bundle.close()
+
+
+def test_bundle_zero_thread_request_is_safe_serial() -> None:
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    bundle = QwenGGUFCpuExpertBundle.from_host(_host(), top_k=1, mode="scalar", num_threads=0)
+    assert bundle.requested_num_threads == 0
+    assert bundle.effective_num_threads == 1
+    bundle.close()
+
+
+def test_bundle_rejects_thread_request_above_visible_physical_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freetoken.moe.gguf_cpu as bridge
+
+    monkeypatch.setattr(bridge, "_affinity_visible_physical_core_count", lambda: 2)
+    with pytest.raises(ValueError, match="affinity-visible physical-core capacity of 2"):
+        bridge.QwenGGUFCpuExpertBundle.from_host(_host(), top_k=1, mode="scalar", num_threads=3)
+
+
+@pytest.mark.parametrize("num_threads", [-1, True, 1.5, "2"])
+def test_bundle_rejects_malformed_thread_request(num_threads: object) -> None:
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    with pytest.raises(ValueError, match="num_threads"):
+        QwenGGUFCpuExpertBundle.from_host(
+            _host(),
+            top_k=1,
+            mode="scalar",
+            num_threads=num_threads,  # type: ignore[arg-type]
+        )
+
+
+def test_bundle_persists_threaded_decode_telemetry_and_actual_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+
+    from freetoken.moe import q4_k
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    class _FastQ4:
+        isa = "avx2"
+        backend = "q4_k_test"
+        fallback_reason = None
+
+        def gemv(self, rows, input_dim, vector, *, out, scratch=None):
+            del input_dim, scratch
+            np.multiply(rows[:, 0].astype(np.float32), vector.sum(), out=out)
+            return out
+
+    class _FastMixed:
+        isa = "avx2"
+        backend = "mixed_test"
+        fallback_reason = None
+
+        def backend_for(self, quant_name):
+            return f"{str(quant_name).lower()}_test"
+
+        def gemv(self, rows, input_dim, vector, *, quant_name, out):
+            del input_dim, quant_name
+            np.multiply(rows[:, 0].astype(np.float32), vector.sum(), out=out)
+            return out
+
+    monkeypatch.setattr(q4_k, "select_q4_k_primitive", lambda mode="auto": _FastQ4())
+    monkeypatch.setattr(q4_k, "select_mixed_gemv_primitive", lambda mode="auto": _FastMixed())
+    bundle = QwenGGUFCpuExpertBundle.from_host(
+        _geometry_host(promoted=False),
+        top_k=10,
+        mode="avx2",
+        num_threads=2,
+        required_alignment=1,
+    )
+    assert bundle.effective_num_threads == 2
+    output = bundle.decode(
+        0,
+        torch.ones((1, 2560), dtype=torch.float32),
+        torch.ones((1, 2), dtype=torch.float32),
+        torch.tensor([[0, 1]], dtype=torch.int32),
+    )
+    assert tuple(output.shape) == (1, 2560)
+    assert bundle.last_telemetry is not None
+    assert bundle.last_telemetry.thread_count == 2
+    assert bundle.actual_thread_count == 2
+    telemetry = bundle.host_weight_telemetry()
+    assert telemetry["requested_num_threads"] == 2
+    assert telemetry["effective_num_threads"] == 2
+    assert telemetry["actual_thread_count"] == 2
+    assert telemetry["kernel_census"] == ("q4_k_test", "q5_1_test")
+    assert telemetry["execution_telemetry"]["thread_count"] == 2
+    assert telemetry["execution_telemetry"]["fallback_reason"] is None
+    bundle.close()
+
+
+def test_bundle_reports_serial_fallback_when_threading_is_ineligible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    monkeypatch.setattr("freetoken.moe.gguf_cpu._affinity_visible_physical_core_count", lambda: 4)
+    bundle = QwenGGUFCpuExpertBundle.from_host(
+        _host(), top_k=1, mode="scalar", num_threads=4, required_alignment=1
+    )
+    bundle.decode(
+        0,
+        torch.ones((1, 256), dtype=torch.float32),
+        torch.ones((1, 1), dtype=torch.float32),
+        torch.tensor([[0]], dtype=torch.int32),
+    )
+    assert bundle.last_telemetry is not None
+    assert bundle.last_telemetry.thread_count == 1
+    assert bundle.actual_thread_count == 1
+    telemetry = bundle.host_weight_telemetry()
+    assert telemetry["effective_num_threads"] == 4
+    assert telemetry["actual_thread_count"] == 1
+    assert telemetry["threading_fallback_reason"] == "native_avx2_or_layout_ineligible"
+    bundle.close()
 
 
 def test_bundle_preserves_mixed_layout_and_kernel_census() -> None:
@@ -421,6 +559,41 @@ def test_config_registration_guard_is_fail_closed() -> None:
     assert not qwen_gguf_cpu_bridge_supported(Config())
     assert not qwen_gguf_cpu_bridge_supported(device=None)
     assert not qwen_gguf_cpu_bridge_supported(backend=None)
+
+
+def test_config_registration_forwards_bridge_thread_policy() -> None:
+    from freetoken.moe.gguf_cpu import register_qwen_gguf_cpu_expert_bundle
+
+    class Config:
+        moe_backend = "cpu"
+        moe_cache_size = 0
+        device = "cpu"
+
+    bundle = register_qwen_gguf_cpu_expert_bundle(
+        Config(), host=_host(), top_k=1, mode="scalar", num_threads=0
+    )
+    assert bundle.requested_num_threads == 0
+    assert bundle.effective_num_threads == 1
+    bundle.close()
+
+
+def test_moe_cpu_threads_cli_semantics_remain_zero_auto_and_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("torch")
+    from freetoken.server.args import parse_args
+
+    class _Config:
+        architectures: ClassVar[list[str]] = ["LlamaForCausalLM"]
+
+        def to_dict(self) -> dict[str, str | list[str]]:
+            return {"architectures": self.architectures, "torch_dtype": "float32"}
+
+    monkeypatch.setattr("freetoken.utils.cached_load_hf_config", lambda _path: _Config())
+    default, _ = parse_args(["--model", "/models/anon"])
+    explicit, _ = parse_args(["--model", "/models/anon", "--moe-cpu-threads", "3"])
+    assert default.moe_cpu_threads == 0
+    assert explicit.moe_cpu_threads == 3
 
 
 def test_cpu_tensor_decode_adapter_returns_cpu_tensor() -> None:
