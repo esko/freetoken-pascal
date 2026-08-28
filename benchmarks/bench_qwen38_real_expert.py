@@ -79,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--offline", action="store_true", help="require all selected ranges to already be cached"
     )
+    parser.add_argument(
+        "--native-build-metadata",
+        type=Path,
+        help="optional JSON manifest from build_target_cpu_native.py",
+    )
     parser.add_argument("--output", type=Path, help="write JSON report to this path")
     args = parser.parse_args(argv)
     try:
@@ -93,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             cache_dir=args.cache_dir,
             offline=args.offline,
+            native_build_metadata_path=args.native_build_metadata,
             command=shlex.join([sys.argv[0], *(argv if argv is not None else sys.argv[1:])]),
         )
     except ArtifactProbeError as error:

@@ -10,6 +10,7 @@ timed repetition; native setup and range fetches happen before timing.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import platform
 import statistics
@@ -33,7 +34,7 @@ from freetoken.moe.real_artifact_probe import (
     RangeTransport,
 )
 
-BENCHMARK_SCHEMA = "qwen38-real-artifact-target-cpu-benchmark"
+BENCHMARK_SCHEMA = "qwen38-real-artifact-target-cpu-benchmark.schema.json"
 BENCHMARK_SCHEMA_VERSION = 1
 SUPPORTED_LAYERS = frozenset({0, 2})
 MIN_WARMUP = 5
@@ -90,13 +91,12 @@ def _host_metadata() -> dict[str, Any]:
 def _blas_metadata() -> dict[str, Any]:
     """Capture BLAS thread controls and the process CPU affinity.
 
-    Explicitly configured non-single-thread BLAS is rejected because it makes the
-    tiny dense reference timing depend on an uncontrolled worker pool.  Unset
-    controls are retained as a warning: NumPy's linked BLAS may still be single
-    threaded, but this harness cannot prove that from the environment alone.
+    Every supported BLAS thread control must be explicitly set to one.  An unset
+    variable is just as unreproducible as a value greater than one because a linked
+    BLAS may otherwise create an uncontrolled worker pool.
     """
     values = {name: os.environ.get(name) for name in _BLAS_THREAD_VARS}
-    invalid = {name: value for name, value in values.items() if value not in {None, "1"}}
+    invalid = {name: value for name, value in values.items() if value != "1"}
     if invalid:
         rendered = ", ".join(f"{name}={value!r}" for name, value in invalid.items())
         raise ArtifactProbeError(
@@ -107,17 +107,69 @@ def _blas_metadata() -> dict[str, Any]:
         affinity = sorted(int(cpu) for cpu in os.sched_getaffinity(0))
     except (AttributeError, OSError):
         affinity = None
-    unset = [name for name, value in values.items() if value is None]
     return {
         "thread_env": values,
-        "all_explicit_values_are_one": not invalid,
-        "warning": (
-            "BLAS thread variables unset; linked BLAS thread count is not proven to be one"
-            if unset
-            else None
-        ),
+        "all_values_are_one": not invalid,
         "process_affinity": affinity,
     }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise ArtifactProbeError(f"cannot hash file {path}: {error}") from error
+    return digest.hexdigest()
+
+
+def _native_library_metadata(build_metadata_path: Path | None) -> dict[str, Any]:
+    """Capture native helper paths/hashes and optional reproducible build metadata."""
+    libraries: dict[str, Any] = {}
+    for name, env_name in (
+        ("q4_k", "FREETOKEN_Q4K_NATIVE_LIB"),
+        ("mixed_gemv", "FREETOKEN_MIXED_GEMV_NATIVE_LIB"),
+    ):
+        raw_path = os.environ.get(env_name)
+        entry: dict[str, Any] = {"environment": env_name, "path": raw_path}
+        if raw_path:
+            path = Path(raw_path)
+            if not path.is_file():
+                raise ArtifactProbeError(f"native helper {env_name} does not name a file: {path}")
+            entry["sha256"] = _sha256_file(path)
+        else:
+            entry["sha256"] = None
+            entry["resolution"] = "package/module discovery"
+        libraries[name] = entry
+    metadata: dict[str, Any] = {"libraries": libraries}
+    if build_metadata_path is not None:
+        try:
+            metadata["build"] = json.loads(Path(build_metadata_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ArtifactProbeError(
+                f"cannot read native build metadata {build_metadata_path}: {error}"
+            ) from error
+    return metadata
+
+
+def _census_identity(census: Mapping[str, Any]) -> dict[str, str]:
+    """Return the census-pinned model identity and its declared/verified status."""
+    model_sha256 = census.get("model_sha256")
+    if (
+        not isinstance(model_sha256, str)
+        or len(model_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in model_sha256)
+    ):
+        raise ArtifactProbeError("census must declare a lowercase 64-character model_sha256")
+    status = census.get("model_sha256_status")
+    if status is None:
+        shard_statuses = {str(item.get("sha256_status")) for item in census.get("shards", ())}
+        status = "verified" if shard_statuses == {"verified"} else "declared"
+    if status not in {"declared", "verified"}:
+        raise ArtifactProbeError(f"census has unsupported model_sha256_status {status!r}")
+    return {"model_sha256": model_sha256, "model_sha256_status": str(status)}
 
 
 def _hash_array(value: np.ndarray) -> str:
@@ -175,10 +227,16 @@ def _timed_cold_reference(
     elapsed = time.perf_counter_ns() - started
     return output, {
         "elapsed_ns": int(elapsed),
-        "dequant_elapsed_ns": int(dequant_elapsed),
+        "source_validation_and_dequant_elapsed_ns": int(dequant_elapsed),
         "dense_elapsed_ns": int(dense_elapsed),
         "dequantized": True,
-        "timed_components": ["gguf.dequantize", "dense_fp32_swiglu"],
+        "timed_components": [
+            "range/source validation",
+            "packed bytes/view setup",
+            "sha256 hashing",
+            "gguf.dequantize",
+            "dense_fp32_swiglu",
+        ],
         "packed_source_sha256": packed_hashes,
         "dense_projection_sha256": {
             projection: _hash_array(dense[projection]) for projection in ("gate", "up", "down")
@@ -302,6 +360,7 @@ def benchmark_qwen38_expert(
     cache_dir: Path | None = None,
     offline: bool = False,
     command: str | None = None,
+    native_build_metadata_path: Path | None = None,
 ) -> dict[str, Any]:
     """Benchmark one selected real expert with strict native/correctness gates."""
     if layer not in SUPPORTED_LAYERS:
@@ -315,6 +374,7 @@ def benchmark_qwen38_expert(
         )
 
     blas = _blas_metadata()
+    native_metadata = _native_library_metadata(native_build_metadata_path)
 
     # Resolve the oracle and commit before fetching bytes, matching the bounded probe's
     # fail-early behavior.  Setup, metadata checks and range fetches are never timed.
@@ -331,6 +391,12 @@ def benchmark_qwen38_expert(
     )
     layout = artifact["layout"]
     sources = artifact["sources"]
+    census_identity = _census_identity(artifact["census"])
+    census_sha256 = str(artifact.get("census_sha256", ""))
+    if len(census_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in census_sha256
+    ):
+        raise ArtifactProbeError("artifact loader must provide the exact census file SHA-256")
     hidden_rng = np.random.default_rng(seed)
     hidden = hidden_rng.standard_normal((1, layout.descriptor(layer, "gate").input_dim)).astype(
         np.float32
@@ -480,7 +546,6 @@ def benchmark_qwen38_expert(
         "q4k": selected_behavior["q4k_fallback_reason"],
         "mixed": selected_behavior["mixed_fallback_reason"],
     }
-    warnings = [item for item in (blas.get("warning"),) if item]
     return {
         "schema_name": BENCHMARK_SCHEMA,
         "schema_version": BENCHMARK_SCHEMA_VERSION,
@@ -492,9 +557,13 @@ def benchmark_qwen38_expert(
             "command": command or "<python API>",
             "cpu": _host_metadata(),
             "blas": blas,
+            "native": native_metadata,
             "manifest_revision": artifact["source"]["revision"],
             "manifest_repository": artifact["source"]["repository"],
             "variant": variant,
+            "census_sha256": census_sha256,
+            **census_identity,
+            "identity_scope": "declared full-model identity; only selected expert ranges were read",
             "range_hashes": range_hashes,
             "ranges": ranges,
         },
@@ -518,7 +587,10 @@ def benchmark_qwen38_expert(
         "oracle": {
             **probe.gguf_oracle_identity(),
             "operation": "dequantize + FP32 dense SwiGLU",
-            "cold_timed_reference": "dequantize + FP32 dense SwiGLU on every repetition",
+            "cold_timed_reference": (
+                "range/source validation + packed bytes/view setup + SHA-256 hashing + "
+                "dequantize + FP32 dense SwiGLU on every repetition"
+            ),
             "resident_setup_elapsed_ns": int(resident_setup_elapsed),
             "resident_setup_includes": ["gguf.dequantize"],
             "packed_source_sha256": packed_hashes,
@@ -566,7 +638,8 @@ def benchmark_qwen38_expert(
             },
             "cold_dequant_dense": {
                 "scope": (
-                    "dequantization plus dense FP32 SwiGLU inside every reference timed sample"
+                    "range/source validation, packed bytes/view setup, SHA-256 hashing, "
+                    "dequantization and dense FP32 SwiGLU inside every reference timed sample"
                 ),
                 "reference": cold_stats,
                 "native": native_stats,
@@ -574,7 +647,7 @@ def benchmark_qwen38_expert(
                 / native_median,
             },
         },
-        "warnings": warnings,
+        "warnings": [],
         "limitations": [
             "selected expert ranges only; no complete shard download or checksum",
             "one token and one route; no batch, top-k, route/thread sweep, cache, hybrid "

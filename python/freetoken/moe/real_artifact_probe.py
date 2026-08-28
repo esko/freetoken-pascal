@@ -986,6 +986,10 @@ def load_qwen38_expert_artifact(
     """
     manifest = _load_json(Path(manifest_path), "manifest")
     census = _load_json(Path(census_path), "census")
+    try:
+        census_sha256 = hashlib.sha256(Path(census_path).read_bytes()).hexdigest()
+    except OSError as error:
+        raise ArtifactProbeError(f"cannot hash census metadata {census_path}: {error}") from error
     source, manifest_shards = _validate_metadata(manifest, census, variant)
     records = _tensor_records(census, int(layer))
     range_transport = transport or UrllibRangeTransport()
@@ -1045,6 +1049,7 @@ def load_qwen38_expert_artifact(
     return {
         "manifest": manifest,
         "census": census,
+        "census_sha256": census_sha256,
         "source": source,
         "layout": layout,
         "sources": sources,

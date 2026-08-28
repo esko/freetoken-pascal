@@ -1,0 +1,339 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esko/freetoken-pascal/schemas/qwen38-real-artifact-target-cpu-benchmark.schema.json",
+  "title": "FreeToken-Pascal bounded Qwen3.8 target-CPU benchmark",
+  "description": "Preliminary one-token/one-route evidence over three selected expert ranges.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_name", "schema_version", "evidence_status", "claim_status",
+    "validation_class", "metadata", "source", "fetch", "workload",
+    "selected_behavior", "oracle", "warmups", "samples", "correctness",
+    "statistics", "warnings", "limitations"
+  ],
+  "properties": {
+    "schema_name": {"const": "qwen38-real-artifact-target-cpu-benchmark.schema.json"},
+    "schema_version": {"const": 1},
+    "evidence_status": {"const": "measured"},
+    "claim_status": {"const": "correctness_passed"},
+    "validation_class": {"const": "H0/no-P4"},
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit", "command", "cpu", "blas", "native", "manifest_revision",
+        "manifest_repository", "variant", "census_sha256", "model_sha256",
+        "model_sha256_status", "identity_scope", "range_hashes", "ranges"
+      ],
+      "properties": {
+        "commit": {"$ref": "#/$defs/commit"},
+        "command": {"type": "string", "minLength": 1},
+        "cpu": {"type": "object", "minProperties": 1, "additionalProperties": true},
+        "blas": {"$ref": "#/$defs/blas"},
+        "native": {"$ref": "#/$defs/native"},
+        "manifest_revision": {"type": "string", "minLength": 1},
+        "manifest_repository": {"type": "string", "minLength": 1},
+        "variant": {"type": "string", "minLength": 1},
+        "census_sha256": {"$ref": "#/$defs/sha256"},
+        "model_sha256": {"$ref": "#/$defs/sha256"},
+        "model_sha256_status": {"enum": ["declared", "verified"]},
+        "identity_scope": {"type": "string", "minLength": 1},
+        "range_hashes": {
+          "type": "object",
+          "minProperties": 3,
+          "additionalProperties": {"$ref": "#/$defs/sha256"}
+        },
+        "ranges": {
+          "type": "array",
+          "minItems": 3,
+          "items": {"type": "object", "additionalProperties": true}
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["repository", "revision", "variant", "base_url"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "minLength": 1},
+        "variant": {"type": "string", "minLength": 1},
+        "base_url": {"type": "string", "minLength": 1}
+      }
+    },
+    "fetch": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "transport", "offline", "cache_dir", "cache_hits", "cache_misses",
+        "range_count", "fetched_bytes", "full_shard_bytes"
+      ],
+      "properties": {
+        "transport": {"const": "http-range"},
+        "offline": {"type": "boolean"},
+        "cache_dir": {"type": ["string", "null"]},
+        "cache_hits": {"type": "integer", "minimum": 0},
+        "cache_misses": {"type": "integer", "minimum": 0},
+        "range_count": {"type": "integer", "minimum": 3},
+        "fetched_bytes": {"type": "integer", "minimum": 1},
+        "full_shard_bytes": {"const": 0}
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "layer", "expert", "seed", "tokens", "active_tokens", "route_count",
+        "expert_ids", "routing_weights", "hidden_size", "hidden_sha256",
+        "expert_ids_sha256", "routing_weights_sha256"
+      ],
+      "properties": {
+        "layer": {"enum": [0, 2]},
+        "expert": {"type": "integer", "minimum": 0},
+        "seed": {"type": "integer"},
+        "tokens": {"const": 1},
+        "active_tokens": {"const": 1},
+        "route_count": {"const": 1},
+        "expert_ids": {"type": "array", "minItems": 1},
+        "routing_weights": {"type": "array", "minItems": 1},
+        "hidden_size": {"type": "integer", "minimum": 1},
+        "hidden_sha256": {"$ref": "#/$defs/sha256"},
+        "expert_ids_sha256": {"$ref": "#/$defs/sha256"},
+        "routing_weights_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "selected_behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested_mode", "backend", "kernel_census", "q4k_isa",
+        "q4k_fallback_reason", "mixed_isa", "mixed_fallback_reason", "fallbacks"
+      ],
+      "properties": {
+        "requested_mode": {"const": "forced_avx2"},
+        "backend": {"type": "string", "minLength": 1},
+        "kernel_census": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "q4k_isa": {"const": "avx2"},
+        "q4k_fallback_reason": {"type": ["string", "null"]},
+        "mixed_isa": {"const": "avx2"},
+        "mixed_fallback_reason": {"type": ["string", "null"]},
+        "fallbacks": {"type": "object", "additionalProperties": true}
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name", "package", "version", "operation", "cold_timed_reference",
+        "resident_setup_elapsed_ns", "resident_setup_includes",
+        "packed_source_sha256", "dense_projection_sha256"
+      ],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "package": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "operation": {"type": "string", "minLength": 1},
+        "cold_timed_reference": {"type": "string", "minLength": 1},
+        "resident_setup_elapsed_ns": {"type": "integer", "minimum": 0},
+        "resident_setup_includes": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "packed_source_sha256": {"$ref": "#/$defs/projection_hashes"},
+        "dense_projection_sha256": {"$ref": "#/$defs/projection_hashes"}
+      }
+    },
+    "warmups": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "reference_cold_dequant_dense", "reference_dense_resident", "native"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 5},
+        "reference_cold_dequant_dense": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/cold_sample"}},
+        "reference_dense_resident": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/resident_sample"}},
+        "native": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/native_sample"}}
+      }
+    },
+    "samples": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference_cold_dequant_dense", "reference_dense_resident", "native"],
+      "properties": {
+        "reference_cold_dequant_dense": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/cold_sample"}},
+        "reference_dense_resident": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/resident_sample"}},
+        "native": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/native_sample"}}
+      }
+    },
+    "correctness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["correct", "cold_dequant_dense", "dense_resident"],
+      "properties": {
+        "correct": {"const": true},
+        "cold_dequant_dense": {"$ref": "#/$defs/correctness_group"},
+        "dense_resident": {"$ref": "#/$defs/correctness_group"}
+      }
+    },
+    "statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "dense_resident", "cold_dequant_dense"],
+      "properties": {
+        "scope": {"type": "string", "minLength": 1},
+        "dense_resident": {"$ref": "#/$defs/statistics_group"},
+        "cold_dequant_dense": {"$ref": "#/$defs/statistics_group"}
+      }
+    },
+    "warnings": {"const": []},
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "blas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["thread_env", "all_values_are_one", "process_affinity"],
+      "properties": {
+        "thread_env": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "BLIS_NUM_THREADS", "GOTO_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"],
+          "properties": {
+            "OMP_NUM_THREADS": {"const": "1"},
+            "OPENBLAS_NUM_THREADS": {"const": "1"},
+            "MKL_NUM_THREADS": {"const": "1"},
+            "BLIS_NUM_THREADS": {"const": "1"},
+            "GOTO_NUM_THREADS": {"const": "1"},
+            "VECLIB_MAXIMUM_THREADS": {"const": "1"},
+            "NUMEXPR_NUM_THREADS": {"const": "1"}
+          }
+        },
+        "all_values_are_one": {"const": true},
+        "process_affinity": {
+          "anyOf": [
+            {"type": "null"},
+            {"type": "array", "items": {"type": "integer", "minimum": 0}}
+          ]
+        }
+      }
+    },
+    "native": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["libraries"],
+      "properties": {
+        "libraries": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["q4_k", "mixed_gemv"],
+          "properties": {
+            "q4_k": {"$ref": "#/$defs/native_library"},
+            "mixed_gemv": {"$ref": "#/$defs/native_library"}
+          }
+        },
+        "build": {"type": "object", "additionalProperties": true}
+      }
+    },
+    "native_library": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["environment", "path", "sha256"],
+      "properties": {
+        "environment": {"type": "string", "minLength": 1},
+        "path": {"type": ["string", "null"]},
+        "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "resolution": {"type": "string", "minLength": 1}
+      }
+    },
+    "projection_hashes": {
+      "type": "object",
+      "required": ["gate", "up", "down"],
+      "additionalProperties": false,
+      "properties": {
+        "gate": {"$ref": "#/$defs/sha256"},
+        "up": {"$ref": "#/$defs/sha256"},
+        "down": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "base_sample": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["elapsed_ns", "output_sha256"],
+      "properties": {
+        "elapsed_ns": {"type": "integer", "exclusiveMinimum": 0},
+        "output_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "cold_sample": {
+      "allOf": [
+        {"$ref": "#/$defs/base_sample"},
+        {
+          "required": ["dequantized", "timed_components", "packed_source_sha256", "dense_projection_sha256"],
+          "properties": {
+            "dequantized": {"const": true},
+            "timed_components": {"type": "array", "minItems": 5, "items": {"type": "string"}},
+            "packed_source_sha256": {"$ref": "#/$defs/projection_hashes"},
+            "dense_projection_sha256": {"$ref": "#/$defs/projection_hashes"}
+          }
+        }
+      ]
+    },
+    "resident_sample": {
+      "allOf": [
+        {"$ref": "#/$defs/base_sample"},
+        {
+          "required": ["dequantized", "timed_components", "dense_projection_sha256"],
+          "properties": {
+            "dequantized": {"const": false},
+            "timed_components": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "dense_projection_sha256": {"$ref": "#/$defs/projection_hashes"}
+          }
+        }
+      ]
+    },
+    "native_sample": {
+      "allOf": [
+        {"$ref": "#/$defs/base_sample"},
+        {
+          "required": ["timed_operation", "telemetry"],
+          "properties": {
+            "timed_operation": {"const": "executor.execute"},
+            "telemetry": {"type": "object", "minProperties": 1, "additionalProperties": true}
+          }
+        }
+      ]
+    },
+    "correctness_group": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["comparison_count", "comparisons", "rtol", "atol"],
+      "properties": {
+        "comparison_count": {"type": "integer", "minimum": 1},
+        "comparisons": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": true}},
+        "rtol": {"type": "number", "minimum": 0},
+        "atol": {"type": "number", "minimum": 0}
+      }
+    },
+    "stats": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["sample_count", "median_elapsed_ns", "min_elapsed_ns", "max_elapsed_ns", "coefficient_of_variation"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 1},
+        "median_elapsed_ns": {"type": "number", "exclusiveMinimum": 0},
+        "min_elapsed_ns": {"type": "integer", "exclusiveMinimum": 0},
+        "max_elapsed_ns": {"type": "integer", "exclusiveMinimum": 0},
+        "coefficient_of_variation": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "statistics_group": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["scope", "reference", "native", "reference_to_native_median_ratio"],
+      "properties": {
+        "scope": {"type": "string", "minLength": 1},
+        "reference": {"$ref": "#/$defs/stats"},
+        "native": {"$ref": "#/$defs/stats"},
+        "reference_to_native_median_ratio": {"type": "number", "exclusiveMinimum": 0}
+      }
+    }
+  }
+}

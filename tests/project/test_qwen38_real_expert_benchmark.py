@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import importlib.util
 import itertools
 from pathlib import Path
 from typing import ClassVar
@@ -9,12 +11,20 @@ import pytest
 from freetoken.moe import real_artifact_benchmark as benchmark
 from freetoken.moe.real_artifact_probe import ArtifactProbeError
 
+ROOT = Path(__file__).resolve().parents[2]
+VALIDATOR_SPEC = importlib.util.spec_from_file_location(
+    "validate_evidence", ROOT / "scripts" / "validate_evidence.py"
+)
+assert VALIDATOR_SPEC and VALIDATOR_SPEC.loader
+VALIDATE_EVIDENCE = importlib.util.module_from_spec(VALIDATOR_SPEC)
+VALIDATOR_SPEC.loader.exec_module(VALIDATE_EVIDENCE)
+
 
 class _Descriptor:
-    def __init__(self, projection: str, quant_name: str = "Q4_K") -> None:
-        self.layer_id = 0
+    def __init__(self, projection: str, quant_name: str = "Q4_K", *, layer: int = 0) -> None:
+        self.layer_id = layer
         self.projection = projection
-        self.quant_type = 12
+        self.quant_type = {"Q4_K": 12, "Q5_K": 13, "Q8_0": 8}[quant_name]
         self.quant_name = quant_name
         self.num_experts = 1
         self.output_dim = 2 if projection != "down" else 4
@@ -26,25 +36,35 @@ class _Descriptor:
 
 
 class _Layout:
-    layers = (0,)
     top_k = 2
 
-    def __init__(self, *, down_quant: str = "Q4_K") -> None:
+    def __init__(self, *, layer: int = 0, down_quant: str = "Q4_K") -> None:
+        self.layer = layer
+        self.layers = (layer,)
         self.descriptors = tuple(
-            _Descriptor(projection, down_quant if projection == "down" else "Q4_K")
+            _Descriptor(
+                projection,
+                down_quant if projection == "down" else ("Q5_K" if layer == 2 else "Q4_K"),
+                layer=layer,
+            )
             for projection in ("gate", "up", "down")
         )
 
     def descriptor(self, layer: int, projection: str) -> _Descriptor:
-        assert layer == 0
+        assert layer == self.layer
         return next(item for item in self.descriptors if item.projection == projection)
 
 
 class _Telemetry:
-    def __init__(self, backend: str = "mixed_avx2", fallback_reason: str | None = None) -> None:
+    def __init__(
+        self,
+        backend: str = "mixed_avx2",
+        fallback_reason: str | None = None,
+        kernels: tuple[str, ...] = ("q4_k_avx2", "q4_k_avx2"),
+    ) -> None:
         self.backend = backend
         self.fallback_reason = fallback_reason
-        self.kernel_census = ("q4_k_avx2", "q4_k_avx2")
+        self.kernel_census = kernels
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -73,7 +93,8 @@ class _FakeExecutor:
     primitive_isa = "avx2"
 
     def __init__(self, layout, **kwargs) -> None:
-        del layout, kwargs
+        self.layout = layout
+        del kwargs
         self.primitive = _Primitive(self.primitive_isa)
         self.mixed_primitive = _Primitive(self.primitive_isa)
         self.backend = "mixed_avx2"
@@ -87,27 +108,32 @@ class _FakeExecutor:
 
     def execute(self, layer: int, hidden, expert_ids, weights):
         assert self.prepared
-        assert layer == 0
+        assert layer == self.layout.layer
         assert hidden.shape == (1, 4)
         assert expert_ids.tolist() == [[0]]
         assert weights.tolist() == [[1.0]]
         self.calls += 1
         output = np.full((1, 4), self.output_delta, dtype=np.float32)
-        return _Result(output, _Telemetry())
+        kernels = tuple(
+            f"{descriptor.quant_name.lower()}_avx2" for descriptor in self.layout.descriptors
+        )
+        return _Result(output, _Telemetry(kernels=kernels))
 
     def _backend_for(self, layer: int) -> str:
-        assert layer == 0
+        assert layer == self.layout.layer
         return self.backend
 
     def _kernel_census(self, layer: int) -> tuple[str, ...]:
-        assert layer == 0
-        return ("q4_k_avx2", "q4_k_avx2")
+        assert layer == self.layout.layer
+        return tuple(
+            f"{descriptor.quant_name.lower()}_avx2" for descriptor in self.layout.descriptors
+        )
 
     def close(self) -> None:
         pass
 
 
-def _artifact() -> dict[str, object]:
+def _artifact(*, layer: int = 0) -> dict[str, object]:
     return {
         "source": {
             "repository": "owner/model",
@@ -115,7 +141,13 @@ def _artifact() -> dict[str, object]:
             "variant": "UD-Q4_K_XL",
             "base_url": "https://example/model",
         },
-        "layout": _Layout(),
+        "census": {
+            "model_sha256": "c" * 64,
+            "evidence_status": "artifact-metadata",
+            "shards": [{"sha256_status": "declared"}],
+        },
+        "census_sha256": "d" * 64,
+        "layout": _Layout(layer=layer, down_quant="Q8_0" if layer == 2 else "Q4_K"),
         "sources": {projection: b"x" for projection in ("gate", "up", "down")},
         "ranges": [
             {
@@ -142,8 +174,12 @@ def _artifact() -> dict[str, object]:
 
 def _patch_common(monkeypatch: pytest.MonkeyPatch, *, output_delta: float = 0.0) -> list[int]:
     calls: list[int] = []
+    for variable in benchmark._BLAS_THREAD_VARS:
+        monkeypatch.setenv(variable, "1")
     monkeypatch.setattr(
-        benchmark.probe, "load_qwen38_expert_artifact", lambda **kwargs: _artifact()
+        benchmark.probe,
+        "load_qwen38_expert_artifact",
+        lambda **kwargs: _artifact(layer=kwargs["layer"]),
     )
     monkeypatch.setattr(benchmark.probe, "_load_gguf_oracle", lambda: object())
     monkeypatch.setattr(benchmark.probe, "Q4KExecutor", _FakeExecutor)
@@ -249,3 +285,47 @@ def test_benchmark_rejects_non_single_thread_blas(monkeypatch: pytest.MonkeyPatc
             warmup=5,
             offline=True,
         )
+
+
+def test_benchmark_records_promoted_layer2_kernel_census(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_common(monkeypatch)
+    report = benchmark.benchmark_qwen38_expert(
+        manifest_path=Path("manifest.json"),
+        census_path=Path("census.json"),
+        layer=2,
+        repeats=1,
+        warmup=5,
+        offline=True,
+    )
+
+    assert report["workload"]["layer"] == 2
+    assert report["selected_behavior"]["kernel_census"] == [
+        "q5_k_avx2",
+        "q5_k_avx2",
+        "q8_0_avx2",
+    ]
+
+
+def test_benchmark_report_schema_and_semantics_are_machine_validatable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_common(monkeypatch)
+    report = benchmark.benchmark_qwen38_expert(
+        manifest_path=Path("manifest.json"),
+        census_path=Path("census.json"),
+        repeats=1,
+        warmup=5,
+        offline=True,
+    )
+
+    assert VALIDATE_EVIDENCE.validate_document(report, schema_dir=ROOT / "schemas") == []
+
+    invalid = copy.deepcopy(report)
+    invalid["samples"]["reference_cold_dequant_dense"][0]["timed_components"].remove(
+        "sha256 hashing"
+    )
+    invalid["samples"]["reference_cold_dequant_dense"][0]["timed_components"].append(
+        "unrecognized work"
+    )
+    errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=ROOT / "schemas")
+    assert any("cold sample 0 omits timed components" in error for error in errors)

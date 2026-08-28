@@ -67,20 +67,32 @@ one route from the Qwen3.8 Q4 artifact. Run it once for the normal layer-0 geome
 once for the promoted layer-2 Q5_K/Q8_0 geometry, using the bounded range cache:
 
 ```bash
-OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
-  PYTHONPATH=python python benchmarks/bench_qwen38_real_expert.py \
-  --layer 0 --offline --output results/qwen38-target-cpu-layer0.json
-OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
-  PYTHONPATH=python python benchmarks/bench_qwen38_real_expert.py \
-  --layer 2 --offline --output results/qwen38-target-cpu-layer2.json
+python scripts/build_target_cpu_native.py \
+  --output-dir .cache/freetoken/target-cpu-native
+
+export FREETOKEN_Q4K_NATIVE_LIB="$PWD/.cache/freetoken/target-cpu-native/q4_k_native.so"
+export FREETOKEN_MIXED_GEMV_NATIVE_LIB="$PWD/.cache/freetoken/target-cpu-native/mixed_gemv_native.so"
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1
+export GOTO_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+PYTHONPATH=python python benchmarks/bench_qwen38_real_expert.py \
+  --layer 0 --offline \
+  --native-build-metadata .cache/freetoken/target-cpu-native/build.json \
+  --output results/qwen38-target-cpu-layer0.json
+PYTHONPATH=python python benchmarks/bench_qwen38_real_expert.py \
+  --layer 2 --offline \
+  --native-build-metadata .cache/freetoken/target-cpu-native/build.json \
+  --output results/qwen38-target-cpu-layer2.json
+python scripts/validate_evidence.py results/qwen38-target-cpu-layer0.json
+python scripts/validate_evidence.py results/qwen38-target-cpu-layer2.json
 ```
 
 This is preliminary H0 evidence, not a full-engine or P4 result. The report retains every
 warmup and raw sample, exact commit and command, CPU/ISA, BLAS environment and process
 affinity, manifest revision, selected range hashes, kernel/fallback telemetry and a
 per-sample correctness comparison. It reports two independent descriptive comparisons:
-dense-resident (dequantization once outside timing) and cold dequantize-plus-dense
-(dequantization inside every reference sample). Their medians and ratios are never merged.
+dense-resident (dequantization once outside timing) and a cold full-reference procedure.
+The latter includes source/layout validation, packed byte/view setup, hashing, dequantization,
+and dense execution inside every reference sample. Their medians and ratios are never merged.
 The benchmark requires at least five warmups, fails if forced AVX2 is not actually selected,
 and fails rather than reporting statistics when either reference comparison mismatches.
 
