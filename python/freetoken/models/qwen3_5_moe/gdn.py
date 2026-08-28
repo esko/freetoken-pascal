@@ -6,11 +6,15 @@ from freetoken.core import get_global_ctx
 from freetoken.kernel.causal_conv1d import causal_conv1d_decode, causal_conv1d_varlen
 from freetoken.layers import BaseOP, LinearColParallelMerged
 
+from collections.abc import Callable
+
 from freetoken.kernel.triton.fp8_block_linear import Fp8BlockColMerged
 from freetoken.kernel.triton.fp8_pertensor_linear import Fp8PerTensorColMerged
 
 from .gdn_kernels import gdn_decode_fla, gdn_prefill_chunk_fla
 from .quant_linear import make_replicated_quant
+
+ObservationHook = Callable[[str, dict[str, object]], None]
 
 
 class _DepthwiseConv1d(BaseOP):
@@ -113,7 +117,9 @@ class Qwen3_5GatedDeltaNet(BaseOP):
     def _conv_weight(self) -> torch.Tensor:
         return self.conv1d.weight.squeeze(1)  # [conv_dim, kernel] for the fused kernel
 
-    def _conv_prefill(self, conv_in, pool, cu_seqlens, cache_indices, has_initial_state) -> torch.Tensor:
+    def _conv_prefill(
+        self, conv_in, pool, cu_seqlens, cache_indices, has_initial_state
+    ) -> torch.Tensor:
         """Varlen causal conv (fused sgl_kernel) with silu; reads/updates each request's
         conv state in place by ``cache_indices`` slot. ``conv_in`` [total, conv_dim].
         ``cu_seqlens`` / ``cache_indices`` / ``has_initial_state`` come from FLAMetadata."""
@@ -144,7 +150,11 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         conv_win = conv_in[fla.track_conv_src].transpose(-1, -2).contiguous()  # [nt, conv_dim, K-1]
         cv.index_copy_(0, fla.track_dst, conv_win.to(cv.dtype))
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        debug_observer: ObservationHook | None = None,
+    ) -> torch.Tensor:
         ctx = get_global_ctx()
         batch = ctx.batch
         pool = ctx.linear_state_pool
@@ -218,7 +228,30 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         core_out = core_out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
         out = self.norm.forward(core_out, z).reshape(total, -1)
-        return self.out_proj.forward(out)
+        result = self.out_proj.forward(out)
+        if debug_observer is not None:
+            slots = fla.cache_indices.to(dtype=torch.long)
+            reqs = batch.padded_reqs if hasattr(batch, "padded_reqs") else batch.reqs
+            request_uids = torch.tensor(
+                [int(req.uid) for req in reqs], dtype=torch.int64, device=slots.device
+            )
+            debug_observer(
+                "gdn",
+                {
+                    "layer_id": self.layer_id,
+                    "request_uids": request_uids,
+                    "state_slots": slots.detach().clone(),
+                    "conv_state": pool.conv_states[li]
+                    .index_select(0, slots)
+                    .detach()
+                    .clone(),
+                    "recurrent_state": pool.recurrent_states[li]
+                    .index_select(0, slots)
+                    .detach()
+                    .clone(),
+                },
+            )
+        return result
 
 
 __all__ = ["Qwen3_5GatedDeltaNet"]

@@ -100,6 +100,58 @@ class QSAKVCache(MHAKVCache):
     ) -> None:
         self.compressed_k_cache(layer_id)[compressed_rows.long()] = keys
 
+    def debug_state(
+        self,
+        layer_id: int,
+        request_rows: list[int],
+        compressed_rows: tuple[torch.Tensor, ...],
+    ) -> dict[str, torch.Tensor]:
+        """Return semantic QSA state for an opt-in correctness snapshot.
+
+        Only the request rows and compressed rows participating in this forward are
+        copied. The normal path never calls this method, so it adds no cache-wide clone
+        or allocation to serving.
+        """
+        rows = torch.as_tensor(request_rows, dtype=torch.long, device=self.device)
+        dense = self._dense(layer_id)
+        relevant = [row.to(device=self.device, dtype=torch.long) for row in compressed_rows]
+        if relevant:
+            compressed = torch.unique(torch.cat(relevant, dim=0))
+        else:
+            compressed = torch.empty(0, dtype=torch.long, device=self.device)
+        if self._pending_k is None:
+            pending_k = torch.zeros(
+                (
+                    rows.numel(),
+                    self._compress_ratio,
+                    self._index_num_kv_heads,
+                    self._index_head_dim,
+                ),
+                dtype=self.dtype,
+                device=self.device,
+            )
+            pending_pos = torch.full(
+                (rows.numel(), self._compress_ratio), -1, dtype=torch.int64, device=self.device
+            )
+            pending_rope = torch.full(
+                (rows.numel(), self._compress_ratio, 3),
+                -1,
+                dtype=torch.int64,
+                device=self.device,
+            )
+        else:
+            pending_k = self._pending_k[dense].index_select(0, rows)
+            pending_pos = self._pending_pos[dense].index_select(0, rows)
+            pending_rope = self._pending_rope[dense].index_select(0, rows)
+        return {
+            "state_slots": rows,
+            "compressed_rows": compressed,
+            "compressed_k": self.compressed_k_cache(layer_id).index_select(0, compressed),
+            "pending_k": pending_k,
+            "pending_pos": pending_pos,
+            "pending_rope": pending_rope,
+        }
+
     def ensure_pending_capacity(self, request_rows: int) -> None:
         """Allocate or grow the per-request incomplete-group ring.
 
@@ -173,7 +225,11 @@ class QSAKVCache(MHAKVCache):
             0, slots, positions.to(device=self.device, dtype=torch.int64)
         )
         if rope_positions is None:
-            rope_positions = positions.to(device=self.device, dtype=torch.int64).view(-1, 1).expand(-1, 3)
+            rope_positions = (
+                positions.to(device=self.device, dtype=torch.int64)
+                .view(-1, 1)
+                .expand(-1, 3)
+            )
         if rope_positions.shape != (positions.numel(), 3):
             raise ValueError(
                 "QSA pending RoPE positions must have shape [tokens, 3], got "

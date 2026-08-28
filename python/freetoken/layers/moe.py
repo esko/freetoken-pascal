@@ -1,7 +1,9 @@
 import os
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Tuple
 
 import torch
+
 from freetoken.core import get_global_ctx
 from freetoken.distributed import DistributedCommunicator, get_tp_info
 from freetoken.moe import is_offload_moe_backend
@@ -19,6 +21,7 @@ if TYPE_CHECKING:
 # ``_run_experts`` (dense) with a precomputed routing instead of going through the
 # generic softmax+top-k path.
 TopK = Tuple[torch.Tensor, torch.Tensor]
+DebugObserver = Callable[[str, dict[str, object]], None]
 
 # Hybrid decode overlaps the CPU overflow GEMV behind the GPU PCIe fetch + GEMM by
 # default. Set FREETOKEN_HYBRID_OVERLAP=0 to force the serial path (CPU sync before the
@@ -56,6 +59,31 @@ class MoELayer(BaseOP):
         intermediate_size_per_partition = div_even(intermediate_size, tp_size)
         if allocate_experts:
             self._alloc_resident_experts(intermediate_size_per_partition)
+
+    def _route_and_observe(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor | None,
+        observer: DebugObserver | None,
+    ) -> TopK:
+        topk_weights, topk_ids = fused_topk(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            topk=self.top_k,
+            renormalize=self.renormalize,
+        )
+        if observer is not None:
+            # Offload decode rewrites ids into cache-slot ids in place. Snapshot the
+            # semantic global ids before handing the route to any expert movement code.
+            observer(
+                "router",
+                {
+                    "layer_id": getattr(self, "layer_id", None),
+                    "ids": topk_ids.detach().clone(),
+                    "weights": topk_weights.detach().clone(),
+                },
+            )
+        return topk_weights, topk_ids
 
     def _alloc_resident_experts(self, intermediate_size_per_partition: int) -> None:
         """Allocate the resident (in-GPU) expert weights for ``self.weight_format``.
@@ -167,19 +195,22 @@ class MoELayer(BaseOP):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor | None = None,
+        debug_observer: DebugObserver | None = None,
     ):
         if self.weight_format != "bf16":
             # Quantized resident experts: generic softmax router + format kernel.
             # The bf16 path below stays on ctx.moe_backend byte-for-byte.
-            topk_weights, topk_ids = fused_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=self.top_k,
-                renormalize=self.renormalize,
+            topk_weights, topk_ids = self._route_and_observe(
+                hidden_states, router_logits, debug_observer
             )
             return self._maybe_all_reduce(
                 self._resident_gemm(hidden_states, topk_weights, topk_ids)
             )
+        if debug_observer is not None:
+            # Keep the selected backend as the producer of the actual expert output.
+            # The extra route is a debug-only snapshot; it avoids changing backend
+            # dispatch or introducing an observer argument into third-party backends.
+            self._route_and_observe(hidden_states, router_logits, debug_observer)
         ctx = get_global_ctx()
         final_hidden_states = ctx.moe_backend.forward(
             hidden_states=hidden_states,
@@ -223,12 +254,17 @@ class OffloadMoELayer(MoELayer):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor | None = None,
+        debug_observer: DebugObserver | None = None,
     ):
         ctx = get_global_ctx()
         if ctx.batch.is_prefill:
-            final_hidden_states = self.prefill_forward(hidden_states, router_logits)
+            final_hidden_states = self.prefill_forward(
+                hidden_states, router_logits, debug_observer
+            )
         else:
-            final_hidden_states = self.decode_forward(hidden_states, router_logits)
+            final_hidden_states = self.decode_forward(
+                hidden_states, router_logits, debug_observer
+            )
         return self._maybe_all_reduce(final_hidden_states)
 
     def routed_forward(
@@ -255,12 +291,10 @@ class OffloadMoELayer(MoELayer):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor | None = None,
+        debug_observer: DebugObserver | None = None,
     ):
-        topk_weights, topk_ids = fused_topk(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=self.top_k,
-            renormalize=self.renormalize,
+        topk_weights, topk_ids = self._route_and_observe(
+            hidden_states, router_logits, debug_observer
         )
         return self._decode_routed(hidden_states, topk_weights, topk_ids)
 
@@ -268,12 +302,10 @@ class OffloadMoELayer(MoELayer):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor | None = None,
+        debug_observer: DebugObserver | None = None,
     ):
-        topk_weights, topk_ids = fused_topk(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=self.top_k,
-            renormalize=self.renormalize,
+        topk_weights, topk_ids = self._route_and_observe(
+            hidden_states, router_logits, debug_observer
         )
         return self._prefill_routed(hidden_states, topk_weights, topk_ids)
 

@@ -35,6 +35,9 @@ if TYPE_CHECKING:
     from .args import Qwen4ExpArgs
 
 
+ObservationHook = Callable[[str, dict[str, object]], None]
+
+
 class _GroupedRMSNorm(BaseOP):
     def __init__(self, size: int, group_size: int, eps: float):
         if size % group_size:
@@ -117,6 +120,7 @@ class _SharedExpert(BaseOP):
 
 class _SparseMoE(BaseOP):
     def __init__(self, config: ModelConfig, layer_id: int):
+        self.layer_id = layer_id
         weight_format = "fp8_block" if config.expert_quant == "fp8_block" else "bf16"
         self.experts = make_moe_layer(
             config,
@@ -124,15 +128,30 @@ class _SparseMoE(BaseOP):
             renormalize=bool(config.norm_topk_prob),
             weight_format=weight_format,
         )
+        # Resident MoELayer instances do not need layer_id for execution, but the
+        # semantic router observation must identify their model layer as well.
+        self.experts.layer_id = layer_id
         self.gate = LinearReplicated(config.hidden_size, config.num_experts, has_bias=False)
         self.shared_expert = _SharedExpert(config)
         self.shared_expert_gate = LinearReplicated(config.hidden_size, 1, has_bias=False)
 
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        debug_observer: ObservationHook | None = None,
+    ) -> torch.Tensor:
         router_logits = self.gate.forward(hidden)
         shared = self.shared_expert.forward(hidden)
         shared *= torch.sigmoid(self.shared_expert_gate.forward(hidden))
-        return self.experts.forward(hidden_states=hidden, router_logits=router_logits) + shared
+        if debug_observer is None:
+            routed = self.experts.forward(hidden_states=hidden, router_logits=router_logits)
+        else:
+            routed = self.experts.forward(
+                hidden_states=hidden,
+                router_logits=router_logits,
+                debug_observer=debug_observer,
+            )
+        return routed + shared
 
 
 def _shift_right_ignore_eos(tokens: torch.Tensor, shift: int, eos_token_id: int) -> torch.Tensor:
@@ -553,21 +572,40 @@ class Qwen4ExpAttention(Qwen3_5Attention):
         self.indexer = _QSAIndexer(config, self.rotary)
 
     @nvtx_annotate("QSA")
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        debug_observer: ObservationHook | None = None,
+    ) -> torch.Tensor:
         ctx = get_global_ctx()
         rope_positions = ctx.batch.positions
         q, k, v, gate = self._project(x, rope_positions)
         index_q, index_k = self.indexer.project(x, rope_positions)
-        output = ctx.attn_backend.qsa_forward(
-            q,
-            k,
-            v,
-            index_q,
-            index_k,
-            self.indexer,
-            self.layer_id,
-            ctx.batch,
-        )
+        if debug_observer is None:
+            output = ctx.attn_backend.qsa_forward(
+                q, k, v, index_q, index_k, self.indexer, self.layer_id, ctx.batch
+            )
+        else:
+            from freetoken.attention.qsa import QSAAttnBackend
+
+            if isinstance(ctx.attn_backend, QSAAttnBackend):
+                output = ctx.attn_backend.qsa_forward(
+                    q,
+                    k,
+                    v,
+                    index_q,
+                    index_k,
+                    self.indexer,
+                    self.layer_id,
+                    ctx.batch,
+                    debug_observer=debug_observer,
+                )
+            else:
+                # Alternate QSA backends retain their existing call signature. They
+                # simply do not provide the optional logical-row snapshot.
+                output = ctx.attn_backend.qsa_forward(
+                    q, k, v, index_q, index_k, self.indexer, self.layer_id, ctx.batch
+                )
         return self._combine(output, gate)
 
 
@@ -606,16 +644,31 @@ class Qwen4ExpDecoderLayer(BaseOP):
         self.mlp_hyper_connection = _GatedResidual(config)
 
     @nvtx_annotate("Layer_{}", layer_id_field="_layer_id")
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        debug_observer: ObservationHook | None = None,
+    ) -> torch.Tensor:
         if self.ple is not None:
-            hidden = hidden + self.ple.forward(hidden)
+            ple_contribution = self.ple.forward(hidden)
+            if debug_observer is not None:
+                debug_observer(
+                    "ple",
+                    {
+                        "layer_id": self._layer_id,
+                        "contribution": ple_contribution.detach().clone(),
+                    },
+                )
+            hidden = hidden + ple_contribution
         mixed, residual, weights = self.attn_hyper_connection.forward(hidden)
         mixed = (
-            self.linear_attn.forward(mixed) if self._is_linear else self.self_attn.forward(mixed)
+            self.linear_attn.forward(mixed, debug_observer)
+            if self._is_linear
+            else self.self_attn.forward(mixed, debug_observer)
         )
         hidden = residual + (mixed.unsqueeze(1) * weights.unsqueeze(-1)).flatten(1)
         mixed, residual, weights = self.mlp_hyper_connection.forward(hidden)
-        mixed = self.mlp.forward(mixed)
+        mixed = self.mlp.forward(mixed, debug_observer)
         return residual + (mixed.unsqueeze(1) * weights.unsqueeze(-1)).flatten(1)
 
 
@@ -628,6 +681,11 @@ class Qwen4ExpModel(BaseOP):
         self.hyper_connection_mixer = _GatedResidual(config, combine=False)
         self.hc_count = config.qwen4_args.hc_count
         self._image_token_id = config.image_token_id
+        self._debug_observer: ObservationHook | None = None
+
+    def set_debug_observer(self, observer: ObservationHook | None) -> None:
+        """Enable semantic intermediate snapshots for an opt-in correctness probe."""
+        self._debug_observer = observer
 
     def load_host_weights(
         self,
@@ -668,8 +726,12 @@ class Qwen4ExpModel(BaseOP):
                 "Qwen3.8 vision inputs are outside FreeToken-Pascal v1; use text-only prompts"
             )
         hidden = hidden.repeat(1, self.hc_count)
-        for layer in self.layers.op_list:
-            hidden = layer.forward(hidden)
+        if self._debug_observer is None:
+            for layer in self.layers.op_list:
+                hidden = layer.forward(hidden)
+        else:
+            for layer in self.layers.op_list:
+                hidden = layer.forward(hidden, self._debug_observer)
         return self.hyper_connection_mixer.forward(hidden)
 
 
@@ -687,11 +749,18 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
 
             convert_qwen4_to_gguf(self, config, model_path=config.gguf_model_path)
         self._debug_hook: Callable[[dict[str, object]], None] | None = None
+        self._debug_events: dict[str, list[dict[str, object]]] = {}
         super().__init__()
 
     def set_debug_hook(self, hook: Callable[[dict[str, object]], None] | None) -> None:
         """Install an internal correctness hook; production defaults to disabled."""
         self._debug_hook = hook
+        set_observer = getattr(self.model, "set_debug_observer", None)
+        if set_observer is not None:
+            set_observer(self._record_debug_event if hook is not None else None)
+
+    def _record_debug_event(self, name: str, payload: dict[str, object]) -> None:
+        self._debug_events.setdefault(name, []).append(payload)
 
     def host_weight_telemetry(self) -> dict[int, dict[str, object]]:
         return self.model.host_weight_telemetry()
@@ -719,6 +788,8 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         )
 
     def forward(self) -> torch.Tensor:
+        if self._debug_hook is not None:
+            self._debug_events = {}
         hidden = self.model.forward(get_global_ctx().batch.input_ids)
         logits = self.lm_head.forward(hidden)
         if self._debug_hook is not None:
@@ -726,6 +797,7 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
                 {
                     "logits": logits.detach().clone(),
                     "ple_state": self.model.debug_state(),
+                    "observations": self._debug_events,
                 }
             )
         return logits

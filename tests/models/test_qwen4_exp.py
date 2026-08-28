@@ -12,6 +12,7 @@ import gguf
 import numpy as np
 import pytest
 import torch
+from freetoken.layers.moe import MoELayer
 from freetoken.models.qwen4_exp.config import parse_config, parse_gguf_config
 from freetoken.models.qwen4_exp.gguf import (
     _centered_norm,
@@ -672,3 +673,72 @@ def test_qwen4_debug_hook_is_opt_in_and_captures_logits_and_state(monkeypatch) -
     assert len(captured) == 1
     torch.testing.assert_close(captured[0]["logits"], logits)
     assert captured[0]["ple_state"][1][7].item() == 3.0
+
+
+def test_qwen4_debug_hook_collects_opt_in_semantic_events(monkeypatch) -> None:
+    class FakeModel:
+        def __init__(self):
+            self.observer = None
+
+        def set_debug_observer(self, observer):
+            self.observer = observer
+
+        def forward(self, input_ids):
+            if self.observer is not None:
+                self.observer(
+                    "router",
+                    {
+                        "layer_id": 3,
+                        "ids": torch.tensor([[7, 2]], dtype=torch.int32),
+                        "weights": torch.tensor([[0.6, 0.2]], dtype=torch.float32),
+                    },
+                )
+            return input_ids.float().unsqueeze(-1)
+
+        def debug_state(self):
+            return {}
+
+    model = object.__new__(Qwen4ExpForCausalLM)
+    model.model = FakeModel()
+    model.lm_head = SimpleNamespace(forward=lambda hidden: torch.cat((hidden, -hidden), dim=-1))
+    model._debug_hook = None
+    model._debug_events = {}
+    monkeypatch.setattr(
+        "freetoken.models.qwen4_exp.model.get_global_ctx",
+        lambda: SimpleNamespace(batch=SimpleNamespace(input_ids=torch.tensor([2]))),
+    )
+
+    captured = []
+    model.set_debug_hook(captured.append)
+    model.forward()
+
+    assert captured[0]["observations"]["router"][0]["layer_id"] == 3
+    torch.testing.assert_close(
+        captured[0]["observations"]["router"][0]["ids"],
+        torch.tensor([[7, 2]], dtype=torch.int32),
+    )
+    model.set_debug_hook(None)
+    assert model.model.observer is None
+
+
+def test_moe_route_observer_snapshots_semantic_ids_and_weights(monkeypatch) -> None:
+    layer = object.__new__(MoELayer)
+    layer.top_k = 2
+    layer.renormalize = False
+    ids = torch.tensor([[4, 1]], dtype=torch.int32)
+    weights = torch.tensor([[0.7, 0.2]], dtype=torch.float32)
+    monkeypatch.setattr(
+        "freetoken.layers.moe.fused_topk",
+        lambda **kwargs: (weights, ids),
+    )
+
+    events = []
+    _observed_weights, observed_ids = layer._route_and_observe(
+        torch.zeros(1, 3), torch.zeros(1, 5), lambda name, payload: events.append(payload)
+    )
+    ids.fill_(-1)
+    weights.zero_()
+
+    assert observed_ids.tolist() == [[-1, -1]]
+    assert events[0]["ids"].tolist() == [[4, 1]]
+    torch.testing.assert_close(events[0]["weights"], torch.tensor([[0.7, 0.2]]))
