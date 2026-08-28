@@ -9,6 +9,7 @@ backends.
 
 from __future__ import annotations
 
+import inspect
 import math
 import threading
 import time
@@ -77,7 +78,25 @@ class ExpertSource(Protocol):
     def expert_packed(self, expert: int) -> np.ndarray: ...
 
 
-QuantDecoder = Callable[[np.ndarray, "CpuExpertDescriptor"], np.ndarray]
+QuantDecoder = Callable[..., np.ndarray]
+
+
+class WorkspaceQuantDecoder(Protocol):
+    """Optional packed decoder contract for bounded reference execution.
+
+    A decoder implementing the keyword-only ``out`` argument must fill and
+    return that supplied ``float32`` matrix.  Legacy two-argument decoders are
+    still accepted as a compatibility/reference path and may allocate their
+    result; their telemetry is marked accordingly.
+    """
+
+    def __call__(
+        self,
+        packed: np.ndarray,
+        descriptor: CpuExpertDescriptor,
+        *,
+        out: np.ndarray,
+    ) -> np.ndarray: ...
 
 
 def _checked_int(value: Any, name: str) -> int:
@@ -88,20 +107,26 @@ def _checked_int(value: Any, name: str) -> int:
 
 
 class ThreadPoolHook(Protocol):
-    """Optional worker-pool seam for optimized executors."""
+    """Reserved worker-pool seam; the serial reference executor does not invoke it."""
 
     def submit(self, callable: Callable[..., Any], *args: Any, **kwargs: Any) -> Any: ...
 
 
 class NumaPolicyHook(Protocol):
-    """Optional placement seam; the ABI does not prescribe a machine topology."""
+    """Reserved NUMA-placement seam; production executors may invoke it per bank."""
 
     def placement(self, layer_id: int, projection: str) -> Any: ...
 
 
 @dataclass(frozen=True)
 class CpuExpertDescriptor:
-    """Immutable geometry and source-address contract for one expert bank."""
+    """Immutable geometry and source-address contract for one expert bank.
+
+    Mapped sources have their runtime address derived from the mapping.  A
+    descriptor with ``source_address=None`` is explicitly offset-only and is
+    suitable for metadata/reference adapters only; pointer-based production
+    backends must reject it before use.
+    """
 
     layer_id: int
     projection: str
@@ -147,6 +172,14 @@ class CpuExpertDescriptor:
                 "source_address",
                 _checked_int(self.source_address, "source_address"),
             )
+        else:
+            derived_address = _source_address(self.source)
+            if derived_address is not None:
+                object.__setattr__(
+                    self,
+                    "source_address",
+                    _checked_int(derived_address, "source_address"),
+                )
         if self.layer_id < 0:
             raise InvalidRequest(f"layer_id must be non-negative, got {self.layer_id}")
         if not isinstance(self.projection, str) or not self.projection:
@@ -279,6 +312,32 @@ def _source_ranges(descriptor: CpuExpertDescriptor) -> tuple[tuple[int, int], ..
     return tuple(ranges)
 
 
+def _source_address(source: Any) -> int | None:
+    """Derive the address of the first source byte when a source exposes one.
+
+    ``MappedFileRange`` keeps its mapping pointer and page prefix private, so
+    the adapter handles that concrete shape without importing Issue #13.  A
+    missing address is deliberately preserved as an explicit offset-only
+    descriptor; pointer-based production backends must reject such a descriptor
+    before dereferencing it.
+    """
+    if source is None:
+        return None
+    if isinstance(source, np.ndarray):
+        return int(source.__array_interface__["data"][0])
+    for owner in (source, getattr(source, "mapping", None)):
+        if owner is None:
+            continue
+        for name in ("source_address", "address", "_address"):
+            address = getattr(owner, name, None)
+            if address is None:
+                continue
+            address = _checked_int(address, f"source {name}")
+            prefix = getattr(owner, "_prefix", 0)
+            return address + _checked_int(prefix, "source mapping prefix")
+    return None
+
+
 def _validate_source_range(descriptor: CpuExpertDescriptor) -> None:
     source = descriptor.source
     if source is None:
@@ -383,6 +442,7 @@ class CpuExecutionTelemetry:
     fallback_reason: str | None = None
     cancelled: bool = False
     error: str | None = None
+    error_detail: str | None = None
 
     @property
     def expert_count(self) -> int:
@@ -405,6 +465,7 @@ class CpuExecutionTelemetry:
             "fallback_reason": self.fallback_reason,
             "cancelled": self.cancelled,
             "error": self.error,
+            "error_detail": self.error_detail,
         }
 
 
@@ -412,6 +473,34 @@ class CpuExecutionTelemetry:
 class CpuExecutionResult:
     output: np.ndarray
     telemetry: CpuExecutionTelemetry
+
+
+@dataclass(frozen=True)
+class CpuMicrobenchmarkSample:
+    """Raw repeated execution observations for one supplied route width.
+
+    ``route_count`` is the number of leading route columns supplied to the
+    executor.  ``miss_count`` is the exact number of non-negative expert IDs in
+    those columns across active rows; ``-1`` denotes a hit/padded route.  The
+    class intentionally stores no aggregate, threshold, or pass/fail claim.
+    """
+
+    layer_id: int
+    route_count: int
+    miss_count: int
+    repeats: int
+    elapsed_ns: tuple[int, ...]
+    telemetry: tuple[CpuExecutionTelemetry, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "layer_id": self.layer_id,
+            "route_count": self.route_count,
+            "miss_count": self.miss_count,
+            "repeats": self.repeats,
+            "elapsed_ns": list(self.elapsed_ns),
+            "telemetry": [item.as_dict() for item in self.telemetry],
+        }
 
 
 @dataclass(frozen=True)
@@ -457,8 +546,39 @@ def _cancelled(token: Any) -> bool:
     return bool(value)
 
 
+def _decoder_accepts_workspace(decoder: QuantDecoder) -> bool:
+    """Inspect a decoder once so execution can use bounded scratch when offered."""
+    try:
+        parameters = inspect.signature(decoder).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "out" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _clear_output(output: Any) -> None:
+    """Best-effort rollback for a writable ndarray without masking the real error."""
+    flags = getattr(output, "flags", None)
+    if flags is None or not getattr(flags, "writeable", False):
+        return
+    try:
+        output.fill(0)
+    except (AttributeError, TypeError, ValueError):
+        # Validation errors must remain InvalidRequest/ExecutionFailed even when
+        # a foreign ndarray-like object cannot be cleared.
+        return
+
+
 class ReferenceCpuExpertExecutor:
-    """Correctness-first dense reference executor with reusable bounded workspace."""
+    """Correctness-first executor with reusable bounded executor-owned workspace.
+
+    Packed decoders should implement :class:`WorkspaceQuantDecoder` to write into
+    the supplied scratch matrix.  Legacy two-argument decoders remain supported
+    for reference compatibility, but may allocate a temporary decoded matrix;
+    the reference executor makes no no-churn claim for that legacy path.
+    """
 
     def __init__(
         self,
@@ -483,6 +603,10 @@ class ReferenceCpuExpertExecutor:
         if self.output_dtype not in {np.dtype(np.float16), np.dtype(np.float32)}:
             raise InvalidRequest(f"unsupported output dtype {self.output_dtype}")
         self.decoders = dict(decoders or {})
+        self._decoder_workspace_capable = {
+            id(decoder): _decoder_accepts_workspace(decoder)
+            for decoder in self.decoders.values()
+        }
         required_alignment = _checked_int(required_alignment, "required_alignment")
         if required_alignment <= 0:
             raise InvalidRequest("required_alignment must be positive")
@@ -551,13 +675,18 @@ class ReferenceCpuExpertExecutor:
         if not self._lock.acquire(blocking=False):
             raise Busy("cannot reprepare an executor while it is executing")
         try:
-            # Four FP32 vectors and one contribution vector are reused by every route.
-            # The result matrix is separate so caller output is only committed after
-            # success.  No route-sized allocation is made here or during execute.
+            # Four FP32 vectors, one contribution vector, and three decoded-bank
+            # scratch matrices are reused by every route.  The decoded matrices
+            # remain separate until each projection's matmul completes; otherwise
+            # a decoder returning an ``out`` view could overwrite gate/up before
+            # the nonlinear product consumes them.  A legacy two-argument packed
+            # decoder may still allocate internally; that compatibility path is
+            # surfaced in telemetry.
             elements = (
                 4 * self.intermediate_size
                 + self.hidden_size
                 + max_tokens * self.hidden_size
+                + 3 * self.hidden_size * self.intermediate_size
             )
             plan = WorkspacePlan(
                 max_tokens=max_tokens,
@@ -573,6 +702,15 @@ class ReferenceCpuExpertExecutor:
                 "exp": np.empty(self.intermediate_size, dtype=np.float32),
                 "contribution": np.empty(self.hidden_size, dtype=np.float32),
                 "result": np.empty((max_tokens, self.hidden_size), dtype=np.float32),
+                "decoded_gate": np.empty(
+                    (self.intermediate_size, self.hidden_size), dtype=np.float32
+                ),
+                "decoded_up": np.empty(
+                    (self.intermediate_size, self.hidden_size), dtype=np.float32
+                ),
+                "decoded_down": np.empty(
+                    (self.hidden_size, self.intermediate_size), dtype=np.float32
+                ),
             }
             self._plan = plan
             return plan
@@ -623,6 +761,8 @@ class ReferenceCpuExpertExecutor:
                 f"routing_weights must be floating point, got {routing_weights.dtype}"
             )
         if output is not None:
+            if not isinstance(output, np.ndarray):
+                raise InvalidRequest("output must be a NumPy ndarray")
             output = np.asarray(output)
             if output.shape != (hidden.shape[0], self.hidden_size):
                 raise InvalidRequest(f"output shape {output.shape} is incompatible")
@@ -653,7 +793,42 @@ class ReferenceCpuExpertExecutor:
                 unique.add(expert)
         return routes, unique
 
-    def _dense_expert(self, descriptor: CpuExpertDescriptor, expert: int) -> np.ndarray:
+    def _source_mode(self, descriptor: CpuExpertDescriptor) -> str:
+        source = descriptor.source
+        if isinstance(source, np.ndarray) or hasattr(source, "expert_dense"):
+            return "dense"
+        packed_getter = getattr(source, "expert_packed", None)
+        if not callable(packed_getter):
+            return "unknown"
+        decoder = self.decoders.get(descriptor.quant_type)
+        if decoder is None:
+            decoder = self.decoders.get(descriptor.quant_name)
+        if decoder is not None and self._decoder_workspace_capable.get(id(decoder), False):
+            return "packed_workspace"
+        return "packed_legacy"
+
+    @staticmethod
+    def _fallback_reason(source_modes: set[str]) -> str:
+        if not source_modes:
+            return "reference_no_routes"
+        if source_modes == {"dense"}:
+            return "reference_dense"
+        if source_modes == {"packed_workspace"}:
+            return "reference_dequant_packed_workspace"
+        if source_modes == {"packed_legacy"}:
+            return "reference_dequant_packed_legacy"
+        if source_modes <= {"packed_workspace", "packed_legacy"}:
+            return "reference_dequant_packed_mixed_decoder"
+        if "unknown" in source_modes:
+            return "reference_unknown_source"
+        return "reference_mixed_dense_packed"
+
+    def _dense_expert(
+        self,
+        descriptor: CpuExpertDescriptor,
+        expert: int,
+        decoder_workspace: np.ndarray | None = None,
+    ) -> np.ndarray:
         source = descriptor.source
         if source is None:
             raise ExecutionFailed(
@@ -668,11 +843,22 @@ class ReferenceCpuExpertExecutor:
             dense = source[expert]
         else:
             packed_getter = getattr(source, "expert_packed", None)
-            if packed_getter is None:
+            if not callable(packed_getter):
                 raise ExecutionFailed(
                     "expert source exposes neither expert_dense nor expert_packed"
                 )
             packed = np.asarray(packed_getter(expert))
+            expected_packed = (descriptor.rows_per_expert, descriptor.row_stride_bytes)
+            if packed.shape != expected_packed:
+                raise UnsupportedShape(
+                    f"packed {descriptor.projection} expert shape {packed.shape}, "
+                    f"expected {expected_packed}"
+                )
+            if packed.dtype != np.dtype(np.uint8) or not packed.flags.c_contiguous:
+                raise InvalidRequest(
+                    f"packed {descriptor.projection} expert must be a contiguous uint8 "
+                    "byte view"
+                )
             decoder = self.decoders.get(descriptor.quant_type)
             if decoder is None:
                 decoder = self.decoders.get(descriptor.quant_name)
@@ -680,7 +866,14 @@ class ReferenceCpuExpertExecutor:
                 raise UnsupportedQuantType(
                     f"no reference decoder registered for {descriptor.quant_name}"
                 )
-            dense = decoder(packed, descriptor)
+            if (
+                decoder_workspace is not None
+                and self._decoder_workspace_capable.get(id(decoder), False)
+            ):
+                target = decoder_workspace[: descriptor.output_dim, : descriptor.input_dim]
+                dense = decoder(packed, descriptor, out=target)
+            else:
+                dense = decoder(packed, descriptor)
         dense = np.asarray(dense, dtype=np.float32)
         expected = (descriptor.output_dim, descriptor.input_dim)
         if dense.shape != expected:
@@ -738,6 +931,7 @@ class ReferenceCpuExpertExecutor:
         routes_executed = 0
         unique: set[int] = set()
         bytes_read = 0
+        source_modes: set[str] = set()
         telemetry: CpuExecutionTelemetry | None = None
         try:
             hidden, expert_ids, routing_weights, result_output, tokens = self._validate_arrays(
@@ -777,31 +971,41 @@ class ReferenceCpuExpertExecutor:
                     if _cancelled(cancellation):
                         raise Cancelled("CPU expert execution cancelled during compute")
                     weight = float(routing_weights[token, route])
-                    gate = self._dense_expert(descriptor, expert)
-                    up = self._dense_expert(up_descriptor, expert)
-                    down = self._dense_expert(down_descriptor, expert)
-                    bytes_read += (
-                        descriptor.expert_stride_bytes
-                        + up_descriptor.expert_stride_bytes
-                        + down_descriptor.expert_stride_bytes
+                    route_descriptors = (descriptor, up_descriptor, down_descriptor)
+                    source_modes.update(self._source_mode(item) for item in route_descriptors)
+                    gate = self._dense_expert(
+                        descriptor, expert, decoder_workspace=workspace["decoded_gate"]
                     )
-                    # The first projection sees the unscaled hidden state in both
-                    # modes.  Applying the route scale to both gate and up outputs
-                    # would scale both operands of SwiGLU and accidentally square
-                    # the route scale.  ``apply_router_weight_on_input`` instead
-                    # places the one route scale on the input of the down projection;
-                    # the other mode applies it to the down output.  The two forms
-                    # are equivalent in the FP32 reference but preserve one scale.
+                    up = self._dense_expert(
+                        up_descriptor, expert, decoder_workspace=workspace["decoded_up"]
+                    )
+                    down = self._dense_expert(
+                        down_descriptor, expert, decoder_workspace=workspace["decoded_down"]
+                    )
+                    bytes_read += (
+                        sum(
+                            item.expert_stride_bytes
+                            for item in route_descriptors
+                            if self._source_mode(item).startswith("packed")
+                        )
+                    )
+                    # Match the production fused-MoE contract exactly.  In input
+                    # mode the route scale is applied to both gate and up outputs
+                    # before the nonlinear SwiGLU product.  Because activation is
+                    # nonlinear, this intentionally is not equivalent to scaling
+                    # the final down output once; the latter is the false-mode
+                    # contract used by the current production path.
                     np.matmul(gate, hidden[token], out=workspace["gate"])
                     np.matmul(up, hidden[token], out=workspace["up"])
+                    if self.apply_router_weight_on_input:
+                        np.multiply(workspace["gate"], weight, out=workspace["gate"])
+                        np.multiply(workspace["up"], weight, out=workspace["up"])
                     self._activation_inplace(
                         workspace["gate"],
                         workspace["up"],
                         workspace["activated"],
                         workspace["exp"],
                     )
-                    if self.apply_router_weight_on_input:
-                        np.multiply(workspace["activated"], weight, out=workspace["activated"])
                     np.matmul(down, workspace["activated"], out=workspace["contribution"])
                     if not self.apply_router_weight_on_input:
                         np.multiply(
@@ -825,13 +1029,12 @@ class ReferenceCpuExpertExecutor:
                 bytes_read_packed=bytes_read,
                 elapsed_ns=time.perf_counter_ns() - started,
                 workspace_bytes=plan.workspace_bytes,
-                fallback_reason="reference_dequant_dense",
+                fallback_reason=self._fallback_reason(source_modes),
             )
             self._last_telemetry = telemetry
             return CpuExecutionResult(output=result_output, telemetry=telemetry)
         except CpuAbiError as error:
-            if result_output is not None and result_output.flags.writeable:
-                result_output.fill(0)
+            _clear_output(result_output)
             plan = self._plan
             telemetry = CpuExecutionTelemetry(
                 backend="reference",
@@ -844,16 +1047,16 @@ class ReferenceCpuExpertExecutor:
                 bytes_read_packed=bytes_read,
                 elapsed_ns=time.perf_counter_ns() - started,
                 workspace_bytes=plan.workspace_bytes if plan else 0,
-                fallback_reason="reference_dequant_dense",
+                fallback_reason=self._fallback_reason(source_modes),
                 cancelled=isinstance(error, Cancelled),
                 error=type(error).__name__,
+                error_detail=str(error),
             )
             error.telemetry = telemetry
             self._last_telemetry = telemetry
             raise
         except Exception as error:
-            if result_output is not None and result_output.flags.writeable:
-                result_output.fill(0)
+            _clear_output(result_output)
             plan = self._plan
             wrapped = ExecutionFailed(f"reference CPU expert execution failed: {error}")
             wrapped.telemetry = CpuExecutionTelemetry(
@@ -867,8 +1070,9 @@ class ReferenceCpuExpertExecutor:
                 bytes_read_packed=bytes_read,
                 elapsed_ns=time.perf_counter_ns() - started,
                 workspace_bytes=plan.workspace_bytes if plan else 0,
-                fallback_reason="reference_dequant_dense",
+                fallback_reason=self._fallback_reason(source_modes),
                 error=type(error).__name__,
+                error_detail=str(error),
             )
             self._last_telemetry = wrapped.telemetry
             raise wrapped from error
@@ -883,6 +1087,8 @@ class ReferenceCpuExpertExecutor:
         The reference implementation intentionally serializes the group.  A later
         worker-pool backend can use the same request objects to group routes by expert
         without changing the descriptor, cancellation or output contracts.
+        Each request commits independently; if a later request fails, earlier
+        successful outputs remain committed and no cross-request rollback is attempted.
         """
         return tuple(
             self.execute(
@@ -898,6 +1104,112 @@ class ReferenceCpuExpertExecutor:
             for request in requests
         )
 
+    def microbenchmark(
+        self,
+        layer_id: int,
+        hidden: np.ndarray,
+        expert_ids: np.ndarray,
+        routing_weights: np.ndarray,
+        *,
+        repeats: int = 1,
+        route_counts: Iterable[int] | None = None,
+        miss_counts: Iterable[int] | None = None,
+        num_token_non_padded: int | None = None,
+    ) -> tuple[CpuMicrobenchmarkSample, ...]:
+        """Collect raw per-repeat observations for the supplied geometry.
+
+        Each route count selects a leading prefix of the caller's route columns;
+        the corresponding miss count is the exact number of non-padding expert
+        IDs in that prefix.  This measures the real supplied IDs, not a synthetic
+        miss pattern.  By default every width from one through the supplied
+        ``top_k`` width is returned, with its observed miss count.  No warm-up,
+        aggregate, or performance decision is implied by this API.
+        """
+        repeats = _checked_int(repeats, "repeats")
+        if repeats <= 0:
+            raise InvalidRequest("repeats must be positive")
+        layer_id = _checked_int(layer_id, "layer_id")
+        hidden, expert_ids, routing_weights, _, tokens = self._validate_arrays(
+            layer_id, hidden, expert_ids, routing_weights, None
+        )
+        if num_token_non_padded is None:
+            active_tokens = tokens
+        else:
+            active_tokens = _checked_int(num_token_non_padded, "num_token_non_padded")
+            if not 0 <= active_tokens <= tokens:
+                raise InvalidRequest(
+                    f"num_token_non_padded={active_tokens} outside [0, {tokens}]"
+                )
+        max_width = min(self.layout.top_k, expert_ids.shape[1])
+        if max_width <= 0:
+            raise InvalidRequest("microbenchmark requires at least one supplied route")
+
+        if route_counts is None:
+            selected_widths = tuple(range(1, max_width + 1))
+        else:
+            try:
+                selected_widths = tuple(
+                    _checked_int(value, "route_count") for value in route_counts
+                )
+            except TypeError as error:
+                raise InvalidRequest("route_counts must be an iterable of integers") from error
+            if not selected_widths:
+                raise InvalidRequest("route_counts must not be empty")
+        for route_count in selected_widths:
+            if not 1 <= route_count <= max_width:
+                raise InvalidRequest(
+                    f"route_count={route_count} outside [1, {max_width}]"
+                )
+
+        if miss_counts is None:
+            expected_misses: tuple[int | None, ...] = (None,) * len(selected_widths)
+        else:
+            try:
+                expected_misses = tuple(
+                    _checked_int(value, "miss_count") for value in miss_counts
+                )
+            except TypeError as error:
+                raise InvalidRequest("miss_counts must be an iterable of integers") from error
+            if len(expected_misses) != len(selected_widths):
+                raise InvalidRequest("route_counts and miss_counts must have equal lengths")
+
+        descriptor = self.layout.descriptor(layer_id, "gate")
+        samples: list[CpuMicrobenchmarkSample] = []
+        for route_count, expected in zip(selected_widths, expected_misses, strict=True):
+            ids = expert_ids[:active_tokens, :route_count]
+            actual_misses, _ = self._validate_ids(descriptor, ids, active_tokens)
+            if expected is not None:
+                if expected < 0 or expected != actual_misses:
+                    raise InvalidRequest(
+                        f"miss_count={expected} does not match supplied active IDs "
+                        f"({actual_misses}) for route_count={route_count}"
+                    )
+            output = np.empty((tokens, self.hidden_size), dtype=self.output_dtype)
+            observations: list[int] = []
+            telemetry: list[CpuExecutionTelemetry] = []
+            for _ in range(repeats):
+                result = self.execute(
+                    layer_id,
+                    hidden,
+                    expert_ids[:, :route_count],
+                    routing_weights[:, :route_count],
+                    num_token_non_padded=active_tokens,
+                    output=output,
+                )
+                observations.append(result.telemetry.elapsed_ns)
+                telemetry.append(result.telemetry)
+            samples.append(
+                CpuMicrobenchmarkSample(
+                    layer_id=layer_id,
+                    route_count=route_count,
+                    miss_count=actual_misses,
+                    repeats=repeats,
+                    elapsed_ns=tuple(observations),
+                    telemetry=tuple(telemetry),
+                )
+            )
+        return tuple(samples)
+
 
 __all__ = [
     "Busy",
@@ -909,6 +1221,7 @@ __all__ = [
     "CpuExecutionTelemetry",
     "CpuExpertDescriptor",
     "CpuExpertLayout",
+    "CpuMicrobenchmarkSample",
     "ExecutionFailed",
     "ExpertSource",
     "InvalidExpertId",
@@ -921,6 +1234,7 @@ __all__ = [
     "UnsupportedShape",
     "WorkspaceNotPrepared",
     "WorkspacePlan",
+    "WorkspaceQuantDecoder",
     "WorkspaceTooSmall",
     "cpu_layout_from_source_layout",
 ]
