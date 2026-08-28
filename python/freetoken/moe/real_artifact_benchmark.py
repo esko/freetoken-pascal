@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 
+from freetoken.gguf_census import model_sha256 as canonical_model_sha256
 from freetoken.moe import real_artifact_probe as probe
 from freetoken.moe.real_artifact_probe import (
     DEFAULT_EXPERT,
@@ -154,15 +155,35 @@ def _native_library_metadata(build_metadata_path: Path | None) -> dict[str, Any]
         ) from error
     if not isinstance(build, dict) or build.get("commit") != _git_commit():
         raise ArtifactProbeError("native build metadata commit must match the benchmark commit")
+    if (
+        build.get("schema_name") != "qwen38-target-cpu-native-build"
+        or build.get("schema_version") != 1
+    ):
+        raise ArtifactProbeError("native build metadata has an unsupported schema identity")
+    compiler = build.get("compiler")
+    compile_flags = build.get("compile_flags")
+    if (
+        not isinstance(compiler, dict)
+        or not all(compiler.get(key) for key in ("command", "version"))
+        or not isinstance(compile_flags, dict)
+        or not all(
+            isinstance(compile_flags.get(key), list) for key in ("common", "baseline", "avx2")
+        )
+    ):
+        raise ArtifactProbeError("native build metadata omits compiler or compile flags")
     for name, library in libraries.items():
         try:
-            built_sha256 = build["libraries"][name]["sha256"]
+            built_library = build["libraries"][name]
+            built_sha256 = built_library["sha256"]
+            built_path = built_library["path"]
         except (KeyError, TypeError) as error:
             raise ArtifactProbeError(
                 f"native build metadata omits {name} library identity"
             ) from error
         if built_sha256 != library["sha256"]:
             raise ArtifactProbeError(f"native build metadata hash mismatch for {name}")
+        if Path(str(built_path)).resolve() != Path(str(library["path"])).resolve():
+            raise ArtifactProbeError(f"native build metadata path mismatch for {name}")
     return {"libraries": libraries, "build": build}
 
 
@@ -175,6 +196,15 @@ def _census_identity(census: Mapping[str, Any]) -> dict[str, str]:
         or any(character not in "0123456789abcdef" for character in model_sha256)
     ):
         raise ArtifactProbeError("census must declare a lowercase 64-character model_sha256")
+    shards = census.get("shards")
+    if not isinstance(shards, list) or not shards:
+        raise ArtifactProbeError("census must contain shard identities")
+    try:
+        calculated = canonical_model_sha256(shards)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ArtifactProbeError(f"census has invalid shard identities: {error}") from error
+    if calculated != model_sha256:
+        raise ArtifactProbeError("census model_sha256 does not match canonical shard identities")
     return {"model_sha256": model_sha256, "model_sha256_status": "declared"}
 
 

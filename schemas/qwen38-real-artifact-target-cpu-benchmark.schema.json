@@ -229,7 +229,29 @@
             "mixed_gemv": {"$ref": "#/$defs/native_library"}
           }
         },
-        "build": {"type": "object", "additionalProperties": true}
+        "build": {"$ref": "#/$defs/native_build"}
+      }
+    },
+    "native_build": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schema_name", "schema_version", "commit", "command", "host", "compiler", "compile_flags", "libraries"],
+      "properties": {
+        "schema_name": {"const": "qwen38-target-cpu-native-build"},
+        "schema_version": {"const": 1},
+        "commit": {"$ref": "#/$defs/commit"},
+        "command": {"type": "string", "minLength": 1},
+        "host": {"type": "object", "minProperties": 1},
+        "compiler": {"type": "object", "required": ["command", "version"]},
+        "compile_flags": {"type": "object", "required": ["common", "baseline", "avx2"]},
+        "libraries": {
+          "type": "object",
+          "required": ["q4_k", "mixed_gemv"],
+          "properties": {
+            "q4_k": {"type": "object", "required": ["path", "sha256"]},
+            "mixed_gemv": {"type": "object", "required": ["path", "sha256"]}
+          }
+        }
       }
     },
     "native_library": {

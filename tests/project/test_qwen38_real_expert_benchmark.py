@@ -136,6 +136,14 @@ class _FakeExecutor:
 
 
 def _artifact(*, layer: int = 0) -> dict[str, object]:
+    shards = [
+        {
+            "name": "model.gguf",
+            "size": 1,
+            "sha256": "c" * 64,
+            "sha256_status": "declared",
+        }
+    ]
     return {
         "source": {
             "repository": "owner/model",
@@ -144,9 +152,9 @@ def _artifact(*, layer: int = 0) -> dict[str, object]:
             "base_url": "https://example/model",
         },
         "census": {
-            "model_sha256": "c" * 64,
+            "model_sha256": benchmark.canonical_model_sha256(shards),
             "evidence_status": "artifact-metadata",
-            "shards": [{"sha256_status": "declared"}],
+            "shards": shards,
         },
         "census_sha256": "d" * 64,
         "layout": _Layout(layer=layer, down_quant="Q8_0" if layer == 2 else "Q4_K"),
@@ -176,6 +184,7 @@ def _artifact(*, layer: int = 0) -> dict[str, object]:
 
 def _patch_common(monkeypatch: pytest.MonkeyPatch, *, output_delta: float = 0.0) -> list[int]:
     calls: list[int] = []
+    monkeypatch.setattr(benchmark, "_git_commit", lambda: "1" * 40)
     for variable in benchmark._BLAS_THREAD_VARS:
         monkeypatch.setenv(variable, "1")
     monkeypatch.setattr(
@@ -201,7 +210,19 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, *, output_delta: float = 0.0)
                     "sha256": "b" * 64,
                 },
             },
-            "build": {"commit": "1" * 40, "libraries": {}},
+            "build": {
+                "schema_name": "qwen38-target-cpu-native-build",
+                "schema_version": 1,
+                "commit": "b" * 40,
+                "command": "build",
+                "host": {"machine": "test"},
+                "compiler": {"command": "c++", "version": "test"},
+                "compile_flags": {"common": [], "baseline": [], "avx2": []},
+                "libraries": {
+                    "q4_k": {"path": "q4.so", "sha256": "a" * 64},
+                    "mixed_gemv": {"path": "mixed.so", "sha256": "b" * 64},
+                },
+            },
         },
     )
     _FakeExecutor.instances.clear()
@@ -356,6 +377,19 @@ def test_benchmark_report_schema_and_semantics_are_machine_validatable(
     errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=ROOT / "schemas")
     assert any("samples.native[0] reports fallback telemetry" in error for error in errors)
 
+    invalid = copy.deepcopy(report)
+    invalid["metadata"]["native"]["build"]["libraries"]["q4_k"]["sha256"] = "f" * 64
+    errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=ROOT / "schemas")
+    assert any("native build hash for q4_k" in error for error in errors)
+
+
+def test_census_model_identity_must_match_canonical_shards() -> None:
+    census = _artifact()["census"]
+    assert isinstance(census, dict)
+    census["model_sha256"] = "f" * 64
+    with pytest.raises(ArtifactProbeError, match="canonical shard identities"):
+        benchmark._census_identity(census)
+
 
 def test_native_build_metadata_is_required_and_hash_checked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -372,17 +406,40 @@ def test_native_build_metadata_is_required_and_hash_checked(
         path = tmp_path / f"{name}.so"
         path.write_bytes(name.encode())
         monkeypatch.setenv(env_name, str(path))
-        libraries[name] = {"sha256": hashlib.sha256(name.encode()).hexdigest()}
+        libraries[name] = {
+            "path": str(path),
+            "sha256": hashlib.sha256(name.encode()).hexdigest(),
+        }
     build_path = tmp_path / "build.json"
     build_path.write_text(
-        json.dumps({"commit": "1" * 40, "libraries": libraries}), encoding="utf-8"
+        json.dumps(
+            {
+                "schema_name": "qwen38-target-cpu-native-build",
+                "schema_version": 1,
+                "commit": "1" * 40,
+                "compiler": {"command": "c++", "version": "test"},
+                "compile_flags": {"common": [], "baseline": [], "avx2": []},
+                "libraries": libraries,
+            }
+        ),
+        encoding="utf-8",
     )
 
     metadata = benchmark._native_library_metadata(build_path)
     assert metadata["build"]["commit"] == "1" * 40
     libraries["q4_k"]["sha256"] = "0" * 64
     build_path.write_text(
-        json.dumps({"commit": "1" * 40, "libraries": libraries}), encoding="utf-8"
+        json.dumps(
+            {
+                "schema_name": "qwen38-target-cpu-native-build",
+                "schema_version": 1,
+                "commit": "1" * 40,
+                "compiler": {"command": "c++", "version": "test"},
+                "compile_flags": {"common": [], "baseline": [], "avx2": []},
+                "libraries": libraries,
+            }
+        ),
+        encoding="utf-8",
     )
     with pytest.raises(ArtifactProbeError, match="hash mismatch for q4_k"):
         benchmark._native_library_metadata(build_path)

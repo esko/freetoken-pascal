@@ -175,6 +175,17 @@ def _target_cpu_benchmark_semantic_errors(document: dict[str, Any]) -> list[str]
             errors.append(f"cold_dequant_dense scope must mention {required}")
     if document["warnings"]:
         errors.append("measured target-CPU evidence cannot carry warning-only BLAS state")
+    native = document["metadata"]["native"]
+    build = native["build"]
+    if build["commit"] != document["metadata"]["commit"]:
+        errors.append("native build commit must match benchmark commit")
+    for name in ("q4_k", "mixed_gemv"):
+        measured_library = native["libraries"][name]
+        built_library = build["libraries"][name]
+        if built_library["sha256"] != measured_library["sha256"]:
+            errors.append(f"native build hash for {name} must match measured library")
+        if Path(built_library["path"]).resolve() != Path(measured_library["path"]).resolve():
+            errors.append(f"native build path for {name} must match measured library")
     return errors
 
 
