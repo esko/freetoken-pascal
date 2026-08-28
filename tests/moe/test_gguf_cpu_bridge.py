@@ -277,6 +277,122 @@ def test_host_can_be_claimed_by_only_one_bundle_and_claim_is_permanent() -> None
         QwenGGUFCpuExpertBundle.from_host(host, top_k=1, mode="scalar")
 
 
+def test_retained_host_cannot_close_a_live_bundle() -> None:
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    host = _host()
+    bundle = QwenGGUFCpuExpertBundle.from_host(host, top_k=1, mode="scalar")
+    with pytest.raises(RuntimeError, match="owned"):
+        host.close()
+    assert not host.closed
+    bundle.close()
+    assert host.closed
+
+
+def test_host_close_attempts_all_resources_and_retries_after_failure() -> None:
+    host = _host()
+    calls: list[str] = []
+
+    class _FailOnce:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.failed = False
+
+        def close(self) -> None:
+            calls.append(self.name)
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError(f"{self.name} close failed")
+
+    host.ple = _FailOnce("ple")  # type: ignore[assignment]
+    host.experts = _FailOnce("experts")  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="ple close failed"):
+        host.close()
+    assert calls == ["ple", "experts"]
+    assert not host.closed
+    host.close()
+    assert calls == ["ple", "experts", "ple", "experts"]
+    assert host.closed
+    host.close()
+    assert calls == ["ple", "experts", "ple", "experts"]
+
+
+def test_mapped_expert_banks_close_attempts_all_banks_and_retries() -> None:
+    from freetoken.gguf_host import MappedExpertBanks
+
+    calls: list[str] = []
+
+    class _FailOnce:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.failed = False
+
+        def close(self) -> None:
+            calls.append(self.name)
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError(f"{self.name} close failed")
+
+    banks = object.__new__(MappedExpertBanks)
+    banks._closed = False
+    banks._banks = {("first", "gate"): _FailOnce("first"), ("second", "up"): _FailOnce("second")}
+    with pytest.raises(RuntimeError, match="first close failed"):
+        banks.close()
+    assert calls == ["first", "second"]
+    banks.close()
+    assert calls == ["first", "second", "first", "second"]
+
+
+@pytest.mark.parametrize("promoted", [False, True])
+def test_bridge_executes_one_nonsquare_packed_route_with_selected_census(
+    promoted: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from freetoken.moe import q4_k
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    class _FastQ4:
+        isa = "avx2"
+        backend = "q4_k_test"
+        fallback_reason = None
+
+        def gemv(self, rows, input_dim, vector, *, out, scratch=None):
+            del input_dim, scratch
+            np.multiply(rows[:, 0].astype(np.float32), vector.sum(), out=out)
+            return out
+
+    class _FastMixed:
+        isa = "avx2"
+        backend = "mixed_test"
+        fallback_reason = None
+
+        def backend_for(self, quant_name):
+            return f"{str(quant_name).lower()}_test"
+
+        def gemv(self, rows, input_dim, vector, *, quant_name, out):
+            del input_dim, quant_name
+            np.multiply(rows[:, 0].astype(np.float32), vector.sum(), out=out)
+            return out
+
+    monkeypatch.setattr(q4_k, "select_q4_k_primitive", lambda mode="auto": _FastQ4())
+    monkeypatch.setattr(q4_k, "select_mixed_gemv_primitive", lambda mode="auto": _FastMixed())
+    bundle = QwenGGUFCpuExpertBundle.from_host(
+        _geometry_host(promoted=promoted),
+        top_k=10,
+        mode="avx2",
+        required_alignment=1,
+    )
+    hidden = np.ones((1, 2560), dtype=np.float32)
+    expert_ids = np.zeros((1, 1), dtype=np.int32)
+    routing_weights = np.ones((1, 1), dtype=np.float32)
+    result = bundle.executor.execute(0, hidden, expert_ids, routing_weights)
+    assert result.output.shape == (1, 2560)
+    expected_census = ("q5_k_test", "q8_0_test") if promoted else ("q4_k_test", "q5_1_test")
+    assert bundle.kernel_census_for_layer(0) == expected_census
+    assert result.telemetry.kernel_census == expected_census
+    bundle.close()
+
+
 def test_config_registration_guard_is_fail_closed() -> None:
     from freetoken.moe.gguf_cpu import qwen_gguf_cpu_bridge_supported
 
