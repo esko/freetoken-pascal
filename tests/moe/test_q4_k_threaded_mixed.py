@@ -423,6 +423,40 @@ def test_transient_owner_cancellation_is_not_lost(monkeypatch: pytest.MonkeyPatc
         executor.execute(0, hidden, ids, weights, cancellation=lambda: next(answers, False))
 
 
+def test_cancellation_callback_error_drains_workers_before_unlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_native(monkeypatch)
+    executor = Q4KExecutor(_layout(), mode="avx2", num_threads=2, required_alignment=1)
+    executor.prepare(1, 2)
+    hidden, ids, weights = _inputs(tokens=1, routes=2)
+    finished = threading.Event()
+    original = executor._threaded_runner._workers[1].execute
+
+    def slow_worker(*args, **kwargs):
+        try:
+            time.sleep(0.03)
+            return original(*args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(executor._threaded_runner._workers[1], "execute", slow_worker)
+    calls = 0
+
+    def broken_cancellation() -> bool:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("callback failed")
+        return False
+
+    with pytest.raises(ExecutionFailed, match="callback failed"):
+        executor.execute(0, hidden, ids, weights, cancellation=broken_cancellation)
+    assert finished.is_set()
+    recovered = executor.execute(0, hidden, ids, weights)
+    assert recovered.telemetry.routes_executed == 2
+
+
 def test_scalar_or_unsupported_mixed_layout_stays_serial(monkeypatch: pytest.MonkeyPatch) -> None:
     class _ScalarQ4(_FakeQ4):
         isa = "scalar"

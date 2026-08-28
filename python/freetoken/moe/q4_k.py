@@ -1124,6 +1124,7 @@ class _ThreadedMixedRunner:
         routes_requested = 0
         unique: set[int] = set()
         submitted: list[Any] = []
+        worker_cancel: _WorkerCancellation | None = None
         actual_threads = 1
         if self._closed:
             raise InvalidRequest("Q4_K executor is closed")
@@ -1324,6 +1325,10 @@ class _ThreadedMixedRunner:
             self._last_telemetry = telemetry
             return CpuExecutionResult(result_output, telemetry)
         except CpuAbiError as error:
+            if submitted:
+                if worker_cancel is not None:
+                    worker_cancel.cancel()
+                self._cancel_and_drain(submitted)
             if error.telemetry is None:
                 error.telemetry = self._error_telemetry(
                     layer_id=parsed_layer,
@@ -1340,6 +1345,10 @@ class _ThreadedMixedRunner:
             _clear_output(result_output)
             raise
         except BaseException as error:
+            if submitted:
+                if worker_cancel is not None:
+                    worker_cancel.cancel()
+                self._cancel_and_drain(submitted)
             wrapped = ExecutionFailed(f"threaded mixed GEMV execution failed: {error}")
             wrapped.telemetry = self._error_telemetry(
                 layer_id=parsed_layer,
