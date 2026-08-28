@@ -103,6 +103,37 @@ same-workload end-to-end result must improve outside run-to-run noise.
 
 Use the exact same model bytes where the runtime permits. If formats differ, state that the comparison is not a codec-controlled A/B.
 
+## Q4_K CPU raw observations
+
+The hosted Q4_K harness records raw elapsed samples for route widths `1,2,4,8,10`
+and a requested worker-thread sweep without computing a speedup or pass/fail verdict.
+Its default synthetic packed workload is reproducible from the recorded seed and geometry.
+It emits `evidence_status: synthetic` even when run on Gorilla, because this harness does
+not establish the real-model performance gate.
+
+Run the default observation set with:
+
+```bash
+PYTHONPATH=python python scripts/bench_q4_k_threaded.py --output results/q4-k-threaded-raw.json
+```
+
+For target-shaped synthetic geometry, supply the measured dimensions and preserve every
+raw sample in the output:
+
+```bash
+PYTHONPATH=python python scripts/bench_q4_k_threaded.py \
+  --hidden-size 640 --intermediate-size 2560 --experts 16 \
+  --thread-counts 1,2,4,8,12,24 --repeats 5 \
+  --output results/q4-k-threaded-gorilla-raw.json
+```
+
+The dimensions match the pinned Qwen3.8 expert geometry, while `--experts 16` is an
+explicit memory-bounded subset of the 512-expert census rather than a full-model claim.
+
+The command requires a direct AVX2 helper for a threaded sweep; when it is unavailable,
+the harness records a serial sample and the selected fallback instead of labeling the
+unexecuted thread counts as measurements.
+
 ## Statistics
 
 - at least one untimed warm-up;

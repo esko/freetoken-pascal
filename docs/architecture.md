@@ -120,6 +120,14 @@ It rejects GPU, hybrid, offload, nonzero-cache, prefill, grouped, and closed-map
 The CUDA `Engine` registration seam fails closed for Qwen GGUF rather than constructing the homogeneous `OffloadMoeCache`.
 End-to-end model-layer registration remains blocked until `OffloadMoELayer` accepts this per-projection mapped-bank ABI without allocating GPU slots.
 
+An opt-in `Q4KExecutor(num_threads=N)` partitions only all-direct Q4_K AVX2 layers
+into balanced contiguous route-column ranges for at most one worker per selected route.
+Each worker has private prepared route, output and ABI workspace buffers, and the owner
+merges completed partials in route order while retaining the Issue #15 lock, cancellation,
+accumulation and rollback semantics. Scalar, mixed-format, unsupported-shape and
+one-thread requests remain on the serial reference path. This pre-integration runner
+does not wire into `python/freetoken/moe/cpu_executor.py`.
+
 ## MoE decode operation
 
 For each layer and decode step:
