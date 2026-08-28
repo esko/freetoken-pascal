@@ -124,6 +124,41 @@ def _host() -> QwenGGUFHostWeights:
     return QwenGGUFHostWeights(layout, _Banks(expert_layout, banks), _Ple())  # type: ignore[arg-type]
 
 
+def _geometry_host(*, promoted: bool) -> QwenGGUFHostWeights:
+    descriptors = []
+    banks = {}
+    gate_up = (Q5_K, "Q5_K") if promoted else (Q4_K, "Q4_K")
+    down = (Q8_0, "Q8_0") if promoted else (Q5_1, "Q5_1")
+    for projection, (quant_type, quant_name) in (
+        ("gate", gate_up),
+        ("up", gate_up),
+        ("down", down),
+    ):
+        descriptor, values = _descriptor(
+            0,
+            projection,
+            quant_type,
+            quant_name,
+            input_dim=2560 if projection != "down" else 640,
+            output_dim=640 if projection != "down" else 2560,
+        )
+        descriptors.append(descriptor)
+        banks[(0, projection)] = _Bank(descriptor, values)
+    expert_layout = GGUFExpertLayout(
+        descriptors=tuple(descriptors),
+        slot_pools=(),
+        num_layers=1,
+        num_experts=2,
+    )
+    layout = QwenHostLayout(
+        experts=expert_layout,
+        ple=_Ple(),  # type: ignore[arg-type]
+        total_tensor_bytes=sum(item.tensor_bytes for item in descriptors),
+        shard_paths=("synthetic.gguf",),
+    )
+    return QwenGGUFHostWeights(layout, _Banks(expert_layout, banks), _Ple())  # type: ignore[arg-type]
+
+
 def test_bundle_keeps_host_alive_and_closes_owned_mapping_once() -> None:
     from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
 
@@ -182,6 +217,66 @@ def test_bundle_does_not_replace_explicit_zero_route_workspace() -> None:
     bundle.close()
 
 
+@pytest.mark.parametrize("promoted", [False, True])
+def test_bridge_preserves_nonsquare_qwen_geometry_and_real_packed_strides(
+    promoted: bool,
+) -> None:
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    bundle = QwenGGUFCpuExpertBundle.from_host(
+        _geometry_host(promoted=promoted),
+        top_k=10,
+        mode="scalar",
+        required_alignment=1,
+    )
+    expected_quants = ("Q5_K", "Q5_K", "Q8_0") if promoted else ("Q4_K", "Q4_K", "Q5_1")
+    expected_strides = (1760, 1760, 680) if promoted else (1440, 1440, 480)
+    assert bundle.layout.top_k == 10
+    assert [item.quant_name for item in bundle.layout.descriptors] == list(expected_quants)
+    assert [item.input_dim for item in bundle.layout.descriptors] == [2560, 2560, 640]
+    assert [item.output_dim for item in bundle.layout.descriptors] == [640, 640, 2560]
+    assert [item.row_stride_bytes for item in bundle.layout.descriptors] == list(expected_strides)
+    bundle.close()
+
+
+def test_failed_bundle_constructor_closes_executor_without_claiming_or_closing_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freetoken.moe.gguf_cpu as bridge
+
+    host = _host()
+    created = []
+
+    class _FailingExecutor:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.closed = False
+            created.append(self)
+
+        def prepare(self, **_kwargs):
+            raise RuntimeError("prepare failed")
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(bridge, "Q4KExecutor", _FailingExecutor)
+    with pytest.raises(RuntimeError, match="prepare failed"):
+        bridge.QwenGGUFCpuExpertBundle.from_host(host, top_k=1, mode="scalar")
+    assert created and created[0].closed
+    assert not host.closed
+
+
+def test_host_can_be_claimed_by_only_one_bundle_and_claim_is_permanent() -> None:
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    host = _host()
+    bundle = QwenGGUFCpuExpertBundle.from_host(host, top_k=1, mode="scalar")
+    with pytest.raises(RuntimeError, match="already claimed"):
+        QwenGGUFCpuExpertBundle.from_host(host, top_k=1, mode="scalar")
+    bundle.close()
+    with pytest.raises(RuntimeError, match="already claimed"):
+        QwenGGUFCpuExpertBundle.from_host(host, top_k=1, mode="scalar")
+
+
 def test_config_registration_guard_is_fail_closed() -> None:
     from freetoken.moe.gguf_cpu import qwen_gguf_cpu_bridge_supported
 
@@ -203,6 +298,8 @@ def test_config_registration_guard_is_fail_closed() -> None:
 
     Config.device = None
     assert not qwen_gguf_cpu_bridge_supported(Config())
+    assert not qwen_gguf_cpu_bridge_supported(device=None)
+    assert not qwen_gguf_cpu_bridge_supported(backend=None)
 
 
 def test_cpu_tensor_decode_adapter_returns_cpu_tensor() -> None:
