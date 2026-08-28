@@ -208,6 +208,23 @@ def _census_identity(census: Mapping[str, Any]) -> dict[str, str]:
     return {"model_sha256": model_sha256, "model_sha256_status": "declared"}
 
 
+def _assert_loaded_native_identity(executor: Any, metadata: Mapping[str, Any]) -> None:
+    """Prove the executor loaded the exact helpers recorded in measured evidence."""
+    for name, primitive_name in (("q4_k", "primitive"), ("mixed_gemv", "mixed_primitive")):
+        primitive = getattr(executor, primitive_name, None)
+        native = getattr(primitive, "native", None)
+        source_path = getattr(native, "source_path", None)
+        if not source_path:
+            raise ArtifactProbeError(
+                f"selected {name} primitive does not expose its loaded library"
+            )
+        recorded_path = metadata["libraries"][name]["path"]
+        if Path(str(source_path)).resolve() != Path(str(recorded_path)).resolve():
+            raise ArtifactProbeError(
+                f"selected {name} primitive loaded {source_path}, expected {recorded_path}"
+            )
+
+
 def _hash_array(value: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
 
@@ -459,6 +476,7 @@ def benchmark_qwen38_expert(
         # Prepare is intentionally before the first native timer boundary.
         executor.prepare(1, 1)
         selected_behavior = _assert_native_selection(executor, layer)
+        _assert_loaded_native_identity(executor, native_metadata)
 
         # Dense-resident setup is outside all reference timers.  The cold reference
         # repeats this exact independent dequantization inside every sample timer.

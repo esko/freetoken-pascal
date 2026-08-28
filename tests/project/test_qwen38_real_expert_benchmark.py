@@ -83,10 +83,16 @@ class _Result:
 
 
 class _Primitive:
-    def __init__(self, isa: str = "avx2", fallback_reason: str | None = None) -> None:
+    def __init__(
+        self,
+        isa: str = "avx2",
+        fallback_reason: str | None = None,
+        source_path: str = "q4.so",
+    ) -> None:
         self.isa = isa
         self.fallback_reason = fallback_reason
         self.backend = f"q4_k_{isa}"
+        self.native = type("Native", (), {"source_path": source_path})()
 
 
 class _FakeExecutor:
@@ -98,7 +104,7 @@ class _FakeExecutor:
         self.layout = layout
         del kwargs
         self.primitive = _Primitive(self.primitive_isa)
-        self.mixed_primitive = _Primitive(self.primitive_isa)
+        self.mixed_primitive = _Primitive(self.primitive_isa, source_path="mixed.so")
         self.backend = "mixed_avx2"
         self.calls = 0
         self.prepared = False
@@ -443,3 +449,25 @@ def test_native_build_metadata_is_required_and_hash_checked(
     )
     with pytest.raises(ArtifactProbeError, match="hash mismatch for q4_k"):
         benchmark._native_library_metadata(build_path)
+
+
+def test_loaded_native_identity_rejects_silent_package_fallback() -> None:
+    q4_native = type("Native", (), {"source_path": "/package/q4.so"})()
+    mixed_native = type("Native", (), {"source_path": "/measured/mixed.so"})()
+    executor = type(
+        "Executor",
+        (),
+        {
+            "primitive": type("Primitive", (), {"native": q4_native})(),
+            "mixed_primitive": type("Primitive", (), {"native": mixed_native})(),
+        },
+    )()
+    metadata = {
+        "libraries": {
+            "q4_k": {"path": "/measured/q4.so"},
+            "mixed_gemv": {"path": "/measured/mixed.so"},
+        }
+    }
+
+    with pytest.raises(ArtifactProbeError, match=r"loaded /package/q4\.so"):
+        benchmark._assert_loaded_native_identity(executor, metadata)
