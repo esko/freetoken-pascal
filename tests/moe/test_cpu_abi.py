@@ -1,0 +1,444 @@
+from __future__ import annotations
+
+import threading
+
+import numpy as np
+import pytest
+from freetoken.moe.cpu_abi import (
+    Busy,
+    Cancelled,
+    CpuExecutionRequest,
+    CpuExpertDescriptor,
+    CpuExpertLayout,
+    InvalidExpertId,
+    InvalidRequest,
+    ReferenceCpuExpertExecutor,
+    UnsupportedAlignment,
+    UnsupportedQuantType,
+    UnsupportedShape,
+    WorkspaceTooSmall,
+    cpu_layout_from_source_layout,
+)
+
+
+def _descriptor(layer: int, projection: str, source: np.ndarray, *, pool_id: int = 0):
+    experts, output_dim, input_dim = source.shape
+    row_stride = input_dim * 4
+    return CpuExpertDescriptor(
+        layer_id=layer,
+        projection=projection,
+        quant_type="F32",
+        quant_name="F32",
+        num_experts=experts,
+        output_dim=output_dim,
+        input_dim=input_dim,
+        rows_per_expert=output_dim,
+        row_stride_bytes=row_stride,
+        expert_stride_bytes=output_dim * row_stride,
+        tensor_bytes=experts * output_dim * row_stride,
+        source_offset=layer * 1000,
+        source_address=layer * 4096,
+        pool_id=pool_id,
+        source=source,
+    )
+
+
+def _executor(*, apply_router_weight_on_input: bool = False) -> ReferenceCpuExpertExecutor:
+    rng = np.random.default_rng(38)
+    hidden, intermediate, experts = 4, 6, 5
+    gate = rng.normal(size=(experts, intermediate, hidden)).astype(np.float32)
+    up = rng.normal(size=(experts, intermediate, hidden)).astype(np.float32)
+    down = rng.normal(size=(experts, hidden, intermediate)).astype(np.float32)
+    layout = CpuExpertLayout(
+        descriptors=(
+            _descriptor(0, "gate", gate, pool_id=1),
+            _descriptor(0, "up", up, pool_id=1),
+            _descriptor(0, "down", down, pool_id=2),
+        ),
+        top_k=10,
+    )
+    executor = ReferenceCpuExpertExecutor(
+        layout,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+    )
+    executor.prepare(max_tokens=128, max_routes=10)
+    return executor
+
+
+def _independent_reference(executor, hidden, ids, weights, *, apply_input=False):
+    output = np.zeros((hidden.shape[0], hidden.shape[1]), dtype=np.float32)
+    gate = executor.layout.descriptor(0, "gate").source
+    up = executor.layout.descriptor(0, "up").source
+    down = executor.layout.descriptor(0, "down").source
+    for token in range(hidden.shape[0]):
+        for route in range(ids.shape[1]):
+            expert = int(ids[token, route])
+            if expert < 0:
+                continue
+            gate_up_gate = gate[expert] @ hidden[token]
+            gate_up_up = up[expert] @ hidden[token]
+            if apply_input:
+                gate_up_gate *= weights[token, route]
+                gate_up_up *= weights[token, route]
+            activated = 1.0 / (1.0 + np.exp(-gate_up_gate)) * gate_up_gate * gate_up_up
+            contribution = down[expert] @ activated
+            if not apply_input:
+                contribution *= weights[token, route]
+            output[token] += contribution
+    return output
+
+
+def test_reference_executor_matches_independent_dense_contract_and_accumulates() -> None:
+    executor = _executor()
+    hidden = np.arange(12, dtype=np.float32).reshape(3, 4) / 7
+    ids = np.array([[3, 1, 3], [0, -1, 4], [2, 2, -1]], dtype=np.int32)
+    weights = np.array([[0.2, -0.4, 0.1], [1.0, 0.0, -0.5], [0.3, 0.7, 0.0]], dtype=np.float32)
+
+    result = executor.execute(0, hidden, ids, weights)
+    expected = _independent_reference(executor, hidden, ids, weights)
+    np.testing.assert_allclose(result.output, expected, rtol=2e-6, atol=2e-6)
+    assert result.telemetry.routes_executed == 7
+    assert result.telemetry.unique_experts == 5
+    assert result.telemetry.bytes_read_packed > 0
+    assert result.telemetry.fallback_reason == "reference_dequant_dense"
+    assert result.telemetry.as_dict()["expert_count"] == 5
+
+    partial = np.full((3, 4), 2, dtype=np.float32)
+    accumulated = executor.execute(0, hidden, ids, weights, output=partial, accumulate=True)
+    np.testing.assert_allclose(accumulated.output, expected + 2, rtol=2e-6, atol=2e-6)
+    assert accumulated.output is partial
+
+
+@pytest.mark.parametrize("apply_input", [False, True])
+def test_apply_router_weight_contract_is_explicit(apply_input: bool) -> None:
+    executor = _executor(apply_router_weight_on_input=apply_input)
+    hidden = np.ones((2, 4), dtype=np.float32)
+    ids = np.array([[1, 2], [2, 1]], dtype=np.int32)
+    weights = np.array([[0.25, 0.75], [0.5, 0.25]], dtype=np.float32)
+
+    actual = executor.execute(0, hidden, ids, weights).output
+    expected = _independent_reference(executor, hidden, ids, weights, apply_input=apply_input)
+    np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
+
+
+def test_padded_rows_ignore_invalid_ids_and_are_zero() -> None:
+    executor = _executor()
+    hidden = np.ones((4, 4), dtype=np.float32)
+    ids = np.array([[0], [1], [99], [-2]], dtype=np.int32)
+    weights = np.ones((4, 1), dtype=np.float32)
+    actual = executor.execute(0, hidden, ids, weights, num_token_non_padded=2).output
+    assert np.all(actual[2:] == 0)
+
+    with pytest.raises(InvalidExpertId):
+        executor.execute(0, hidden, ids, weights, num_token_non_padded=3)
+
+
+@pytest.mark.parametrize("ids", [np.array([[-2]], dtype=np.int32), np.array([[5]], dtype=np.int32)])
+def test_invalid_active_ids_clear_caller_output(ids: np.ndarray) -> None:
+    executor = _executor()
+    output = np.full((1, 4), 7, dtype=np.float32)
+    with pytest.raises(InvalidExpertId) as raised:
+        executor.execute(
+            0,
+            np.ones((1, 4), dtype=np.float32),
+            ids,
+            np.ones((1, 1), dtype=np.float32),
+            output=output,
+        )
+    assert np.all(output == 0)
+    assert raised.value.telemetry is not None
+    assert raised.value.telemetry.error == "InvalidExpertId"
+
+
+def test_cancellation_is_transactional_and_workspace_is_reusable() -> None:
+    executor = _executor()
+    hidden = np.ones((2, 4), dtype=np.float32)
+    ids = np.array([[0, 1], [2, 3]], dtype=np.int32)
+    weights = np.ones((2, 2), dtype=np.float32)
+    output = np.full((2, 4), 9, dtype=np.float32)
+    def token():
+        return True
+    with pytest.raises(Cancelled) as raised:
+        executor.execute(0, hidden, ids, weights, output=output, cancellation=token)
+    assert np.all(output == 0)
+    assert raised.value.telemetry is not None
+    assert raised.value.telemetry.cancelled
+
+    recovered = executor.execute(0, hidden, ids, weights)
+    assert np.isfinite(recovered.output).all()
+
+
+def test_group_api_reuses_the_same_prepared_contract() -> None:
+    executor = _executor()
+    request = CpuExecutionRequest(
+        layer_id=0,
+        hidden=np.ones((1, 4), dtype=np.float32),
+        expert_ids=np.array([[0]], dtype=np.int32),
+        routing_weights=np.ones((1, 1), dtype=np.float32),
+    )
+    results = executor.execute_group((request, request))
+    assert len(results) == 2
+    np.testing.assert_array_equal(results[0].output, results[1].output)
+
+
+def test_prepare_rejects_oversized_request_without_dynamic_resize() -> None:
+    executor = _executor()
+    plan = executor.last_telemetry
+    assert plan is None
+    with pytest.raises(WorkspaceTooSmall):
+        executor.execute(
+            0,
+            np.ones((129, 4), dtype=np.float32),
+            np.zeros((129, 1), dtype=np.int32),
+            np.ones((129, 1), dtype=np.float32),
+        )
+
+
+def test_single_flight_executor_reports_busy() -> None:
+    executor = _executor()
+    acquired = threading.Event()
+    release = threading.Event()
+
+    original = executor._dense_expert
+
+    def blocked(descriptor, expert):
+        acquired.set()
+        release.wait(timeout=2)
+        return original(descriptor, expert)
+
+    executor._dense_expert = blocked
+    errors: list[Exception] = []
+
+    def run() -> None:
+        try:
+            executor.execute(
+                0,
+                np.ones((1, 4), dtype=np.float32),
+                np.zeros((1, 1), dtype=np.int32),
+                np.ones((1, 1), dtype=np.float32),
+            )
+        except Exception as error:  # pragma: no cover - assertion below identifies errors
+            errors.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert acquired.wait(timeout=2)
+    with pytest.raises(Busy):
+        executor.execute(
+            0,
+            np.ones((1, 4), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.int32),
+            np.ones((1, 1), dtype=np.float32),
+        )
+    release.set()
+    thread.join(timeout=2)
+    assert not errors
+
+
+def test_structural_adapter_preserves_heterogeneous_pools_without_qwen_imports() -> None:
+    class SourceDescriptor:
+        def __init__(self, layer, projection, quant_type, quant_name, pool_id):
+            self.layer = layer
+            self.projection = projection
+            self.quant_type = quant_type
+            self.quant_name = quant_name
+            self.experts = 3
+            self.output_dim = 4 if projection != "down" else 2
+            self.input_dim = 2 if projection != "down" else 4
+            self.row_bytes = self.input_dim * 4
+            self.bytes_per_expert = self.output_dim * self.row_bytes
+            self.tensor_bytes = self.experts * self.bytes_per_expert
+            self.data_offset = 4096 + layer * 100
+            self.pool_id = pool_id
+
+    class SourceLayout:
+        descriptors = tuple(
+            SourceDescriptor(0, projection, quant, name, pool)
+            for projection, quant, name, pool in (
+                ("gate", 12, "Q4_K", 1),
+                ("up", 13, "Q5_K", 2),
+                ("down", 18, "IQ3_XXS", 3),
+            )
+        )
+
+    sources = {(0, descriptor.projection): object() for descriptor in SourceLayout.descriptors}
+    adapted = cpu_layout_from_source_layout(SourceLayout(), sources, top_k=10)
+    assert [item.quant_name for item in adapted.descriptors] == [
+        "Q4_K",
+        "Q5_K",
+        "IQ3_XXS",
+    ]
+    assert [item.pool_id for item in adapted.descriptors] == [1, 2, 3]
+    assert adapted.descriptor(0, "gate").source is sources[(0, "gate")]
+
+
+def test_reference_executor_uses_registered_packed_decoder_and_reports_packed_bytes() -> None:
+    rng = np.random.default_rng(7)
+    experts, hidden_size, intermediate_size = 2, 3, 4
+    dense = {
+        projection: rng.normal(size=(experts, output, input_size)).astype(np.float32)
+        for projection, output, input_size in (
+            ("gate", intermediate_size, hidden_size),
+            ("up", intermediate_size, hidden_size),
+            ("down", hidden_size, intermediate_size),
+        )
+    }
+
+    class PackedSource:
+        def __init__(self, values):
+            self.values = values
+
+        def expert_packed(self, expert):
+            return self.values[expert].view(np.uint8)
+
+    sources = {projection: PackedSource(values) for projection, values in dense.items()}
+    descriptors = []
+    for pool_id, (projection, values) in enumerate(dense.items()):
+        output, input_size = values.shape[1:]
+        row_bytes = input_size * 4
+        descriptors.append(
+            CpuExpertDescriptor(
+                layer_id=0,
+                projection=projection,
+                quant_type=12,
+                quant_name="Q4_K",
+                num_experts=experts,
+                output_dim=output,
+                input_dim=input_size,
+                rows_per_expert=output,
+                row_stride_bytes=row_bytes,
+                expert_stride_bytes=output * row_bytes,
+                tensor_bytes=experts * output * row_bytes,
+                pool_id=pool_id,
+                source=sources[projection],
+            )
+        )
+
+    def decode(packed, descriptor):
+        assert packed.shape == (descriptor.output_dim, descriptor.row_stride_bytes)
+        return packed.view(np.float32).reshape(descriptor.output_dim, descriptor.input_dim)
+
+    executor = ReferenceCpuExpertExecutor(
+        CpuExpertLayout(tuple(descriptors), top_k=2),
+        decoders={12: decode},
+    )
+    executor.prepare(1, 2)
+    result = executor.execute(
+        0,
+        np.ones((1, hidden_size), dtype=np.float32),
+        np.array([[0, 1]], dtype=np.int32),
+        np.array([[0.25, 0.75]], dtype=np.float32),
+    )
+    assert np.isfinite(result.output).all()
+    expected_bytes = sum(item.expert_stride_bytes for item in descriptors) * 2
+    assert result.telemetry.bytes_read_packed == expected_bytes
+
+
+def test_unsupported_packed_decoder_fails_explicitly() -> None:
+    executor = _executor()
+
+    class PackedSource:
+        def expert_packed(self, _expert):
+            return np.zeros((6, 16), dtype=np.uint8)
+
+    descriptor = executor.layout.descriptor(0, "gate")
+    # Replace only the gate source with an unsupported packed source; the descriptor
+    # itself still records the source geometry and quant contract unchanged.
+    replacement = CpuExpertDescriptor(
+        **{
+            name: getattr(descriptor, name)
+            for name in (
+                "layer_id",
+                "projection",
+                "quant_type",
+                "quant_name",
+                "num_experts",
+                "output_dim",
+                "input_dim",
+                "rows_per_expert",
+                "row_stride_bytes",
+                "expert_stride_bytes",
+                "tensor_bytes",
+                "source_offset",
+                "source_address",
+                "pool_id",
+            )
+        },
+        source=PackedSource(),
+    )
+    descriptors = tuple(
+        replacement if item.projection == "gate" else item
+        for item in executor.layout.descriptors
+    )
+    failing = ReferenceCpuExpertExecutor(
+        CpuExpertLayout(descriptors, top_k=10),
+    )
+    failing.prepare(1, 1)
+    with pytest.raises(UnsupportedQuantType, match="decoder"):
+        failing.execute(
+            0,
+            np.ones((1, 4), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.int32),
+            np.ones((1, 1), dtype=np.float32),
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"layer_id": 0, "projection": "gate", "rows_per_expert": 3, "output_dim": 2},
+        {"layer_id": 0, "projection": "gate", "expert_stride_bytes": 7},
+    ],
+)
+def test_descriptor_rejects_inconsistent_geometry(kwargs) -> None:
+    values = dict(
+        layer_id=0,
+        projection="gate",
+        quant_type="F32",
+        quant_name="F32",
+        num_experts=2,
+        output_dim=2,
+        input_dim=2,
+        rows_per_expert=2,
+        row_stride_bytes=8,
+        expert_stride_bytes=16,
+        tensor_bytes=32,
+    )
+    values.update(kwargs)
+    with pytest.raises((InvalidRequest, UnsupportedShape)):
+        CpuExpertDescriptor(**values)
+
+
+def test_executor_rejects_a_source_alignment_it_cannot_guarantee() -> None:
+    executor = _executor()
+    descriptor = executor.layout.descriptor(0, "gate")
+    values = {
+        name: getattr(descriptor, name)
+        for name in (
+            "layer_id",
+            "projection",
+            "quant_type",
+            "quant_name",
+            "num_experts",
+            "output_dim",
+            "input_dim",
+            "rows_per_expert",
+            "row_stride_bytes",
+            "expert_stride_bytes",
+            "tensor_bytes",
+            "source_offset",
+            "pool_id",
+            "source",
+        )
+    }
+    values["source_address"] = 3
+    replacement = CpuExpertDescriptor(**values)
+    layout = CpuExpertLayout(
+        tuple(
+            replacement if item.projection == "gate" else item
+            for item in executor.layout.descriptors
+        ),
+        top_k=10,
+    )
+    with pytest.raises(UnsupportedAlignment, match="aligned"):
+        ReferenceCpuExpertExecutor(layout, required_alignment=16)

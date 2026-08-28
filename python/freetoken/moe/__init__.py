@@ -1,19 +1,66 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-from freetoken.utils import Registry, init_logger
+if TYPE_CHECKING:
+    from .base import BaseMoeBackend
 
-from .base import BaseMoeBackend
 
-logger = init_logger(__name__)
+class _Registry:
+    """Small dependency-free registry used during H0 package imports.
+
+    The MoE package is also the import parent for ``cpu_abi``.  Keeping this
+    registry local prevents a Torch/Hugging Face import merely to load the
+    Torch-free ABI; backend construction still imports the full runtime lazily.
+    """
+
+    def __init__(self, type_name: str):
+        self._registry = {}
+        self._info = {}
+        self._type = type_name
+
+    def register(self, name: str, info: object | None = None):
+        if name in self._registry:
+            raise KeyError(f"{self._type} '{name}' is already registered.")
+
+        def decorator(item):
+            self._registry[name] = item
+            self._info[name] = info
+            return item
+
+        return decorator
+
+    def info(self, name: str) -> object | None:
+        if name not in self._registry:
+            raise KeyError(f"Unsupported {self._type}: {name}")
+        return self._info.get(name)
+
+    def __getitem__(self, name: str):
+        if name not in self._registry:
+            raise KeyError(f"Unsupported {self._type}: {name}")
+        return self._registry[name]
+
+    def supported_names(self) -> list[str]:
+        return list(self._registry)
+
+    def assert_supported(self, names: str | list[str]) -> None:
+        if isinstance(names, str):
+            names = [names]
+        for name in names:
+            if name not in self._registry:
+                from argparse import ArgumentTypeError
+
+                raise ArgumentTypeError(
+                    f"Unsupported {self._type}: {name}. "
+                    f"Supported items: {self.supported_names()}"
+                )
 
 
 class MoeBackendCreator(Protocol):
     def __call__(self) -> BaseMoeBackend: ...
 
 
-SUPPORTED_MOE_BACKENDS = Registry[MoeBackendCreator]("MoE Backend")
+SUPPORTED_MOE_BACKENDS = _Registry("MoE Backend")
 
 # Backends that serve experts from CPU (pinned) host banks through an
 # ``OffloadMoeCache`` -- the GPU only holds the two-layer prefill double buffer.
@@ -65,10 +112,18 @@ def create_moe_backend(backend: str) -> BaseMoeBackend:
     return SUPPORTED_MOE_BACKENDS[backend]()
 
 
+def __getattr__(name: str):
+    if name == "BaseMoeBackend":
+        from .base import BaseMoeBackend
+
+        return BaseMoeBackend
+    raise AttributeError(name)
+
+
 __all__ = [
+    "OFFLOAD_MOE_BACKENDS",
+    "SUPPORTED_MOE_BACKENDS",
     "BaseMoeBackend",
     "create_moe_backend",
-    "SUPPORTED_MOE_BACKENDS",
-    "OFFLOAD_MOE_BACKENDS",
     "is_offload_moe_backend",
 ]
