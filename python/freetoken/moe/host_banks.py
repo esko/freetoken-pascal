@@ -1,4 +1,8 @@
-"""Reusable pinned host-bank primitives shared by the fast expert-load paths.
+"""Host-bank allocation and residency primitives shared by expert-load paths.
+
+Source mappings are pageable by default.  Pinning is an explicit, preflighted
+policy choice so a complete model cannot consume the process pin quota by
+accident.
 
 Two ideas the parallel read of the original checkpoint and FTW (read a repacked
 contiguous cache) paths both rely on:
@@ -24,7 +28,9 @@ import mmap
 import os
 import queue
 import threading
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from enum import Enum
 
 import torch
@@ -48,10 +54,421 @@ class HostResidency(str, Enum):
     PAGEABLE = "pageable"
 
 
+class HostBankStrategy(str, Enum):
+    """How a host expert bank is exposed to the execution paths.
+
+    ``PAGEABLE`` keeps the source mapping in ordinary host memory.  ``PINNED``
+    selectively registers complete source layers after they have been filled.
+    ``BOUNDED_STAGING`` keeps the source pageable and uses a separately bounded
+    pinned ring for transfers.  The default is deliberately pageable.
+    """
+
+    PAGEABLE = "pageable"
+    PAGEABLE_DIRECT = "pageable"
+    PINNED = "pinned"
+    SELECTIVE_PINNED = "pinned"
+    BOUNDED_STAGING = "bounded-staging"
+
+
+class NumaPolicy(str, Enum):
+    """Placement intent recorded by host-bank policy, without changing placement yet."""
+
+    PREFERRED = "preferred"
+    BIND = "bind"
+    INTERLEAVE = "interleave"
+
+
+def _normalize_strategy(strategy: HostBankStrategy | str) -> HostBankStrategy:
+    try:
+        if isinstance(strategy, HostBankStrategy):
+            return strategy
+        aliases = {
+            "pageable-direct": HostBankStrategy.PAGEABLE,
+            "selective-pinned": HostBankStrategy.PINNED,
+            "bounded_staging": HostBankStrategy.BOUNDED_STAGING,
+        }
+        if strategy in aliases:
+            return aliases[strategy]
+        return HostBankStrategy(strategy)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"unknown host-bank strategy {strategy!r}") from exc
+
+
+def _aligned_nbytes(shape: tuple[int, ...], dtype: torch.dtype) -> int:
+    """Return the allocation size used by :class:`HostBank`, including page rounding."""
+    if any(int(size) < 0 for size in shape):
+        raise ValueError(f"bank shape must be non-negative, got {shape}")
+    raw = math.prod(shape) * torch.empty((), dtype=dtype).element_size()
+    return max(_BLK, ((raw + _BLK - 1) // _BLK) * _BLK)
+
+
+@dataclass(frozen=True)
+class HostBankPlan:
+    """Validated pre-load decision and byte accounting for a host-bank set."""
+
+    strategy: HostBankStrategy
+    source_bytes: int
+    layer_bytes: tuple[int, ...]
+    layer_residency: tuple[str, ...]
+    pinned_bytes: int
+    staging_bytes: int
+    staging_slots: int
+    numa_policy: NumaPolicy
+    numa_node: int | None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "strategy": self.strategy.value,
+            "source_bytes": self.source_bytes,
+            "layer_bytes": list(self.layer_bytes),
+            "layer_residency": list(self.layer_residency),
+            "pinned_bytes": self.pinned_bytes,
+            "staging_bytes": self.staging_bytes,
+            "staging_slots": self.staging_slots,
+            "numa_policy": self.numa_policy.value,
+            "numa_node": self.numa_node,
+        }
+
+
+@dataclass
+class HostBankAccounting:
+    """Observable host-bank selection and budget accounting."""
+
+    strategy: HostBankStrategy
+    source_bytes: int = 0
+    # Requested values are the pre-load reservation; applied values are updated
+    # only after a source bank has actually settled.
+    pinned_bytes: int = 0
+    staging_bytes: int = 0
+    applied_pinned_bytes: int = 0
+    applied_staging_bytes: int = 0
+    applied_layers: tuple[str, ...] = ()
+    layer_bytes: tuple[int, ...] = ()
+    layers: tuple[str, ...] = ()
+    numa_policy: NumaPolicy = NumaPolicy.PREFERRED
+    numa_node: int | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "strategy": self.strategy.value,
+            "source_bytes": self.source_bytes,
+            "pinned_bytes": self.pinned_bytes,
+            "staging_bytes": self.staging_bytes,
+            "applied_pinned_bytes": self.applied_pinned_bytes,
+            "applied_staging_bytes": self.applied_staging_bytes,
+            "layer_bytes": list(self.layer_bytes),
+            "layers": list(self.layers),
+            "applied_layers": list(self.applied_layers),
+            "numa_policy": self.numa_policy.value,
+            "numa_node": self.numa_node,
+        }
+
+
+@dataclass
+class HostBankPolicy:
+    """Fail-closed host-bank residency and budget policy.
+
+    ``prepare`` must run before allocation or checkpoint reads.  A pageable
+    policy is the safe default.  A pinned policy needs an explicit finite byte
+    limit.  ``selected_layers`` limits registration to those layer IDs and
+    leaves the other source layers pageable.
+    """
+
+    strategy: HostBankStrategy | str = HostBankStrategy.PAGEABLE
+    max_pinned_bytes: int | None = 0
+    max_staging_bytes: int | None = 0
+    staging_bytes: int = 0
+    staging_slots: int = 2
+    selected_layers: tuple[int, ...] | None = None
+    numa_policy: NumaPolicy | str = NumaPolicy.PREFERRED
+    numa_node: int | None = None
+    accounting: HostBankAccounting = field(init=False)
+    _plan: HostBankPlan | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._validate_configuration()
+        self.accounting = HostBankAccounting(
+            strategy=self.strategy,
+            numa_policy=self.numa_policy,
+            numa_node=self.numa_node,
+        )
+
+    def _validate_configuration(self) -> None:
+        """Normalize and validate mutable configuration before every preflight."""
+        self.strategy = _normalize_strategy(self.strategy)
+        try:
+            self.numa_policy = (
+                self.numa_policy
+                if isinstance(self.numa_policy, NumaPolicy)
+                else NumaPolicy(self.numa_policy)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"unknown NUMA policy {self.numa_policy!r}") from exc
+        for name, value in (
+            ("max_pinned_bytes", self.max_pinned_bytes),
+            ("max_staging_bytes", self.max_staging_bytes),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative integer or None")
+        if (
+            isinstance(self.staging_bytes, bool)
+            or not isinstance(self.staging_bytes, int)
+            or self.staging_bytes < 0
+        ):
+            raise ValueError("staging_bytes must be a non-negative integer")
+        if (
+            isinstance(self.staging_slots, bool)
+            or not isinstance(self.staging_slots, int)
+            or self.staging_slots <= 0
+        ):
+            raise ValueError("staging_slots must be a positive integer")
+        if self.numa_node is not None and (
+            isinstance(self.numa_node, bool)
+            or not isinstance(self.numa_node, int)
+            or self.numa_node < 0
+        ):
+            raise ValueError("numa_node must be a non-negative integer or None")
+        if self.selected_layers is not None:
+            self.selected_layers = tuple(sorted(set(self.selected_layers)))
+            if any(
+                isinstance(layer, bool) or not isinstance(layer, int) or layer < 0
+                for layer in self.selected_layers
+            ):
+                raise ValueError("selected_layers must contain non-negative integer IDs")
+
+    def prepare(
+        self,
+        specs: Mapping[str, tuple[tuple[int, ...], torch.dtype]],
+        num_layers: int,
+    ) -> HostBankPlan:
+        """Validate all limits and produce the per-layer decision before allocation."""
+        self._plan = None
+        # Invalidate prior telemetry before any operation that can fail.  An
+        # invalid mutated policy must not continue exposing a successful old
+        # reservation as though it were still active.
+        self.accounting = HostBankAccounting(strategy=HostBankStrategy.PAGEABLE)
+        # Policy fields remain public for compatibility, so callers may mutate
+        # them after construction.  Revalidate before deriving any allocation
+        # decision to keep that mutation fail-closed.
+        self._validate_configuration()
+        self.accounting = HostBankAccounting(
+            strategy=self.strategy,
+            numa_policy=self.numa_policy,
+            numa_node=self.numa_node,
+        )
+        if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers <= 0:
+            raise ValueError(f"num_layers must be a positive integer, got {num_layers}")
+        if not specs:
+            raise ValueError("host-bank policy requires at least one bank spec")
+        if self.selected_layers is not None and any(
+            layer >= num_layers for layer in self.selected_layers
+        ):
+            raise ValueError(
+                f"selected_layers {self.selected_layers} contain an ID outside [0, {num_layers})"
+            )
+        per_layer = [0] * num_layers
+        for name, spec in specs.items():
+            try:
+                shape, dtype = spec
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid bank spec for {name!r}: {spec!r}") from exc
+            bytes_per_bank = _aligned_nbytes(tuple(shape), dtype)
+            for layer in range(num_layers):
+                per_layer[layer] += bytes_per_bank
+        source_bytes = sum(per_layer)
+        selected = (
+            set(range(num_layers)) if self.selected_layers is None else set(self.selected_layers)
+        )
+        labels = tuple(
+            HostResidency.PINNED.value
+            if self.strategy is HostBankStrategy.PINNED and layer in selected
+            else HostResidency.PAGEABLE.value
+            for layer in range(num_layers)
+        )
+        pinned_bytes = (
+            sum(per_layer[layer] for layer in selected)
+            if self.strategy is HostBankStrategy.PINNED
+            else 0
+        )
+        staging_bytes = (
+            self.staging_bytes if self.strategy is HostBankStrategy.BOUNDED_STAGING else 0
+        )
+        if self.strategy is HostBankStrategy.PINNED:
+            if self.max_pinned_bytes is None:
+                raise ValueError("pinned strategy requires finite max_pinned_bytes")
+            if pinned_bytes > self.max_pinned_bytes:
+                raise ValueError(
+                    f"pinned host-bank budget {self.max_pinned_bytes} bytes is smaller "
+                    f"than the selected {pinned_bytes} bytes"
+                )
+        if self.strategy is HostBankStrategy.BOUNDED_STAGING:
+            if staging_bytes <= 0:
+                raise ValueError("bounded-staging requires staging_bytes > 0")
+            if staging_bytes % self.staging_slots:
+                raise ValueError(
+                    "staging_bytes must divide evenly across staging_slots "
+                    f"({staging_bytes} / {self.staging_slots})"
+                )
+            if self.max_staging_bytes is None:
+                raise ValueError("bounded-staging requires finite max_staging_bytes")
+            if staging_bytes > self.max_staging_bytes:
+                raise ValueError(
+                    f"staging host-bank budget {self.max_staging_bytes} bytes is smaller "
+                    f"than the configured {staging_bytes} bytes"
+                )
+        elif self.staging_bytes:
+            raise ValueError("staging_bytes is only valid with the bounded-staging strategy")
+        plan = HostBankPlan(
+            strategy=self.strategy,
+            source_bytes=source_bytes,
+            layer_bytes=tuple(per_layer),
+            layer_residency=labels,
+            pinned_bytes=pinned_bytes,
+            staging_bytes=staging_bytes,
+            staging_slots=self.staging_slots,
+            numa_policy=self.numa_policy,
+            numa_node=self.numa_node,
+        )
+        self._plan = plan
+        self.accounting = HostBankAccounting(
+            strategy=self.strategy,
+            source_bytes=source_bytes,
+            pinned_bytes=pinned_bytes,
+            staging_bytes=staging_bytes,
+            layer_bytes=tuple(per_layer),
+            layers=labels,
+            numa_policy=self.numa_policy,
+            numa_node=self.numa_node,
+        )
+        return plan
+
+    @property
+    def plan(self) -> HostBankPlan:
+        if self._plan is None:
+            raise RuntimeError("host-bank policy must be prepared before use")
+        return self._plan
+
+    def staging_ring(
+        self,
+        *,
+        allocator: Callable[[int], object] | None = None,
+    ) -> HostStagingRing:
+        """Allocate the explicitly bounded staging ring after successful preflight."""
+        plan = self.plan
+        if plan.strategy is not HostBankStrategy.BOUNDED_STAGING:
+            raise ValueError("staging_ring requires the bounded-staging strategy")
+        ring = HostStagingRing(
+            plan.staging_bytes,
+            slots=plan.staging_slots,
+            allocator=allocator,
+        )
+        self.accounting.applied_staging_bytes = plan.staging_bytes
+        return ring
+
+    def settle(self, banks: dict[str, HostBank | list[HostBank]]) -> None:
+        """Apply the prepared source policy after banks have been filled."""
+        pin_banks(banks, policy=self)
+
+
+class HostStagingRing:
+    """Fixed-size staging slots; no growth or per-transfer allocation is allowed."""
+
+    def __init__(
+        self,
+        nbytes: int,
+        *,
+        slots: int = 2,
+        allocator: Callable[[int], object] | None = None,
+    ) -> None:
+        if nbytes <= 0:
+            raise ValueError("staging ring size must be positive")
+        if slots <= 0 or nbytes % slots:
+            raise ValueError("staging ring bytes must divide evenly across positive slots")
+        self.nbytes = nbytes
+        self.slots_count = slots
+        self.slot_bytes = nbytes // slots
+        self._closed = False
+        if allocator is None:
+            allocator = self._default_allocator
+        allocated: list[object] = []
+        current: object | None = None
+        try:
+            for _ in range(slots):
+                current = allocator(self.slot_bytes)
+                actual = getattr(current, "nbytes", None)
+                if actual is None:
+                    try:
+                        actual = len(current)
+                    except TypeError:
+                        actual = self.slot_bytes
+                if actual != self.slot_bytes:
+                    raise ValueError(
+                        f"staging allocator returned {actual} bytes, require exactly "
+                        f"{self.slot_bytes}"
+                    )
+                allocated.append(current)
+                current = None
+        except BaseException:
+            slots_to_close = ([] if current is None else [current]) + allocated
+            for slot in slots_to_close:
+                close = getattr(slot, "close", None)
+                if close is not None:
+                    try:
+                        close()
+                    except BaseException:
+                        pass
+            raise
+        self.slots = tuple(allocated)
+
+    @staticmethod
+    def _default_allocator(size: int) -> object:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "bounded-staging requires CUDA pinned allocation; provide an allocator "
+                "for host-only tests"
+            )
+        from freetoken.kernel.pinned import alloc_pinned_tensor
+
+        return alloc_pinned_tensor(size, dtype=torch.uint8)
+
+    def acquire(self, slot: int) -> object:
+        if self._closed:
+            raise RuntimeError("host staging ring is closed")
+        if not 0 <= slot < self.slots_count:
+            raise IndexError(f"staging slot {slot} outside [0, {self.slots_count})")
+        return self.slots[slot]
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        slots, self.slots = self.slots, ()
+        first_error: BaseException | None = None
+        for slot in slots:
+            close = getattr(slot, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except BaseException as error:
+                    if first_error is None:
+                        first_error = error
+        if first_error is not None:
+            raise first_error
+
+    def __enter__(self) -> HostStagingRing:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+
 _DEFAULT_CHUNK = 8 << 20
 
-# Hold the mmaps for the process lifetime; the offload cache reads from these banks forever.
+# Keep mmap objects alive until their owning bank is explicitly closed.
 _LIVE_BUFFERS: list[mmap.mmap] = []
+
 
 def _env_born_pinned() -> bool | None:
     """``FREETOKEN_BANK_CUDA_ALLOC`` tri-state: unset -> ``None`` (default applies), else the parsed boolean."""
@@ -79,19 +496,30 @@ class HostBank:
 
     The buffer is rounded up to the O_DIRECT block; ``tensor`` views exactly ``nbytes``. ``backing=None`` follows ``FREETOKEN_BANK_CUDA_ALLOC``."""
 
-    __slots__ = ("tensor", "addr", "nbytes", "_buf", "_pinned", "_locked")
+    __slots__ = (
+        "_backing",
+        "_buf",
+        "_closed",
+        "_locked",
+        "_pinned",
+        "_registered",
+        "addr",
+        "nbytes",
+        "tensor",
+    )
 
-    def __init__(self, shape: tuple[int, ...], dtype: torch.dtype,
-                 *, backing: str | None = None):
+    def __init__(self, shape: tuple[int, ...], dtype: torch.dtype, *, backing: str | None = None):
         if backing is None:
             plan = _requested_residency
             # a plan with non-pinned labels vetoes born-pinned: cudaHostAlloc spends the pin quota the plan exists to save
             born = _env_born_pinned() and (plan is None or not plan.has_unpinned)
             backing = "cuda" if born else "mmap"
         assert backing in ("mmap", "cuda"), backing
+        self._backing = backing
+        self._closed = False
         elsize = torch.empty((), dtype=dtype).element_size()
         self.nbytes = math.prod(shape) * elsize
-        asize = ((self.nbytes + _BLK - 1) // _BLK) * _BLK
+        asize = max(_BLK, ((self.nbytes + _BLK - 1) // _BLK) * _BLK)
         if backing == "cuda":
             from freetoken.kernel.pinned import alloc_pinned_tensor
 
@@ -100,16 +528,20 @@ class HostBank:
             raw = alloc_pinned_tensor(asize + _BLK, dtype=torch.uint8)  # cudaMallocHost
             raw.zero_()  # keep the anonymous-mmap guarantee: unwritten regions stay zero
             off = (-raw.data_ptr()) % _BLK
-            self._buf = raw.numpy()[off:off + asize]
+            self._buf = raw.numpy()[off : off + asize]
             self.addr = raw.data_ptr() + off
             assert self.addr % _BLK == 0
             self._pinned = True  # born pinned+mapped; pin() is a no-op
+            self._registered = False
         else:
             self._buf = mmap.mmap(-1, asize)  # lazy: address space only, no resident pages yet
             _LIVE_BUFFERS.append(self._buf)
             self.addr = ctypes.addressof(ctypes.c_char.from_buffer(self._buf))
             self._pinned = False
-        self.tensor = torch.frombuffer(self._buf, dtype=dtype, count=self.nbytes // elsize).view(*shape)
+            self._registered = False
+        self.tensor = torch.frombuffer(self._buf, dtype=dtype, count=self.nbytes // elsize).view(
+            *shape
+        )
         self._locked = False
 
     @property
@@ -120,16 +552,30 @@ class HostBank:
             return HostResidency.LOCKED
         return HostResidency.PAGEABLE
 
+    @property
+    def allocated_nbytes(self) -> int:
+        """Page-rounded allocation size used by residency accounting."""
+        return len(self._buf)
+
     def memoryview(self) -> memoryview:
+        if self._closed:
+            raise RuntimeError("host bank is closed")
         return memoryview(self._buf)
 
     def pin(self) -> None:
         """cudaHostRegister the (now-filled) buffer -- pin-after-fill.
 
         ``FREETOKEN_SKIP_BANK_PIN=1`` makes this a no-op for CPU-only tooling (the FTW converter); never set it when serving, the GPU paths need registered banks."""
+        if self._closed:
+            raise RuntimeError("host bank is closed")
         if self._pinned:
             return
-        if os.environ.get("FREETOKEN_SKIP_BANK_PIN", "").strip().lower() in ("1", "true", "yes", "on"):
+        if os.environ.get("FREETOKEN_SKIP_BANK_PIN", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
             return
         from freetoken.kernel.pinned import host_register
 
@@ -140,12 +586,13 @@ class HostBank:
                 f"cudaHostRegister failed for {len(self._buf) / 2**30:.1f} GiB"
             ) from exc
         self._pinned = True
+        self._registered = True
 
     def release(self) -> None:
         """Drop the resident pages; the address space stays valid, the contents become undefined.
 
         For buffers that are done being read (the converter). No-op for born-pinned banks: registered pages cannot be dropped."""
-        if self._pinned:
+        if self._closed or self._pinned or self._locked:
             return
         self._buf.madvise(mmap.MADV_DONTNEED)
 
@@ -153,6 +600,8 @@ class HostBank:
         """mlock the (now-filled) buffer: resident without CUDA pin quota, but no device address -- only the CPU executor can serve a locked layer.
 
         Lock after fill, or the lazy mmap faults+zero-fills every page. A failed lock (RLIMIT_MEMLOCK) warns once and leaves the bank PAGEABLE, which every consumer treats the same."""
+        if self._closed:
+            raise RuntimeError("host bank is closed")
         if self._locked or self._pinned:  # cudaHostRegister already page-locks
             return
         global _os_lock_failed
@@ -165,6 +614,50 @@ class HostBank:
             logger.warning(f"bank lock failed; leaving this and later banks pageable: {exc}")
             return
         self._locked = True
+
+    def close(self) -> None:
+        """Release a bank's registration/lock and close its anonymous mapping."""
+        if self._closed:
+            return
+        if self._registered:
+            try:
+                from freetoken.kernel.pinned import host_unregister
+
+                host_unregister(self.addr, len(self._buf))
+            except (ImportError, AttributeError):
+                # Older installed extensions do not expose unregister.  Keep
+                # the mapping alive rather than leaving CUDA with a dangling
+                # registered range.
+                logger.warning("host-bank unregister is unavailable; retaining mapping")
+                return
+            self._registered = False
+            self._pinned = False
+        if self._locked:
+            _os_unlock(self.addr, len(self._buf))
+            self._locked = False
+        buf = self._buf
+        tensor = self.tensor
+        if self._backing == "mmap":
+            self.tensor = None
+            try:
+                buf.close()
+            except BufferError:
+                self.tensor = tensor
+                raise
+            try:
+                _LIVE_BUFFERS.remove(buf)
+            except ValueError:
+                pass
+        else:
+            self.tensor = None
+        self._buf = None
+        self._closed = True
+
+    def __enter__(self) -> HostBank:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
 
 _os_locked_total = 0  # bytes locked so far; the OS lock ceiling is a per-process quota
@@ -197,21 +690,62 @@ def _os_lock(addr: int, nbytes: int) -> None:
     _os_locked_total += nbytes
 
 
-def alloc_banks(specs: dict[str, tuple[tuple[int, ...], torch.dtype]]) -> dict[str, HostBank]:
-    """Allocate (lazy, unpinned) host banks from ``{name: (shape, dtype)}``."""
-    return {name: HostBank(shape, dtype) for name, (shape, dtype) in specs.items()}
+def _os_unlock(addr: int, nbytes: int) -> None:
+    """Undo :func:`_os_lock` and keep process accounting bounded."""
+    global _os_locked_total
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.munlock(ctypes.c_void_p(addr), ctypes.c_size_t(nbytes)):
+        err = ctypes.get_errno()
+        raise OSError(err, f"munlock failed: {os.strerror(err)}")
+    _os_locked_total = max(0, _os_locked_total - nbytes)
+
+
+def alloc_banks(
+    specs: dict[str, tuple[tuple[int, ...], torch.dtype]],
+    *,
+    policy: HostBankPolicy | None = None,
+) -> dict[str, HostBank]:
+    """Allocate host banks, optionally after an explicit policy preflight."""
+    if policy is not None:
+        policy.prepare(specs, 1)
+    backing = "mmap" if policy is not None else None
+    allocated: dict[str, HostBank] = {}
+    try:
+        for name, (shape, dtype) in specs.items():
+            allocated[name] = HostBank(shape, dtype, backing=backing)
+        return allocated
+    except BaseException:
+        # The policy path is the owner of allocations created by this call.
+        # HostBank.close is idempotent and safe for the already-created prefix.
+        for bank in allocated.values():
+            bank.close()
+        raise
 
 
 def alloc_layer_banks(
-    specs: dict[str, tuple[tuple[int, ...], torch.dtype]], num_layers: int
+    specs: dict[str, tuple[tuple[int, ...], torch.dtype]],
+    num_layers: int,
+    *,
+    policy: HostBankPolicy | None = None,
 ) -> dict[str, list[HostBank]]:
     """Allocate per-layer host banks: ``{name: ([num_experts, ...] row shape, dtype)}``
     -> one independently allocated (page-aligned, independently pin/lock-able)
     ``HostBank`` per layer per name."""
-    return {
-        name: [HostBank(shape, dtype) for _ in range(num_layers)]
-        for name, (shape, dtype) in specs.items()
-    }
+    if policy is not None:
+        # This is deliberately before the first HostBank constructor.  In
+        # particular, FREETOKEN_BANK_CUDA_ALLOC cannot bypass a finite policy.
+        policy.prepare(specs, num_layers)
+    backing = "mmap" if policy is not None else None
+    allocated: dict[str, list[HostBank]] = {}
+    try:
+        for name, (shape, dtype) in specs.items():
+            allocated[name] = [HostBank(shape, dtype, backing=backing) for _ in range(num_layers)]
+    except BaseException:
+        for per_layer in allocated.values():
+            for bank in per_layer:
+                bank.close()
+        raise
+    return allocated
 
 
 class _ResidencyPlan:
@@ -219,7 +753,7 @@ class _ResidencyPlan:
 
     Installed by ``load_expert_banks`` around the provider dispatch so every loader honors --moe-cpu-layers without a new parameter in each signature. ``applied`` flips once a settle point consults the plan."""
 
-    __slots__ = ("labels", "applied", "has_unpinned", "actual")
+    __slots__ = ("actual", "applied", "has_unpinned", "labels")
 
     def __init__(self, labels: list[str]):
         self.labels = list(labels)
@@ -263,22 +797,77 @@ def _settle(bank: HostBank, residency: str) -> None:
         bank.lock()
 
 
-def pin_banks(banks: dict[str, HostBank | list[HostBank]]) -> None:
+def pin_banks(
+    banks: dict[str, HostBank | list[HostBank]],
+    *,
+    policy: HostBankPolicy | None = None,
+) -> None:
     """Settle every bank after it has been filled -- pin-after-fill by default.
-    List-valued entries are per-layer and honor the ambient :func:`requested_residency` plan; scalar banks always pin."""
-    plan = _requested_residency
+    List-valued entries are per-layer and honor the ambient :func:`requested_residency` plan; scalar banks always pin.
+    An explicit ``policy`` uses its already-prepared plan and never consults
+    the ambient policy state."""
+    if policy is not None:
+        plan = None
+        residency_for = policy.plan.layer_residency
+        expected_layer_bytes = policy.plan.layer_bytes
+    else:
+        plan = _requested_residency
+        residency_for = None
+        expected_layer_bytes = None
+    by_layer: dict[int, list[HostBank]] = {}
+    if expected_layer_bytes is not None:
+        observed_layer_bytes = [0] * len(expected_layer_bytes)
+        for bank in banks.values():
+            per_layer = bank if isinstance(bank, list) else [bank]
+            if len(per_layer) != len(expected_layer_bytes):
+                raise ValueError("policy settlement requires a complete bank set for every layer")
+            for layer_id, layer_bank in enumerate(per_layer):
+                observed_layer_bytes[layer_id] += layer_bank.allocated_nbytes
+        if tuple(observed_layer_bytes) != expected_layer_bytes:
+            raise ValueError(
+                "policy settlement bank bytes do not match the prepared complete bank set"
+            )
     for bank in banks.values():
         if isinstance(bank, list):
             for layer_id, layer_bank in enumerate(bank):
                 residency = (
-                    HostResidency.PINNED.value if plan is None
-                    else plan.residency_for(layer_id)
+                    HostResidency.PINNED.value
+                    if plan is None and residency_for is None
+                    else (
+                        residency_for[layer_id]
+                        if residency_for is not None
+                        else plan.residency_for(layer_id)
+                    )
                 )
                 _settle(layer_bank, residency)
                 if plan is not None and residency == HostResidency.LOCKED.value:
                     plan.record(layer_id, layer_bank.residency.value)
+                by_layer.setdefault(layer_id, []).append(layer_bank)
         else:
-            bank.pin()
+            # Scalar banks predate per-layer residency plans and were always
+            # pinned.  Preserve that legacy contract unless an explicit policy
+            # supplies the new strategy decision.
+            residency = (
+                residency_for[0] if residency_for is not None else HostResidency.PINNED.value
+            )
+            _settle(bank, residency)
+            by_layer.setdefault(0, []).append(bank)
+    if policy is not None:
+        applied = list(policy.accounting.applied_layers or ("",) * len(residency_for))
+        applied_pinned = 0
+        for layer_id, layer_banks in by_layer.items():
+            if layer_id >= len(residency_for):
+                continue
+            actual = (
+                HostResidency.PINNED.value
+                if all(bank.residency is HostResidency.PINNED for bank in layer_banks)
+                else HostResidency.PAGEABLE.value
+            )
+            applied[layer_id] = actual
+            if actual == HostResidency.PINNED.value:
+                applied_pinned += sum(bank.allocated_nbytes for bank in layer_banks)
+        policy.accounting.applied_layers = tuple(applied)
+        policy.accounting.applied_pinned_bytes = applied_pinned
 
 
 class PinPipeline:
@@ -314,16 +903,19 @@ class PinPipeline:
             except BaseException as exc:  # surfaced by wait()/__exit__
                 self._exc = exc
 
-    def submit(self, bank: HostBank, residency: str = HostResidency.PINNED.value,
-               plan=None, layer_id: int | None = None) -> None:
+    def submit(
+        self,
+        bank: HostBank,
+        residency: str = HostResidency.PINNED.value,
+        plan=None,
+        layer_id: int | None = None,
+    ) -> None:
         self._q.put((bank, residency, plan, layer_id))
 
     def __call__(self, layer_id: int, banks: dict[str, HostBank]) -> None:
         """Layer-completion sink: queue every bank of the completed layer at its ambient :func:`requested_residency` label."""
         plan = _requested_residency
-        residency = (
-            HostResidency.PINNED.value if plan is None else plan.residency_for(layer_id)
-        )
+        residency = HostResidency.PINNED.value if plan is None else plan.residency_for(layer_id)
         for bank in banks.values():
             self.submit(bank, residency, plan, layer_id)
 
@@ -336,7 +928,7 @@ class PinPipeline:
         if self._exc is not None:
             raise self._exc
 
-    def __enter__(self) -> "PinPipeline":
+    def __enter__(self) -> PinPipeline:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -377,8 +969,14 @@ class LayerCompletionTracker:
             self._on_layer(layer_id, {name: per[layer_id] for name, per in self._banks.items()})
 
 
-def read_file_into(buf: memoryview | mmap.mmap, path: str, *, workers: int = 8,
-                   chunk: int = _DEFAULT_CHUNK, drop_cache: bool = True) -> int:
+def read_file_into(
+    buf: memoryview | mmap.mmap,
+    path: str,
+    *,
+    workers: int = 8,
+    chunk: int = _DEFAULT_CHUNK,
+    drop_cache: bool = True,
+) -> int:
     """Chunked multi-threaded O_DIRECT read of the whole file ``path`` into ``buf``
     (page-aligned). Returns the file size. The buffer must be >= the rounded-up file size."""
     size = os.path.getsize(path)
@@ -396,7 +994,7 @@ def read_file_into(buf: memoryview | mmap.mmap, path: str, *, workers: int = 8,
     def rd(o):
         want = min(chunk, len(mv) - o)
         want = min(want, ((size - o + _BLK - 1) // _BLK) * _BLK)
-        os.preadv(fd, [mv[o:o + want]], o)
+        os.preadv(fd, [mv[o : o + want]], o)
 
     try:
         if len(offs) <= 1:
@@ -412,8 +1010,14 @@ def read_file_into(buf: memoryview | mmap.mmap, path: str, *, workers: int = 8,
 
 __all__ = [
     "HostBank",
+    "HostBankAccounting",
+    "HostBankPlan",
+    "HostBankPolicy",
+    "HostBankStrategy",
     "HostResidency",
+    "HostStagingRing",
     "LayerCompletionTracker",
+    "NumaPolicy",
     "PinPipeline",
     "alloc_banks",
     "alloc_layer_banks",
