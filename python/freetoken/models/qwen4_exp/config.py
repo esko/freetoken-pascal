@@ -157,4 +157,149 @@ def parse_config(hf_config: Any) -> ModelConfig:
     )
 
 
-__all__ = ["parse_config"]
+def parse_gguf_config(shim: Any) -> ModelConfig:
+    """Build the text-only Qwen4-Exp config from pinned llama.cpp GGUF metadata."""
+    metadata = shim.metadata
+    prefix = "qwen4exp."
+
+    def required(key: str):
+        full_key = prefix + key
+        if full_key not in metadata:
+            raise KeyError(f"missing GGUF metadata key {full_key}")
+        return metadata[full_key]
+
+    num_layers = int(required("block_count"))
+    interval = int(required("full_attention_interval"))
+    if interval <= 0:
+        raise ValueError(f"qwen4exp.full_attention_interval must be positive, got {interval}")
+    full_ids = tuple(layer for layer in range(num_layers) if (layer + 1) % interval == 0)
+    linear_ids = tuple(layer for layer in range(num_layers) if layer not in full_ids)
+    head_dim = int(required("attention.key_length"))
+    rotary_dim = int(required("rope.dimension_count"))
+    rope_sections = [int(value) for value in required("rope.dimension_sections")]
+    if sum(rope_sections) * 2 != rotary_dim:
+        raise ValueError(
+            "qwen4exp.rope.dimension_sections do not cover rope.dimension_count: "
+            f"{rope_sections} vs {rotary_dim}"
+        )
+    rotary = RotaryConfig(
+        head_dim=head_dim,
+        rotary_dim=rotary_dim,
+        max_position=int(required("context_length")),
+        base=float(required("rope.freq_base")),
+        scaling=None,
+    )
+
+    compress_ratios = [int(value) for value in required("attention.compress_ratios")]
+    if len(compress_ratios) != num_layers:
+        raise ValueError("qwen4exp.attention.compress_ratios length != block_count")
+    qsa_ratios = {compress_ratios[layer] for layer in full_ids}
+    if len(qsa_ratios) != 1:
+        raise ValueError(f"QSA layers have heterogeneous compression ratios: {qsa_ratios}")
+    index_compress_ratio = qsa_ratios.pop()
+    if index_compress_ratio <= 0:
+        raise ValueError(f"invalid QSA compression ratio {index_compress_ratio}")
+
+    hidden = int(required("embedding_length"))
+    linear_heads = int(required("ssm.group_count"))
+    value_heads = int(required("ssm.time_step_rank"))
+    state_size = int(required("ssm.state_size"))
+    index_heads = int(required("attention.indexer.head_count"))
+    index_head_dim = int(required("attention.indexer.key_length"))
+    ple_layers = tuple(int(layer) for layer in required("ple.layers"))
+    if any(layer < 0 or layer >= num_layers for layer in ple_layers):
+        raise ValueError(f"qwen4exp.ple.layers out of range: {ple_layers}")
+    heads_per_ngram = int(required("ple.heads_per_ngram"))
+    ngram_size = int(required("ple.ngram_size"))
+    head_vocab_sizes = [int(value) for value in required("ple.head_vocab_sizes")]
+    head_offsets = [int(value) for value in required("ple.head_offsets")]
+    expected_ngram_heads = (ngram_size - 1) * heads_per_ngram
+    if len(head_vocab_sizes) != expected_ngram_heads or len(head_offsets) != expected_ngram_heads:
+        raise ValueError("Qwen4-Exp PLE head metadata has the wrong length")
+    ple_head_dim = int(required("embedding_length_per_layer_input"))
+
+    qwen4_args = Qwen4ExpArgs(
+        hc_count=int(required("hyper_connection.count")),
+        hc_lowrank=int(required("hyper_connection.low_rank")),
+        ple_layer_ids=ple_layers,
+        ple_embed_dim=ple_head_dim * expected_ngram_heads,
+        ple_conv_kernel_size=int(required("ple.conv_kernel")),
+        ngram_size=ngram_size,
+        heads_per_ngram=heads_per_ngram,
+        ngram_vocab_size_base=min(head_vocab_sizes),
+        # GGUF stores the PLE bank as one contiguous mmap-able tensor. Issue #13
+        # installs that source instead of the safetensors shard loader.
+        split_ngram_parts=1,
+        eos_token_id=int(required("ple.eos_token_id")),
+        indexer_n_heads=index_heads,
+        indexer_kv_heads=1,
+        indexer_head_dim=index_head_dim,
+        indexer_budget=int(required("attention.indexer.top_k")),
+        indexer_compress_ratio=index_compress_ratio,
+        output_gate_type="sigmoid",
+    )
+    groups = (
+        LinearGatedDeltaGroupConfig(
+            name="linear",
+            layer_ids=linear_ids,
+            num_key_heads=linear_heads,
+            num_value_heads=value_heads,
+            key_head_dim=state_size,
+            value_head_dim=state_size,
+            conv_kernel_dim=int(required("ssm.conv_kernel")),
+            output_gate=True,
+        ),
+        QSAAttentionGroupConfig(
+            name="qsa",
+            layer_ids=full_ids,
+            num_kv_heads=int(required("attention.head_count_kv")),
+            head_dim=head_dim,
+            rotary_config=rotary,
+            index_num_heads=index_heads,
+            index_num_kv_heads=1,
+            index_head_dim=index_head_dim,
+            index_token_budget=qwen4_args.indexer_budget,
+            index_compress_ratio=index_compress_ratio,
+        ),
+    )
+    return ModelConfig(
+        num_layers=num_layers,
+        num_qo_heads=int(required("attention.head_count")),
+        num_kv_heads=int(required("attention.head_count_kv")),
+        head_dim=head_dim,
+        hidden_size=hidden,
+        vocab_size=int(shim.vocab_size),
+        intermediate_size=0,
+        hidden_act="silu",
+        rms_norm_eps=float(required("attention.layer_norm_rms_epsilon")),
+        tie_word_embeddings=bool(shim.tie_word_embeddings),
+        rotary_config=rotary,
+        num_experts=int(required("expert_count")),
+        num_experts_per_tok=int(required("expert_used_count")),
+        moe_intermediate_size=int(required("expert_feed_forward_length")),
+        shared_expert_intermediate_size=int(required("expert_shared_feed_forward_length")),
+        norm_topk_prob=False,
+        model_type="qwen4_exp",
+        architectures=list(shim.architectures),
+        moe_enabled=True,
+        expert_quant="gguf",
+        attn_quant="gguf",
+        dense_quant="gguf",
+        lm_head_quant="gguf",
+        use_qk_norm=True,
+        vision_config=None,
+        image_token_id=(
+            int(metadata["qwen4exp.ple.image_token_id"])
+            if "qwen4exp.ple.image_token_id" in metadata
+            else None
+        ),
+        attention_groups=groups,
+        qwen4_args=qwen4_args,
+        requires_naive_cache=True,
+        supports_cuda_graph=False,
+        moe_weight_format="gguf",
+        gguf_model_path=shim.model_path,
+    )
+
+
+__all__ = ["parse_config", "parse_gguf_config"]

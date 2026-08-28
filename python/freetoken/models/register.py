@@ -71,6 +71,12 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         "freetoken.models.qwen4_exp",
         "Qwen4ExpForCausalLM",
     ),
+    "Qwen4ExpGGUFForCausalLM": ModelSpec(
+        "freetoken.models.qwen4_exp",
+        "Qwen4ExpForCausalLM",
+        parse_config="parse_gguf_config",
+        iter_weights="iter_gguf_weights",
+    ),
     # Muse-Glimmer-30B (model_type muse_glimmer): multimodal wrapper config (text tower in
     # text_config, weights under model.language_model.); served text-only. Dense gated GQA
     # with a [SWA x3, full] pattern -- full layers are NoPE -- weightless qk norms, centered
@@ -149,4 +155,4 @@ def get_model_class(model_architecture: str, model_config: ModelConfig):
     return model_cls(model_config)
 
 
-__all__ = ["ModelSpec", "get_model_spec", "get_model_class"]
+__all__ = ["ModelSpec", "get_model_class", "get_model_spec"]

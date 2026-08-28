@@ -585,6 +585,10 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
             tie_word_embeddings=config.tie_word_embeddings,
             tied_embedding=self.model.embed_tokens if config.tie_word_embeddings else None,
         )
+        if config.gguf_model_path is not None:
+            from .gguf import convert_qwen4_to_gguf
+
+            convert_qwen4_to_gguf(self, config, model_path=config.gguf_model_path)
         self._debug_hook: Callable[[dict[str, object]], None] | None = None
         super().__init__()
 

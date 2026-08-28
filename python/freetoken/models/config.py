@@ -322,6 +322,9 @@ class ModelConfig:
     single_stream_only: bool = False  # model runs one sequence at a time -> force bs=1
     requires_naive_cache: bool = False  # model owns host/runtime state radix cannot snapshot
     supports_cuda_graph: bool = True  # False when forward performs host-side dynamic work
+    # Exact source GGUF shard used to derive this config. Kept separate from quant labels:
+    # heterogeneous checkpoints have no single model-wide quant type.
+    gguf_model_path: str | None = None
 
     @property
     def is_moe(self) -> bool:

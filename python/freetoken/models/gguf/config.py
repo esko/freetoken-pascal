@@ -12,12 +12,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .reader import gguf_architecture, load_gguf_metadata, gguf_tensor_names
+from .reader import gguf_architecture, gguf_tensor_names, load_gguf_metadata
 
 # GGUF ``general.architecture`` -> FreeToken registry key (a GGUF-specific spec that
 # reuses the model classes but a GGUF parse_config / iter_weights).
 GGUF_ARCH_TO_REGISTRY: dict[str, str] = {
     "gemma4": "Gemma4GGUFForCausalLM",
+    "qwen4exp": "Qwen4ExpGGUFForCausalLM",
 }
 
 
@@ -44,11 +45,12 @@ class GgufConfigShim:
 
 
 def _vocab_size(model_path: str) -> int:
-    from .reader import _reader
+    from freetoken.gguf_shards import gguf_reader, gguf_shard_paths
 
-    for t in _reader(model_path).tensors:
-        if t.name == "token_embd.weight":
-            return int(t.shape[-1])  # ggml [hidden, vocab] -> vocab is last
+    for shard in gguf_shard_paths(model_path):
+        for tensor in gguf_reader(str(shard)).tensors:
+            if tensor.name == "token_embd.weight":
+                return int(tensor.shape[-1])  # ggml [hidden, vocab] -> vocab is last
     # A metadata-only GGUF (an FTW dir's source_metadata.gguf) strips the tensor table, so
     # fall back to the tokenizer vocab. llama.cpp sizes token_embd's rows to n_vocab =
     # len(tokenizer.ggml.tokens), so this equals the tensor-derived value exactly.
@@ -59,6 +61,9 @@ def _vocab_size(model_path: str) -> int:
 
 
 def build_gguf_shim(model_path: str) -> GgufConfigShim:
+    from freetoken.gguf_shards import gguf_shard_paths
+
+    model_path = str(gguf_shard_paths(model_path)[0])
     arch = gguf_architecture(model_path)
     registry_key = GGUF_ARCH_TO_REGISTRY.get(arch)
     if registry_key is None:
@@ -93,4 +98,4 @@ def build_gguf_shim(model_path: str) -> GgufConfigShim:
     )
 
 
-__all__ = ["GgufConfigShim", "GGUF_ARCH_TO_REGISTRY", "build_gguf_shim"]
+__all__ = ["GGUF_ARCH_TO_REGISTRY", "GgufConfigShim", "build_gguf_shim"]

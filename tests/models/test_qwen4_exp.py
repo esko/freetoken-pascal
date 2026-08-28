@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import freetoken.models.qwen4_exp as qwen4_exp
+import gguf
+import numpy as np
 import pytest
 import torch
-from freetoken.models.qwen4_exp.config import parse_config
+from freetoken.models.qwen4_exp.config import parse_config, parse_gguf_config
+from freetoken.models.qwen4_exp.gguf import _grouped_to_tiled_indices, _ungroup_v
 from freetoken.models.qwen4_exp.model import (
     Qwen4ExpForCausalLM,
     _ple_request_tokens,
@@ -179,6 +184,149 @@ def test_qwen4_registry_entry():
     spec = get_model_spec("Qwen4ExpForConditionalGeneration")
     assert spec.module == "freetoken.models.qwen4_exp"
     assert spec.model_cls == "Qwen4ExpForCausalLM"
+
+
+def _gguf_shim():
+    metadata = {
+        "qwen4exp.block_count": 4,
+        "qwen4exp.context_length": 262_144,
+        "qwen4exp.embedding_length": 2560,
+        "qwen4exp.attention.head_count": 24,
+        "qwen4exp.attention.head_count_kv": 2,
+        "qwen4exp.rope.dimension_sections": [11, 11, 10, 0],
+        "qwen4exp.rope.freq_base": 10_000_000.0,
+        "qwen4exp.rope.dimension_count": 64,
+        "qwen4exp.attention.layer_norm_rms_epsilon": 1e-6,
+        "qwen4exp.expert_count": 512,
+        "qwen4exp.expert_used_count": 10,
+        "qwen4exp.attention.key_length": 256,
+        "qwen4exp.expert_feed_forward_length": 640,
+        "qwen4exp.expert_shared_feed_forward_length": 640,
+        "qwen4exp.ssm.conv_kernel": 4,
+        "qwen4exp.ssm.state_size": 128,
+        "qwen4exp.ssm.group_count": 16,
+        "qwen4exp.ssm.time_step_rank": 48,
+        "qwen4exp.full_attention_interval": 4,
+        "qwen4exp.hyper_connection.count": 4,
+        "qwen4exp.hyper_connection.low_rank": 320,
+        "qwen4exp.attention.indexer.head_count": 4,
+        "qwen4exp.attention.indexer.key_length": 128,
+        "qwen4exp.attention.indexer.top_k": 2048,
+        "qwen4exp.attention.compress_ratios": [1, 1, 1, 4],
+        "qwen4exp.ple.layers": [1],
+        "qwen4exp.ple.ngram_size": 3,
+        "qwen4exp.ple.heads_per_ngram": 8,
+        "qwen4exp.ple.conv_kernel": 4,
+        "qwen4exp.ple.eos_token_id": 248044,
+        "qwen4exp.embedding_length_per_layer_input": 160,
+        "qwen4exp.ple.head_vocab_sizes": [20_000_003 + i for i in range(16)],
+        "qwen4exp.ple.head_offsets": [i * 20_000_003 for i in range(16)],
+        "qwen4exp.ple.image_token_id": 248056,
+    }
+    return SimpleNamespace(
+        metadata=metadata,
+        vocab_size=248320,
+        tie_word_embeddings=False,
+        architectures=["Qwen4ExpGGUFForCausalLM"],
+        model_path="model-00001-of-00004.gguf",
+    )
+
+
+def test_qwen4_gguf_config_uses_exact_artifact_geometry():
+    config = parse_gguf_config(_gguf_shim())
+
+    assert config.gguf_model_path == "model-00001-of-00004.gguf"
+    assert config.expert_quant == "gguf"
+    assert config.qwen4_args.ple_layer_ids == (1,)
+    assert config.qwen4_args.ple_embed_dim == 2560
+    assert config.qwen4_args.split_ngram_parts == 1
+    assert config.is_linear_layer(2)
+    assert not config.is_linear_layer(3)
+    assert config.attention_group_for_layer(3).index_compress_ratio == 4
+
+
+def test_qwen4_gguf_registry_entry():
+    spec = get_model_spec("Qwen4ExpGGUFForCausalLM")
+    assert spec.parse_config == "parse_gguf_config"
+    assert spec.iter_weights == "iter_gguf_weights"
+
+
+def test_qwen4_gguf_tokenizer_uses_qwen_bpe_converter():
+    from freetoken.models.gguf.tokenizer import _TOKENIZER_ARCH
+
+    assert _TOKENIZER_ARCH["qwen4exp"] == "qwen2"
+
+
+def test_qwen4_gguf_v_head_reorder_roundtrip():
+    grouped = torch.arange(16 * 3 * 4).reshape(16, 3, 4)
+    tiled = grouped.permute(1, 0, 2).contiguous().flatten()
+
+    assert torch.equal(_ungroup_v(tiled, 0, 16, 3, 4), grouped.flatten())
+    indices = _grouped_to_tiled_indices(16, 3, 4)
+    assert torch.equal(grouped.flatten().index_select(0, indices), tiled)
+
+
+def test_mixed_gguf_projection_allocates_independent_buffers():
+    from freetoken.layers.gguf import GGUFLinear, GGUFMergedLinear, gguf_merged_or_plain
+
+    uniform = gguf_merged_or_plain(256, [64, 32], [8, 8])
+    mixed = gguf_merged_or_plain(256, [64, 32], [8, 0])
+
+    assert isinstance(uniform, GGUFLinear)
+    assert uniform.qweight.shape == (96, 272)
+    assert isinstance(mixed, GGUFMergedLinear)
+    assert mixed.qweight_0.shape == (64, 272)
+    assert mixed.qweight_1.shape == (32, 1024)
+
+
+def test_real_qwen_q4_and_q3_rows_match_pinned_reference_outputs():
+    from freetoken.models.gguf.dequant import dequantize_reference
+
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/gguf/qwen38-reference-rows.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert fixture["source_revision"] == "c8b5954a88c2775c546b92593eda40ea041d3176"
+    assert {row["variant"] for row in fixture["rows"]} == {
+        "UD-Q3_K_XL",
+        "UD-Q4_K_XL",
+    }
+    for row in fixture["rows"]:
+        packed = torch.frombuffer(
+            bytearray(base64.b64decode(row["packed_base64"])),
+            dtype=torch.uint8,
+        ).reshape(1, row["row_bytes"])
+        output = dequantize_reference(packed, row["quant_type"], torch.float32)
+        digest = hashlib.sha256(output.numpy().astype("<f4").tobytes()).hexdigest()
+        assert output.numel() == row["elements"]
+        assert digest == row["reference_f32_sha256"]
+
+
+def test_metadata_export_accepts_a_zero_tensor_first_shard(tmp_path: Path):
+    from freetoken.models.gguf.reader import OUTPUT_WEIGHT_PRESENT_KV, write_metadata_gguf
+
+    writer = gguf.GGUFWriter(
+        tmp_path / "tiny.gguf",
+        "qwen4exp",
+        split_max_tensors=1,
+        small_first_shard=True,
+    )
+    writer.add_tensor("output.weight", np.zeros((32, 32), dtype=np.float32))
+    writer.add_tensor("token_embd.weight", np.zeros((32, 32), dtype=np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    shards = sorted(tmp_path.glob("tiny-*-of-*.gguf"))
+    assert not gguf.GGUFReader(shards[0]).tensors
+
+    destination = tmp_path / "source_metadata.gguf"
+    write_metadata_gguf(str(shards[1]), str(destination))
+    metadata = gguf.GGUFReader(destination)
+
+    assert not metadata.tensors
+    assert metadata.fields[OUTPUT_WEIGHT_PRESENT_KV].contents() is True
 
 
 def test_qwen4_weight_names():
