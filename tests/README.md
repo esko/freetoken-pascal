@@ -34,7 +34,8 @@ PYTHONPATH=python pytest -q tests/project tests/daemon
 ```
 
 It intentionally excludes GPU-, model-, and optional-runtime-dependent imported tests. The
-source-wide Ruff debt inherited from upstream is frozen in `manifests/ruff-baseline.json`; run
+source-wide Ruff debt inherited from upstream is frozen by count and exact diagnostic fingerprint
+in `manifests/ruff-baseline.json`; run
 `python scripts/check_lint_baseline.py` to prevent new violations. Updating that baseline requires
 an explicit review of both additions and removals.
 

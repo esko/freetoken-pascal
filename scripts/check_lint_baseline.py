@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -53,11 +54,16 @@ def collect_violations() -> list[dict[str, Any]]:
 
 
 def build_baseline() -> dict[str, Any]:
+    violations = collect_violations()
+    fingerprint = hashlib.sha256(
+        json.dumps(violations, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     return {
         "schema_version": 1,
         "ruff_version": _ruff_version(),
         "source_roots": list(SOURCE_ROOTS),
-        "violations": collect_violations(),
+        "violation_count": len(violations),
+        "violations_sha256": fingerprint,
     }
 
 
@@ -70,22 +76,15 @@ def validate_baseline(baseline: Any) -> list[str]:
         ]
     if baseline.get("source_roots") != list(SOURCE_ROOTS):
         return [f"lint baseline source_roots must be {list(SOURCE_ROOTS)!r}"]
-    expected = baseline.get("violations")
-    if not isinstance(expected, list):
-        return ["lint baseline violations must be an array"]
-    actual = collect_violations()
-    if expected == actual:
+    actual = build_baseline()
+    if baseline == actual:
         return []
-    expected_rows = {json.dumps(item, sort_keys=True) for item in expected}
-    actual_rows = {json.dumps(item, sort_keys=True) for item in actual}
-    added = sorted(actual_rows - expected_rows)
-    removed = sorted(expected_rows - actual_rows)
-    errors = []
-    if added:
-        errors.append(f"{len(added)} new or moved lint violation(s); first: {added[0]}")
-    if removed:
-        errors.append(f"{len(removed)} resolved or moved lint violation(s); regenerate baseline")
-    return errors
+    return [
+        "source-wide lint findings changed: "
+        f"expected {baseline.get('violation_count')} findings with fingerprint "
+        f"{baseline.get('violations_sha256')!r}, found {actual['violation_count']} with "
+        f"fingerprint {actual['violations_sha256']!r}; review Ruff output and regenerate baseline"
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     if errors:
         print("\n".join(f"ERROR: {error}" for error in errors), file=sys.stderr)
         return 1
-    print(f"validated source-wide lint baseline ({len(baseline['violations'])} violations)")
+    print(f"validated source-wide lint baseline ({baseline['violation_count']} violations)")
     return 0
 
 
