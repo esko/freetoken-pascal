@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -57,7 +57,7 @@ def _validate_cpu_bridge_config(
             # EngineConfig deliberately has no device field because the CUDA engine binds
             # one after distributed setup.  Treat that absence as unknown rather than
             # silently declaring a production config CPU-safe.
-            if not hasattr(config, "device"):
+            if not hasattr(config, "device") or config.device is None:
                 raise UnsupportedGGUFCpuConfiguration(
                     "Qwen GGUF CPU bridge registration requires config.device='cpu'"
                 )
@@ -103,7 +103,8 @@ def _validate_cpu_bridge_config(
         )
     if grouped:
         raise UnsupportedGGUFCpuConfiguration(
-            "Qwen GGUF CPU bridge currently supports one decode request; grouped execution is unsupported"
+            "Qwen GGUF CPU bridge currently supports one decode request; "
+            "grouped execution is unsupported"
         )
 
 
@@ -184,10 +185,9 @@ class QwenGGUFCpuExpertBundle:
             }
         )
         if unsupported:
-            raise UnsupportedGGUFCpuConfiguration(
-                "Qwen GGUF CPU bridge does not support expert quant types "
-                + ", ".join(unsupported)
-            )
+            message = "Qwen GGUF CPU bridge does not support expert quant types "
+            message += ", ".join(unsupported)
+            raise UnsupportedGGUFCpuConfiguration(message)
         try:
             executor = Q4KExecutor(
                 layout,
@@ -235,15 +235,25 @@ class QwenGGUFCpuExpertBundle:
         self._require_open()
         return self.executor.prepare(max_tokens=max_tokens, max_routes=max_routes)
 
+    @property
+    def workspace_plan(self) -> Any:
+        """The executor's prepared bounded-workspace plan."""
+        self._require_open()
+        runner = getattr(self.executor, "_threaded_runner", None)
+        plan = runner._plan if runner is not None else self.executor._reference._plan
+        if plan is None:
+            raise RuntimeError("Qwen GGUF CPU bridge workspace is not prepared")
+        return plan
+
     def decode(
         self,
         layer_id: int,
-        hidden_states: "torch.Tensor",
-        topk_weights: "torch.Tensor",
-        topk_ids: "torch.Tensor",
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         *,
         num_token_non_padded: int | None = None,
-    ) -> "torch.Tensor":
+    ) -> torch.Tensor:
         """Run one CPU decode request through an explicit Torch/NumPy conversion.
 
         The adapter copies all inputs into contiguous float32/int32 NumPy arrays and copies
@@ -306,7 +316,8 @@ class QwenGGUFCpuExpertBundle:
     def execute_group(self, *_args: Any, **_kwargs: Any) -> None:
         self._require_open()
         raise UnsupportedGGUFCpuConfiguration(
-            "Qwen GGUF CPU bridge currently supports one decode request; grouped execution is unsupported"
+            "Qwen GGUF CPU bridge currently supports one decode request; "
+            "grouped execution is unsupported"
         )
 
     def memory_report(self) -> dict[str, int]:
@@ -426,16 +437,22 @@ def _torch():
 
 # Descriptive aliases for callers that prefer CPU before GGUF in the type name.
 GGUFCpuExpertBundle = QwenGGUFCpuExpertBundle
+QwenGGUFCPUExpertBundle = QwenGGUFCpuExpertBundle
 build_qwen_gguf_cpu_expert_bundle = open_qwen_gguf_cpu_expert_bundle
+open_qwen_gguf_cpu_bundle = open_qwen_gguf_cpu_expert_bundle
+register_qwen_gguf_cpu_bundle = register_qwen_gguf_cpu_expert_bundle
 
 
 __all__ = [
     "GGUFCpuBridgeError",
     "GGUFCpuExpertBundle",
+    "QwenGGUFCPUExpertBundle",
     "QwenGGUFCpuExpertBundle",
     "UnsupportedGGUFCpuConfiguration",
     "build_qwen_gguf_cpu_expert_bundle",
+    "open_qwen_gguf_cpu_bundle",
     "open_qwen_gguf_cpu_expert_bundle",
     "qwen_gguf_cpu_bridge_supported",
+    "register_qwen_gguf_cpu_bundle",
     "register_qwen_gguf_cpu_expert_bundle",
 ]

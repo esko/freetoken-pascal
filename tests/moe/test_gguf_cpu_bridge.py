@@ -6,14 +6,12 @@ from dataclasses import dataclass
 
 import numpy as np
 import pytest
-
 from freetoken.gguf_host import (
     ExpertBankDescriptor,
     GGUFExpertLayout,
     QwenGGUFHostWeights,
     QwenHostLayout,
 )
-
 
 Q4_K = 12
 Q5_K = 13
@@ -176,6 +174,14 @@ def test_bundle_rejects_closed_host_before_building_executor() -> None:
         QwenGGUFCpuExpertBundle.from_host(host, top_k=1, mode="scalar")
 
 
+def test_bundle_does_not_replace_explicit_zero_route_workspace() -> None:
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    bundle = QwenGGUFCpuExpertBundle.from_host(_host(), top_k=1, mode="scalar", max_routes=0)
+    assert bundle.workspace_plan.max_routes == 0
+    bundle.close()
+
+
 def test_config_registration_guard_is_fail_closed() -> None:
     from freetoken.moe.gguf_cpu import qwen_gguf_cpu_bridge_supported
 
@@ -193,6 +199,9 @@ def test_config_registration_guard_is_fail_closed() -> None:
 
     del Config.device
     Config.moe_cache_size = 0
+    assert not qwen_gguf_cpu_bridge_supported(Config())
+
+    Config.device = None
     assert not qwen_gguf_cpu_bridge_supported(Config())
 
 
@@ -225,3 +234,20 @@ def test_tensor_decode_rejects_non_cpu_inputs() -> None:
     with pytest.raises(ValueError, match="CPU"):
         bundle.decode(0, hidden, weights, ids)
     bundle.close()
+
+
+def test_engine_guard_rejects_gguf_before_homogeneous_cache_setup() -> None:
+    pytest.importorskip("torch")
+    from freetoken.engine.engine import _guard_qwen_gguf_engine_setup
+
+    class ModelConfig:
+        model_type = "qwen4_exp"
+        expert_quant = "gguf"
+        moe_weight_format = "gguf"
+
+    class Config:
+        model_config = ModelConfig()
+        moe_backend = "offload"
+
+    with pytest.raises(NotImplementedError, match="homogeneous OffloadMoeCache"):
+        _guard_qwen_gguf_engine_setup(Config())

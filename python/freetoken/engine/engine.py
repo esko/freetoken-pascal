@@ -524,6 +524,7 @@ class Engine:
         # A model may fully own cache construction via make_offload_moe_cache.
         # Otherwise load_expert_banks gives the model module a setup hook first, then
         # falls back to per-quant providers, and the engine wires the banks into cache.
+        _guard_qwen_gguf_engine_setup(config)
         cache_factory = getattr(self.model, "make_offload_moe_cache", None)
         if cache_factory is not None and config.moe_cache_auto:
             raise ValueError(
@@ -1181,6 +1182,43 @@ def _cpu_moe_executor_viable(model_config) -> bool:
     expert_quant = getattr(model_config, "expert_quant", "none")
     fmt = expert_quant if expert_quant != "none" else (moe_wfmt or "bf16")
     return fmt == "mxfp4" or fmt in _WFMT_IDS
+
+
+def _is_qwen_gguf_expert_config(model_config) -> bool:
+    """Identify Qwen GGUF routed experts before generic cache construction."""
+    return (
+        getattr(model_config, "model_type", None) == "qwen4_exp"
+        and (
+            getattr(model_config, "expert_quant", None) == "gguf"
+            or getattr(model_config, "moe_weight_format", None) == "gguf"
+        )
+    )
+
+
+def _guard_qwen_gguf_engine_setup(config: EngineConfig) -> None:
+    """Reject the homogeneous engine cache until its layer ABI can consume GGUF banks.
+
+    The standalone bridge is intentionally CPU-only and decode-only.  The current Engine
+    always creates a CUDA-backed ``OffloadMoeCache`` for offload-family backends, whose
+    ``ExpertBanks`` contract cannot represent Qwen's per-projection quant census.  Failing
+    here keeps a GGUF request from falling into a misleading provider/shape error or
+    allocating GPU slots before the ownership contract is expanded.
+    """
+    if not _is_qwen_gguf_expert_config(config.model_config):
+        return
+    from freetoken.moe.gguf_cpu import qwen_gguf_cpu_bridge_supported
+
+    if config.moe_backend == "cpu" and qwen_gguf_cpu_bridge_supported(config):
+        raise NotImplementedError(
+            "Qwen GGUF CPU bridge is available as a standalone decode adapter, but the "
+            "CUDA Engine/OffloadMoELayer registration seam is not wired yet; use "
+            "register_qwen_gguf_cpu_expert_bundle until the layer ABI is expanded"
+        )
+    raise NotImplementedError(
+        "Qwen GGUF routed experts cannot use the homogeneous OffloadMoeCache; GPU, "
+        "hybrid, and offload registration are unsupported. Use the standalone CPU-only "
+        "GGUF bridge or an FTW checkpoint with a supported homogeneous bank format"
+    )
 
 
 def _pin_budget_bytes() -> int | None:
