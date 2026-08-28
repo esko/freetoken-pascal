@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -43,7 +44,7 @@ class _Registry:
     def supported_names(self) -> list[str]:
         return list(self._registry)
 
-    def assert_supported(self, names: str | list[str]) -> None:
+    def assert_supported(self, names: str | Iterable[str]) -> None:
         if isinstance(names, str):
             names = [names]
         for name in names:
@@ -116,7 +117,19 @@ def __getattr__(name: str):
     if name == "BaseMoeBackend":
         from .base import BaseMoeBackend
 
+        globals()[name] = BaseMoeBackend
         return BaseMoeBackend
+    if name == "Registry":
+        from freetoken.utils import Registry
+
+        globals()[name] = Registry
+        return Registry
+    if name == "logger":
+        from freetoken.utils import init_logger
+
+        value = init_logger(__name__)
+        globals()[name] = value
+        return value
     raise AttributeError(name)
 
 

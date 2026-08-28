@@ -80,6 +80,13 @@ class ExpertSource(Protocol):
 QuantDecoder = Callable[[np.ndarray, "CpuExpertDescriptor"], np.ndarray]
 
 
+def _checked_int(value: Any, name: str) -> int:
+    """Accept Python/NumPy integers, but never silently truncate another scalar."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise InvalidRequest(f"{name} must be an integer, got {value!r}")
+    return int(value)
+
+
 class ThreadPoolHook(Protocol):
     """Optional worker-pool seam for optimized executors."""
 
@@ -113,12 +120,39 @@ class CpuExpertDescriptor:
     source: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        for name in (
+            "layer_id",
+            "num_experts",
+            "output_dim",
+            "input_dim",
+            "rows_per_expert",
+            "row_stride_bytes",
+            "expert_stride_bytes",
+            "tensor_bytes",
+            "source_offset",
+            "pool_id",
+        ):
+            object.__setattr__(self, name, _checked_int(getattr(self, name), name))
+        if isinstance(self.quant_type, bool) or not isinstance(
+            self.quant_type, (int, str, np.integer)
+        ):
+            raise InvalidRequest(
+                f"quant_type must be an integer or string, got {self.quant_type!r}"
+            )
+        if isinstance(self.quant_type, np.integer):
+            object.__setattr__(self, "quant_type", int(self.quant_type))
+        if self.source_address is not None:
+            object.__setattr__(
+                self,
+                "source_address",
+                _checked_int(self.source_address, "source_address"),
+            )
         if self.layer_id < 0:
             raise InvalidRequest(f"layer_id must be non-negative, got {self.layer_id}")
-        if not self.projection:
-            raise InvalidRequest("projection must not be empty")
-        if not self.quant_name:
-            raise InvalidRequest("quant_name must not be empty")
+        if not isinstance(self.projection, str) or not self.projection:
+            raise InvalidRequest("projection must be a non-empty string")
+        if not isinstance(self.quant_name, str) or not self.quant_name:
+            raise InvalidRequest("quant_name must be a non-empty string")
         for name in (
             "num_experts",
             "output_dim",
@@ -149,26 +183,124 @@ class CpuExpertDescriptor:
             raise InvalidRequest("source_offset must be non-negative")
         if self.source_address is not None and self.source_address < 0:
             raise InvalidRequest("source_address must be non-negative")
+        _validate_source_range(self)
 
     @classmethod
     def from_source_descriptor(cls, descriptor: Any, source: Any) -> CpuExpertDescriptor:
         """Adapt an Issue #13-style descriptor without importing its module."""
         return cls(
-            layer_id=int(descriptor.layer),
-            projection=str(descriptor.projection),
-            quant_type=int(descriptor.quant_type),
-            quant_name=str(descriptor.quant_name),
-            num_experts=int(descriptor.experts),
-            output_dim=int(descriptor.output_dim),
-            input_dim=int(descriptor.input_dim),
-            rows_per_expert=int(descriptor.output_dim),
-            row_stride_bytes=int(descriptor.row_bytes),
-            expert_stride_bytes=int(descriptor.bytes_per_expert),
-            tensor_bytes=int(descriptor.tensor_bytes),
-            source_offset=int(descriptor.data_offset),
-            pool_id=int(getattr(descriptor, "pool_id", -1)),
+            layer_id=_checked_int(descriptor.layer, "source descriptor layer"),
+            projection=descriptor.projection,
+            quant_type=_checked_int(descriptor.quant_type, "source descriptor quant_type"),
+            quant_name=descriptor.quant_name,
+            num_experts=_checked_int(descriptor.experts, "source descriptor experts"),
+            output_dim=_checked_int(descriptor.output_dim, "source descriptor output_dim"),
+            input_dim=_checked_int(descriptor.input_dim, "source descriptor input_dim"),
+            rows_per_expert=_checked_int(
+                descriptor.output_dim, "source descriptor rows_per_expert"
+            ),
+            row_stride_bytes=_checked_int(descriptor.row_bytes, "source descriptor row_bytes"),
+            expert_stride_bytes=_checked_int(
+                descriptor.bytes_per_expert, "source descriptor bytes_per_expert"
+            ),
+            tensor_bytes=_checked_int(descriptor.tensor_bytes, "source descriptor tensor_bytes"),
+            source_offset=_checked_int(descriptor.data_offset, "source descriptor data_offset"),
+            pool_id=_checked_int(getattr(descriptor, "pool_id", -1), "source descriptor pool_id"),
             source=source,
         )
+
+
+def _source_ranges(descriptor: CpuExpertDescriptor) -> tuple[tuple[int, int], ...]:
+    """Return every bounded range a source exposes.
+
+    Keeping all independent bounds matters for mapped sources: a descriptor may
+    claim a valid tensor span while its actual mapping is shorter.  Validation
+    below checks the requested span against every range rather than trusting the
+    first piece of metadata encountered.
+    """
+    source = descriptor.source
+    if source is None:
+        return ()
+    ranges: list[tuple[int, int]] = []
+    if isinstance(source, np.ndarray):
+        if source.ndim == 3 and source.shape[0] == descriptor.num_experts:
+            ranges.append((0, int(source.nbytes)))
+        return tuple(ranges)
+
+    for offset_name, size_name in (
+        ("range_offset", "range_size"),
+        ("mapped_offset", "mapped_size"),
+    ):
+        offset = getattr(source, offset_name, None)
+        size = getattr(source, size_name, None)
+        if (offset is None) != (size is None):
+            raise InvalidRequest(
+                f"source exposes incomplete {offset_name}/{size_name} range metadata"
+            )
+        if offset is not None and size is not None:
+            ranges.append((_checked_int(offset, offset_name), _checked_int(size, size_name)))
+
+    mapping = getattr(source, "mapping", None)
+    source_descriptor = getattr(source, "descriptor", None)
+    descriptor_offset = getattr(source_descriptor, "data_offset", None)
+    if descriptor_offset is None:
+        descriptor_offset = getattr(source_descriptor, "source_offset", None)
+    descriptor_size = getattr(source_descriptor, "tensor_bytes", None)
+    if descriptor_size is None:
+        descriptor_size = getattr(source_descriptor, "nbytes", None)
+    if (descriptor_offset is None) != (descriptor_size is None):
+        raise InvalidRequest("source descriptor exposes incomplete offset/size range metadata")
+    if descriptor_offset is not None and descriptor_size is not None:
+        ranges.append((
+            _checked_int(descriptor_offset, "source descriptor offset"),
+            _checked_int(descriptor_size, "source descriptor size"),
+        ))
+    if mapping is not None:
+        size = getattr(mapping, "length", None)
+        if size is None:
+            size = getattr(mapping, "nbytes", None)
+        offset = descriptor_offset
+        if size is not None and offset is None:
+            raise InvalidRequest("source mapping exposes size without a descriptor offset")
+        if size is not None and offset is not None:
+            ranges.append((
+                _checked_int(offset, "source descriptor data_offset"),
+                _checked_int(size, "source mapping length"),
+            ))
+
+    size = getattr(source, "size", None)
+    if size is not None and not callable(size):
+        ranges.append((0, _checked_int(size, "source size")))
+    size = getattr(source, "nbytes", None)
+    if size is not None:
+        size = _checked_int(size, "source nbytes")
+        if descriptor.source_offset == 0:
+            ranges.append((0, size))
+    return tuple(ranges)
+
+
+def _validate_source_range(descriptor: CpuExpertDescriptor) -> None:
+    source = descriptor.source
+    if source is None:
+        return
+    packed = callable(getattr(source, "expert_packed", None))
+    ranges = _source_ranges(descriptor)
+    if packed and not ranges:
+        raise InvalidRequest(
+            f"packed source for {descriptor.projection} does not expose a bounded "
+            "mapped/range size"
+        )
+    if not ranges:
+        return
+    end = descriptor.source_offset + descriptor.tensor_bytes
+    for start, size in ranges:
+        if start < 0 or size < 0:
+            raise InvalidRequest("source range must have non-negative start and size")
+        if descriptor.source_offset < start or end > start + size:
+            raise InvalidRequest(
+                f"{descriptor.projection} source range [{descriptor.source_offset}, {end}) "
+                f"falls outside [{start}, {start + size})"
+            )
 
 
 @dataclass(frozen=True)
@@ -179,6 +311,7 @@ class CpuExpertLayout:
     top_k: int
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "top_k", _checked_int(self.top_k, "top_k"))
         if self.top_k <= 0:
             raise InvalidRequest(f"top_k must be positive, got {self.top_k}")
         seen: set[tuple[int, str]] = set()
@@ -294,6 +427,17 @@ class CpuExecutionRequest:
     accumulate: bool = False
     cancellation: Any = None
 
+    def __post_init__(self) -> None:
+        # Keep the grouped API subject to the same fail-closed scalar contract as
+        # direct ``execute`` calls.  In particular, bool is an ``int`` subclass
+        # and accepting it here would silently turn malformed request metadata
+        # into a different layer or token count.
+        _checked_int(self.layer_id, "request layer_id")
+        if self.num_token_non_padded is not None:
+            _checked_int(self.num_token_non_padded, "request num_token_non_padded")
+        if not isinstance(self.accumulate, bool):
+            raise InvalidRequest("request accumulate must be a bool")
+
 
 class CancellationToken(Protocol):
     def cancelled(self) -> bool: ...
@@ -332,14 +476,17 @@ class ReferenceCpuExpertExecutor:
             raise InvalidRequest(f"unsupported activation {activation!r}")
         self.layout = layout
         self.activation = activation
-        self.apply_router_weight_on_input = bool(apply_router_weight_on_input)
+        if not isinstance(apply_router_weight_on_input, bool):
+            raise InvalidRequest("apply_router_weight_on_input must be a bool")
+        self.apply_router_weight_on_input = apply_router_weight_on_input
         self.output_dtype = np.dtype(output_dtype)
         if self.output_dtype not in {np.dtype(np.float16), np.dtype(np.float32)}:
             raise InvalidRequest(f"unsupported output dtype {self.output_dtype}")
         self.decoders = dict(decoders or {})
+        required_alignment = _checked_int(required_alignment, "required_alignment")
         if required_alignment <= 0:
             raise InvalidRequest("required_alignment must be positive")
-        self.required_alignment = int(required_alignment)
+        self.required_alignment = required_alignment
         self.thread_pool = thread_pool
         self.numa_policy = numa_policy
         self._lock = threading.Lock()
@@ -362,6 +509,7 @@ class ReferenceCpuExpertExecutor:
                     f"aligned to {self.required_alignment} bytes"
                 )
 
+        first_geometry: tuple[int, int] | None = None
         for layer_id in layout.layers:
             try:
                 gate = layout.descriptor(layer_id, "gate")
@@ -377,6 +525,14 @@ class ReferenceCpuExpertExecutor:
                 raise UnsupportedShape(f"layer {layer_id} gate/up geometry disagrees")
             if (down.output_dim, down.input_dim) != (gate.input_dim, gate.output_dim):
                 raise UnsupportedShape(f"layer {layer_id} down geometry is not transposed")
+            geometry = (gate.input_dim, gate.output_dim)
+            if first_geometry is None:
+                first_geometry = geometry
+            elif geometry != first_geometry:
+                raise UnsupportedShape(
+                    f"layer {layer_id} geometry {geometry} disagrees with the executor "
+                    f"workspace geometry {first_geometry}"
+                )
 
         self.hidden_size = self.layout.descriptor(self.layout.layers[0], "gate").input_dim
         self.intermediate_size = self.layout.descriptor(
@@ -384,6 +540,8 @@ class ReferenceCpuExpertExecutor:
         ).output_dim
 
     def prepare(self, max_tokens: int, max_routes: int) -> WorkspacePlan:
+        max_tokens = _checked_int(max_tokens, "max_tokens")
+        max_routes = _checked_int(max_routes, "max_routes")
         if max_tokens <= 0 or max_routes < 0:
             raise InvalidRequest("max_tokens must be positive and max_routes non-negative")
         if max_routes > self.layout.top_k:
@@ -569,6 +727,9 @@ class ReferenceCpuExpertExecutor:
         cancellation: Any = None,
     ) -> CpuExecutionResult:
         started = time.perf_counter_ns()
+        layer_id = _checked_int(layer_id, "layer_id")
+        if not isinstance(accumulate, bool):
+            raise InvalidRequest("accumulate must be a bool")
         if not self._lock.acquire(blocking=False):
             raise Busy("executor already has an active request")
         result_output = output
@@ -584,10 +745,8 @@ class ReferenceCpuExpertExecutor:
             )
             if num_token_non_padded is None:
                 active_tokens = tokens
-            elif not isinstance(num_token_non_padded, (int, np.integer)):
-                raise InvalidRequest("num_token_non_padded must be an integer")
             else:
-                active_tokens = int(num_token_non_padded)
+                active_tokens = _checked_int(num_token_non_padded, "num_token_non_padded")
                 if not 0 <= active_tokens <= tokens:
                     raise InvalidRequest(
                         f"num_token_non_padded={active_tokens} outside [0, {tokens}]"
@@ -626,17 +785,23 @@ class ReferenceCpuExpertExecutor:
                         + up_descriptor.expert_stride_bytes
                         + down_descriptor.expert_stride_bytes
                     )
+                    # The first projection sees the unscaled hidden state in both
+                    # modes.  Applying the route scale to both gate and up outputs
+                    # would scale both operands of SwiGLU and accidentally square
+                    # the route scale.  ``apply_router_weight_on_input`` instead
+                    # places the one route scale on the input of the down projection;
+                    # the other mode applies it to the down output.  The two forms
+                    # are equivalent in the FP32 reference but preserve one scale.
                     np.matmul(gate, hidden[token], out=workspace["gate"])
                     np.matmul(up, hidden[token], out=workspace["up"])
-                    if self.apply_router_weight_on_input:
-                        np.multiply(workspace["gate"], weight, out=workspace["gate"])
-                        np.multiply(workspace["up"], weight, out=workspace["up"])
                     self._activation_inplace(
                         workspace["gate"],
                         workspace["up"],
                         workspace["activated"],
                         workspace["exp"],
                     )
+                    if self.apply_router_weight_on_input:
+                        np.multiply(workspace["activated"], weight, out=workspace["activated"])
                     np.matmul(down, workspace["activated"], out=workspace["contribution"])
                     if not self.apply_router_weight_on_input:
                         np.multiply(
