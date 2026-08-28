@@ -7,6 +7,8 @@ docs-check:
 	python scripts/validate_docs.py
 	python scripts/check_upstream_manifest.py
 	python scripts/check_toolchain.py
+	python scripts/check_lint_baseline.py
+	python scripts/validate_evidence.py
 
 toolchain-check:
 	python scripts/check_toolchain.py

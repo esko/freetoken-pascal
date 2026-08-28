@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "target": "sm_61",
+  "translation_units": [
+    {
+      "path": "python/freetoken/kernel/csrc/gguf/gguf_kernel.cu",
+      "include_profile": "torch",
+      "expects_device_code": true
+    },
+    {
+      "path": "python/freetoken/kernel/csrc/jit/index.cu",
+      "include_profile": "tvm-ffi",
+      "expects_device_code": false,
+      "note": "Template definitions are instantiated by runtime-generated wrappers."
+    },
+    {
+      "path": "python/freetoken/kernel/csrc/jit/store.cu",
+      "include_profile": "tvm-ffi",
+      "expects_device_code": false,
+      "note": "Template definitions are instantiated by runtime-generated wrappers."
+    },
+    {
+      "path": "python/freetoken/kernel/csrc/src/pynccl.cu",
+      "include_profile": "tvm-ffi",
+      "expects_device_code": false,
+      "note": "This CUDA-compiled translation unit currently contains host NCCL bindings only."
+    }
+  ]
+}

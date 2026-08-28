@@ -29,6 +29,10 @@ jobs:
         run: |
           scripts/lock_dependencies.sh
           git diff --exit-code -- requirements/cpu.lock requirements/cuda126.lock
+      - name: Verify generated fixtures are reproducible
+        run: |
+          python scripts/generate_test_fixtures.py
+          git diff --exit-code -- tests/fixtures/gguf
       - name: Pre-commit
         run: pre-commit run --all-files --show-diff-on-failure
       - name: Validate documentation and manifests
@@ -36,12 +40,16 @@ jobs:
           python scripts/validate_docs.py
           python scripts/check_upstream_manifest.py
           python scripts/check_toolchain.py
+          python scripts/check_lint_baseline.py
+          python scripts/validate_evidence.py
+      - name: Report deferred hardware gates
+        run: echo "::notice title=H2/H3 deferred::Tesla P4 hardware is not installed; only the manual inventory-verified self-hosted workflow may satisfy hardware gates."
       - name: Compile imported source and tests
         run: python -m compileall -q python tests scripts
       - name: Lint downstream repository tooling
         run: |
-          ruff check scripts
-          ruff format --check scripts
+          ruff check scripts python/freetoken/cache_simulator.py python/freetoken/gguf_validation.py tests/project
+          ruff format --check scripts python/freetoken/cache_simulator.py python/freetoken/gguf_validation.py tests/project
       - name: Run viable CPU-safe upstream tests
         env:
           PYTHONPATH: python

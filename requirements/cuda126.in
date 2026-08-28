@@ -1,5 +1,6 @@
 --extra-index-url https://download.pytorch.org/whl/cu126
 
+apache-tvm-ffi==0.1.13.post3
 cmake==4.1.0
 ninja==1.13.0
 torch==2.11.0+cu126

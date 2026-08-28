@@ -8,7 +8,16 @@ ROOT = Path(__file__).resolve().parents[1]
 MARKDOWN = [
     path
     for path in ROOT.rglob("*.md")
-    if not {"vendor", "third_party", "upstream", ".git"}.intersection(path.parts)
+    if not {
+        "vendor",
+        "third_party",
+        "upstream",
+        ".git",
+        ".venv",
+        ".pytest_cache",
+        ".ruff_cache",
+        "build",
+    }.intersection(path.parts)
 ]
 LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 ADR_RE = re.compile(r"^(\d{4})-[a-z0-9-]+\.md$")

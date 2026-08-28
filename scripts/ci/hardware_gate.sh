@@ -28,12 +28,22 @@ for row in rows:
             "driver": driver,
         }
     )
-Path("results/hardware/inventory.json").write_text(json.dumps({"gpus": gpus}, indent=2) + "\n")
-if not gpus:
-    raise SystemExit("No NVIDIA GPU found")
-if any(gpu["compute_capability"] != "6.1" for gpu in gpus):
-    raise SystemExit(f"Expected only sm_61 GPUs, got {gpus}")
+Path("results/hardware/inventory.json").write_text(
+    json.dumps({"evidence_status": "measured", "gpus": gpus}, indent=2) + "\n"
+)
 PY
+
+minimum_gpus=1
+case "$level" in
+  dual-p4|release) minimum_gpus=2 ;;
+esac
+python scripts/check_hardware_inventory.py \
+  results/hardware/inventory.json \
+  --minimum-gpus "$minimum_gpus"
+export FREETOKEN_SM61_RUNNER_VERIFIED=1
+if [[ "$minimum_gpus" == 2 ]]; then
+  export FREETOKEN_DUAL_P4_RUNNER_VERIFIED=1
+fi
 
 case "$level" in
   smoke)
@@ -43,11 +53,13 @@ case "$level" in
     pytest -m "sm61 and not dual_p4 and not large_model and not benchmark" -q
     ;;
   dual-p4)
-    test "$(nvidia-smi -L | wc -l)" -ge 2
     pytest -m "sm61 or dual_p4" -q
     ;;
   release)
-    test "$(nvidia-smi -L | wc -l)" -ge 2
+    test -n "${FREETOKEN_PASCAL_MODEL_PATH:-}" || {
+      echo "release level requires FREETOKEN_PASCAL_MODEL_PATH" >&2
+      exit 1
+    }
     pytest -m "sm61 or dual_p4 or large_model" -q
     if [[ -x scripts/run_release_benchmarks.sh ]]; then
       scripts/run_release_benchmarks.sh

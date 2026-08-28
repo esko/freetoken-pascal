@@ -60,6 +60,9 @@ if ! grep -q 'sm_61' "${artifact_dir}/sm61_probe.elf.txt"; then
     exit 1
 fi
 
+python "${repo_root}/scripts/ci/compile_cuda_sources.py" \
+    --output-dir "${artifact_dir}/cuda-sources"
+
 python "${repo_root}/scripts/write_toolchain_inventory.py" \
     --output "${artifact_dir}/inventory.json"
 cp "${repo_root}/manifests/toolchain.json" "${artifact_dir}/toolchain.json"
