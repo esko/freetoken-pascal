@@ -31,8 +31,21 @@ The selected Q4 tensor counts are BF16 24, F32 557, IQ4_NL 1, Q4_K 94, Q5_1 43,
 Q5_K 2 and Q8_0 503. The selected Q3 counts are BF16 24, F32 557, IQ3_XXS 94,
 IQ4_NL 44, IQ4_XS 2, Q6_K 1 and Q8_0 502. The census records every tensor's name,
 torch-order shape, type, shard, absolute offset, bytes, rows and packed row stride. It
-also records every expert pool separately, because gate, up and down projections may use
-different formats and the down format varies by layer.
+also records every expert bank and compatible slot pool separately, because gate, up and
+down projections may use different formats and the down format varies by layer.
+
+The Q4 artifact resolves to six slot geometries. Gate/up use Q4_K except layer 2, which
+uses Q5_K. Down uses Q5_1 except layers 2, 4, 30, 46 and 47, which use Q8_0. The Q3
+artifact also resolves to six geometries: gate/up use IQ3_XXS except layer 2 IQ4_XS;
+down uses IQ4_NL with the same five Q8_0 promoted layers. Pool IDs, exact packed row
+bytes, bytes per slot and layer membership are recorded in `expert_slot_pools`.
+
+File-backed host accounting is also part of census schema version 3. Q4 contains
+77,017,907,200 expert bytes, 28,800,138,240 PLE bytes and 5,505,584,640 ordinary tensor
+bytes. Q3 contains 55,823,564,800 expert bytes, the same PLE size and 5,351,626,240
+ordinary tensor bytes. Both full mapped tensor sets remain below the 128 GiB operating
+envelope; mappings are reclaimable file-backed pages and report zero anonymous or pinned
+host-source bytes.
 
 ## Loader rules
 
@@ -50,14 +63,41 @@ different formats and the down format varies by layer.
   `A_log = log(-A)`.
 - Qwen centered RMSNorm tensors are converted back from llama.cpp's effective scale by
   subtracting one.
-- `per_layer_token_embd.weight` and routed expert tensors remain mmap-backed host sources;
-  Issue #13 owns those banks. Their types and layouts are still fully included in this
-  issue's census.
+- `per_layer_token_embd.weight` and routed expert tensors are read-only file-range mappings.
+  Each expert descriptor retains its shard, absolute offset, quant type, row stride and
+  bytes per expert. No complete expert or PLE copy is allocated or pinned.
+
+Inspect a complete local artifact without touching its tensor payload pages:
+
+```bash
+PYTHONPATH=python python scripts/inspect_gguf_host.py \
+  /models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
+```
+
+## PLE mmap controls
+
+The GGUF `per_layer_token_embd.weight` tensor has 320,001,536 IQ4_NL rows of 160
+elements. Each selected 90-byte packed row is copied and dequantized independently,
+then the 16 n-gram heads are assembled into the 2,560-element PLE input. Row bounds are
+checked before any lookup. The exact artifact multipliers, head offsets and prime vocab
+sizes come from GGUF metadata; they are not regenerated or guessed.
+
+`--ple-warm-mode` exposes four distinct modes:
+
+- `cold` is the default and issues `MADV_DONTNEED` for the PLE range;
+- `page-cache-warm` requests OS readahead for the complete PLE range;
+- `targeted` synchronously touches only rows selected by each lookup;
+- `full-model-warm` explicitly touches every page in every model shard.
+
+Telemetry reports the selected mode, mapped/resident bytes where `mincore` is available,
+lookup rows and packed bytes, output bytes, targeted rows, process minor/major page faults
+and `/proc/self/io` storage-read bytes. Full-model warm is never selected implicitly.
 
 ## Validation status
 
 Hosted tests cover the complete type tables, CUDA-switch agreement, sharded zero-tensor
 metadata layouts, failure paths, schema invariants, mixed buffers and real byte-range rows
-from both pinned Q4 and Q3 artifacts. H1 compiles the same GGUF CUDA translation unit for
-`sm_61`. CUDA dequant/MMVQ/MMQ parity and tiny/full generation remain H2 and require a real
-Tesla P4; they are not waived by the host references.
+from both pinned Q4 and Q3 artifacts. Hosted PLE tests compare IQ4_NL selected rows against
+gguf-py and exercise invalid IDs, short ranges, hash mismatches and every warm mode. H1
+compiles the same GGUF CUDA translation unit for `sm_61`. CUDA expert parity and short
+generation remain H2 and require a real Tesla P4; they are not waived by host references.

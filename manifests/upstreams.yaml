@@ -134,6 +134,7 @@ sources:
           - exclude the vision tower and multimodal RoPE implementation
           - skip vision and MTP weights and fail image execution with the v1 text-only scope message
           - add downstream-only device-neutral reference equations and an opt-in debug hook
+          - preserve exact GGUF PLE address metadata and serve selected IQ4_NL rows from a bounded file-backed mapping
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 11

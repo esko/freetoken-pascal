@@ -31,11 +31,11 @@ PLE and model shards stay on NVMe. Benchmark results and cache heat must not be 
 1. Validate driver, GPU count and compute capability.
 2. Validate model checksum and tensor census.
 3. Validate available RAM, VRAM, pinned-memory budget and no swap pressure.
-4. Read PLE/cache warm policy.
+4. Read `--ple-warm-mode` and confirm the logged PLE source, mapping and warm policy.
 5. Run startup microbench/autotune or load a hardware-profile cache tied to exact checksums.
 6. Log selected CPU/GPU kernels, layer ownership, cache slots and NUMA policy.
 7. Start the API health endpoint.
-8. Optionally warm PLE and expert cache before readiness.
+8. Optionally request targeted, PLE readahead or explicit full-model warming before readiness.
 9. Serve traffic only after a short deterministic self-test.
 
 ## Health
