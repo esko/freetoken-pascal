@@ -3,44 +3,44 @@
     {
       "expectation": "valid",
       "name": "valid-heterogeneous.gguf",
-      "sha256": "2a586e16f2dbabef1dfd37e87e96b79d53d2138f656f25d85835865c6f2c9cf3",
-      "size": 672
+      "sha256": "6758491ef14294390bc79952eab2a7989b5066ed33d018296e6aa750d8783874",
+      "size": 896
     },
     {
       "expectation": "unsupported quant type",
       "name": "unsupported-known-quant.gguf",
-      "sha256": "9633d8fbc59587b4838e147c8c658b39a0a17976a90c536bc3eb38f1171d3b19",
-      "size": 672
+      "sha256": "2e95a99adc5fb52a600188b98eb65980cef3c32c48520e75eb2ae3d7e8c58b1e",
+      "size": 896
     },
     {
       "expectation": "unknown quant type",
       "name": "unknown-quant.gguf",
-      "sha256": "771fed63d612b1e394cc4603ccca03a701a8a336ff0e48f8919131f1c7b13f6a",
-      "size": 672
+      "sha256": "68f43cef75ab289b8b991f9248419a8d6dbb4eaaf673a7fa0fe5e48636d43a4e",
+      "size": 896
     },
     {
       "expectation": "invalid quant block stride",
       "name": "malformed-fastest-dim.gguf",
-      "sha256": "fd314d84ee4d4ac055f5b1f86aadf14ae7ac9ba9c3e030322b39975c8113072a",
-      "size": 672
+      "sha256": "445d85b93051b75993ba51140517d63eace985ea852010ff532e023e807d1f3a",
+      "size": 896
     },
     {
       "expectation": "misaligned tensor offset",
       "name": "malformed-offset.gguf",
-      "sha256": "a2ff10cc303a8b93e7949c741057829ed9d246389b5196ceb9300158dac36b29",
-      "size": 672
+      "sha256": "ebb9e91aed520f775a507f99b8bcb4673e3e6d44324646a1b8d4d2210b5433b1",
+      "size": 896
     },
     {
       "expectation": "tensor offset beyond file",
       "name": "out-of-range-offset.gguf",
-      "sha256": "7e6a7bab8c2d58e52fc13462dd4bafee04a3bdb2ccefb17a8ff335ac6b81b145",
-      "size": 672
+      "sha256": "b900fcfa8d21dc35caf6d8c60fed698c6640218eac18fb4ac4b66520123267ee",
+      "size": 896
     },
     {
       "expectation": "invalid magic",
       "name": "bad-magic.gguf",
-      "sha256": "dfef1e00b853d7cd0511689baa46ab00d2b3e23e7c7176e17a3dc2e239e87ca4",
-      "size": 672
+      "sha256": "5232a7bf8b94564b7901755fe330023a54151a84742dca775898c9e835a023b3",
+      "size": 896
     },
     {
       "expectation": "truncated metadata",

@@ -49,13 +49,12 @@ def test_valid_gguf_fixture_has_heterogeneous_layout() -> None:
     assert census["version"] == 3
     assert census["alignment"] == 32
     assert [tensor["quant_type"] for tensor in census["tensors"]] == [2, 14, 0]
-    assert [tensor["nbytes"] for tensor in census["tensors"]] == [36, 210, 32]
+    assert [tensor["nbytes"] for tensor in census["tensors"]] == [36, 420, 32]
 
 
 @pytest.mark.parametrize(
     "name",
     [
-        "unsupported-known-quant.gguf",
         "unknown-quant.gguf",
         "malformed-fastest-dim.gguf",
         "malformed-offset.gguf",
@@ -67,6 +66,14 @@ def test_valid_gguf_fixture_has_heterogeneous_layout() -> None:
 def test_malformed_gguf_fixtures_fail_closed(name: str) -> None:
     with pytest.raises(ValueError):
         inspect_gguf(FIXTURES / "gguf" / name)
+
+
+def test_known_quant_outside_a_selected_capability_set_fails_closed() -> None:
+    with pytest.raises(ValueError, match="unsupported GGUF quant type"):
+        inspect_gguf(
+            FIXTURES / "gguf" / "unsupported-known-quant.gguf",
+            supported_quant_types={0, 2, 14},
+        )
 
 
 def test_routing_trace_simulator_distinguishes_locality() -> None:
