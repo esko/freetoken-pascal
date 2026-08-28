@@ -98,6 +98,10 @@ def test_range_fetcher_rejects_corrupt_cached_checksum(tmp_path: Path) -> None:
     with pytest.raises(ArtifactProbeError, match="checksum"):
         fetcher.fetch("https://example/model", 10, 4, expected_total=100, offline=True)
 
+    cache_file.write_bytes(b"oversized")
+    with pytest.raises(ArtifactProbeError, match="length"):
+        fetcher.fetch("https://example/model", 10, 4, expected_total=100, offline=True)
+
 
 def test_range_fetcher_serves_a_valid_range_from_offline_cache(tmp_path: Path) -> None:
     transport = _FakeTransport({(10, 13): b"abcd"}, total=100)
@@ -185,6 +189,26 @@ def test_build_probe_layout_rejects_unknown_type_and_bad_offsets() -> None:
     bad_offset_record["offset"] = bad_offset["shards"][1]["size"]
     with pytest.raises(ArtifactProbeError, match="bounds"):
         build_probe_layout(manifest, bad_offset, layer=0, expert=0, sources=sources)
+
+    duplicate = json.loads(json.dumps(census))
+    duplicate["tensors"].append(
+        next(
+            record
+            for record in duplicate["tensors"]
+            if record["name"] == "blk.0.ffn_gate_exps.weight"
+        )
+    )
+    with pytest.raises(ArtifactProbeError, match="duplicate tensor"):
+        build_probe_layout(manifest, duplicate, layer=0, expert=0, sources=sources)
+
+    negative_shard = json.loads(json.dumps(census))
+    next(
+        record
+        for record in negative_shard["tensors"]
+        if record["name"] == "blk.0.ffn_gate_exps.weight"
+    )["shard_index"] = -1
+    with pytest.raises(ArtifactProbeError, match="invalid shard index"):
+        build_probe_layout(manifest, negative_shard, layer=0, expert=0, sources=sources)
 
 
 def test_probe_fetches_normal_and_promoted_layers_and_reports_ab(

@@ -196,7 +196,14 @@ class RangeFetcher:
             raise ArtifactProbeError(f"range cache entry {stem} is incomplete")
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            body_size = body_path.stat().st_size
+            if body_size != size:
+                raise ArtifactProbeError(
+                    f"range cache entry {stem} length {body_size} does not equal requested {size}"
+                )
             body = body_path.read_bytes()
+        except ArtifactProbeError:
+            raise
         except (OSError, ValueError) as error:
             raise ArtifactProbeError(f"range cache entry {stem} cannot be read") from error
         expected_digest = hashlib.sha256(body).hexdigest()
@@ -389,11 +396,15 @@ def _tensor_records(census: Mapping[str, Any], layer: int) -> dict[str, dict[str
     wanted = {
         f"blk.{layer}.ffn_{projection}_exps.weight": projection for projection in _PROJECTIONS
     }
-    records = {
-        wanted[str(record.get("name"))]: record
-        for record in census.get("tensors", ())
-        if str(record.get("name")) in wanted
-    }
+    records: dict[str, dict[str, Any]] = {}
+    for record in census.get("tensors", ()):
+        name = str(record.get("name"))
+        if name not in wanted:
+            continue
+        projection = wanted[name]
+        if projection in records:
+            raise ArtifactProbeError(f"layer {layer}: duplicate tensor record {name}")
+        records[projection] = record
     if set(records) != set(_PROJECTIONS):
         missing = sorted(set(_PROJECTIONS) - set(records))
         raise ArtifactProbeError(f"layer {layer}: missing expert projections {missing}")
@@ -496,7 +507,10 @@ def build_probe_layout(
     for projection in _PROJECTIONS:
         record = records[projection]
         try:
-            shard = census["shards"][int(record["shard_index"])]
+            shard_index = int(record["shard_index"])
+            if shard_index < 0:
+                raise IndexError(shard_index)
+            shard = census["shards"][shard_index]
             shard_size = int(manifest_shards[str(shard["name"])]["size"])
         except (KeyError, IndexError, TypeError, ValueError) as error:
             raise ArtifactProbeError(f"layer {layer} {projection}: invalid shard index") from error
@@ -654,7 +668,10 @@ def probe_qwen38_expert(
     for projection in _PROJECTIONS:
         record = records[projection]
         try:
-            shard_name = str(census["shards"][int(record["shard_index"])]["name"])
+            shard_index = int(record["shard_index"])
+            if shard_index < 0:
+                raise IndexError(shard_index)
+            shard_name = str(census["shards"][shard_index]["name"])
             shard_size = int(manifest_shards[shard_name]["size"])
         except (KeyError, IndexError, TypeError, ValueError) as error:
             raise ArtifactProbeError(
