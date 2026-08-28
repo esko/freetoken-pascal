@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "q4_0": {
+    "scale_f16_le_hex": "003c",
+    "packed_nibbles_hex": "f0e1d2c3b4a5968778695a4b3c2d1e0f",
+    "expected": [-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 7, 6, 5, 4, 3, 2, 1, 0, -1, -2, -3, -4, -5, -6, -7, -8]
+  },
+  "weighted_merge": {
+    "expert_outputs": [[1.0, 2.0], [3.0, -1.0]],
+    "router_weights": [0.25, 0.75],
+    "expected": [2.5, -0.25]
+  }
+}

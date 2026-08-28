@@ -245,6 +245,7 @@ weights/
 artifacts/
 results/private/
 *.gguf
+!tests/fixtures/gguf/*.gguf
 *.safetensors
 *.ftw
 *.trace

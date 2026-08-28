@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "fixture": true,
+  "dtype": "float32-reference",
+  "seed": 8,
+  "tensor_name_patterns": [
+    "model.embed_tokens.weight",
+    "model.layers.*.self_attn.*",
+    "model.layers.*.linear_attn.*",
+    "model.layers.*.mlp.experts.*",
+    "model.layers.*.ple.*",
+    "model.norm.weight",
+    "lm_head.weight"
+  ],
+  "note": "Synthetic shape contract only; Issue #11 owns generation of executable tiny weights."
+}
