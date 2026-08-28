@@ -253,6 +253,40 @@ def test_output_without_caller_buffer_is_fresh_and_group_is_safe(
     assert grouped[0].output is not grouped[1].output
 
 
+def test_threaded_accumulate_zeros_padded_rows_like_serial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_native(monkeypatch)
+    layout = _layout()
+    serial = Q4KExecutor(layout, mode="avx2", num_threads=1, required_alignment=1)
+    threaded = Q4KExecutor(layout, mode="avx2", num_threads=2, required_alignment=1)
+    serial.prepare(2, 2)
+    threaded.prepare(2, 2)
+    hidden, ids, weights = _inputs(tokens=2, routes=2)
+    serial_output = np.full((2, 256), 3.0, dtype=np.float32)
+    threaded_output = serial_output.copy()
+    expected = serial.execute(
+        0,
+        hidden,
+        ids,
+        weights,
+        num_token_non_padded=1,
+        output=serial_output,
+        accumulate=True,
+    )
+    actual = threaded.execute(
+        0,
+        hidden,
+        ids,
+        weights,
+        num_token_non_padded=1,
+        output=threaded_output,
+        accumulate=True,
+    )
+    np.testing.assert_array_equal(actual.output, expected.output)
+    assert np.all(actual.output[1] == 0)
+
+
 class _SubmitFailurePool:
     def __init__(self) -> None:
         self.submitted: list[Future] = []
@@ -262,6 +296,17 @@ class _SubmitFailurePool:
             raise RuntimeError("submit failed")
         future = Future()
         self.submitted.append(future)
+        future.set_running_or_notify_cancel()
+        try:
+            future.set_result(function(*args, **kwargs))
+        except BaseException as error:
+            future.set_exception(error)
+        return future
+
+
+class _ImmediatePool:
+    def submit(self, function, *args, **kwargs):
+        future = Future()
         future.set_running_or_notify_cancel()
         try:
             future.set_result(function(*args, **kwargs))
@@ -350,6 +395,23 @@ def test_cancellation_callback_runs_only_on_owner_thread(monkeypatch: pytest.Mon
 
     executor.execute(0, hidden, ids, weights, cancellation=cancellation)
     assert callback_threads and set(callback_threads) == {owner}
+
+
+def test_transient_owner_cancellation_is_not_lost(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_native(monkeypatch)
+    executor = Q4KExecutor(
+        _layout(),
+        mode="avx2",
+        num_threads=2,
+        thread_pool=_ImmediatePool(),
+        required_alignment=1,
+    )
+    executor.prepare(1, 2)
+    hidden, ids, weights = _inputs(tokens=1, routes=2)
+    answers = iter((False, True, False, False))
+
+    with pytest.raises(Cancelled):
+        executor.execute(0, hidden, ids, weights, cancellation=lambda: next(answers, False))
 
 
 def test_scalar_or_unsupported_mixed_layout_stays_serial(monkeypatch: pytest.MonkeyPatch) -> None:

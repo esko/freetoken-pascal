@@ -1226,6 +1226,7 @@ class _ThreadedMixedRunner:
             results: list[CpuExecutionResult | None] = [None] * len(submitted)
             observations: list[CpuExecutionTelemetry] = []
             first_error: CpuAbiError | None = None
+            cancellation_seen = False
             while pending:
                 done, pending = wait(pending, timeout=0.01, return_when=FIRST_EXCEPTION)
                 for future in sorted(done, key=lambda item: indexed[item]):
@@ -1249,6 +1250,7 @@ class _ThreadedMixedRunner:
                     pending.clear()
                     break
                 if _cancelled(cancellation):
+                    cancellation_seen = True
                     worker_cancel.cancel()
             if first_error is not None:
                 telemetry = self._error_telemetry(
@@ -1266,7 +1268,7 @@ class _ThreadedMixedRunner:
                 self._last_telemetry = telemetry
                 _clear_output(result_output)
                 raise first_error
-            if _cancelled(cancellation):
+            if cancellation_seen or _cancelled(cancellation):
                 cancelled = Cancelled("CPU expert execution cancelled during compute")
                 worker_cancel.cancel()
                 self._cancel_and_drain(submitted)
@@ -1292,6 +1294,9 @@ class _ThreadedMixedRunner:
                 np.copyto(merged[:tokens], result_output, casting="unsafe")
             else:
                 merged[:tokens].fill(0.0)
+            # Match the serial ABI: padded token rows are always zero even
+            # when the caller requests accumulation into an existing output.
+            merged[active_tokens:tokens].fill(0.0)
             # The index order is part of the ABI: completion order is deliberately
             # ignored so floating-point reduction is reproducible.
             for result in results:
