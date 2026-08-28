@@ -71,7 +71,10 @@ def _to_dense(tensor, dtype: torch.dtype) -> torch.Tensor:
 
 def _centered_norm(tensor) -> torch.Tensor:
     # llama.cpp folds Qwen's effective (1 + w) norm scale into GGUF.
-    return _to_dense(tensor, torch.bfloat16) - 1.0
+    # Subtract in fp32 before narrowing.  Casting an effective scale near one to
+    # bf16 first can round it to exactly one and erase the learned centered
+    # offset that GemmaPlusOneRMSNorm expects.
+    return (_to_dense(tensor, torch.float32) - 1.0).to(torch.bfloat16)
 
 
 def _require_tp1(what: str) -> None:
@@ -112,11 +115,7 @@ def iter_gguf_weights(
     qk_rows = 2 * linear_group.num_key_heads * linear_group.key_head_dim
     value_rows = linear_group.num_value_heads * linear_group.value_head_dim
     conv_rows = qk_rows + value_rows
-    full_layers = {
-        layer
-        for layer in range(config.num_layers)
-        if not config.is_linear_layer(layer)
-    }
+    full_layers = {layer for layer in range(config.num_layers) if not config.is_linear_layer(layer)}
     buffers: dict[str, dict[str, Any]] = {}
 
     def packed_group(
@@ -131,8 +130,9 @@ def iter_gguf_weights(
         if all(part in group for part in slots):
             types = [group[part].ggml_type for part in slots]
             if len(set(types)) == 1:
-                yield target + ".qweight", torch.cat(
-                    [group[part].packed() for part in slots], dim=0
+                yield (
+                    target + ".qweight",
+                    torch.cat([group[part].packed() for part in slots], dim=0),
                 )
             else:
                 for index, part in enumerate(slots):
@@ -317,9 +317,7 @@ def iter_gguf_weights(
                 continue
             if suffix == "ssm_a":
                 value = _to_dense(tensor, torch.float32)
-                value = _ungroup_v(
-                    value, 0, linear_group.num_key_heads, values_per_key, 1
-                )
+                value = _ungroup_v(value, 0, linear_group.num_key_heads, values_per_key, 1)
                 if not bool((value < 0).all()):
                     raise ValueError(f"{name}: expected stored A=-exp(A_log) to be negative")
                 yield f"{base}.linear_attn.A_log", torch.log(-value)
@@ -494,10 +492,8 @@ def convert_qwen4_to_gguf(model, config: ModelConfig, *, model_path: str) -> Non
             layer.self_attn.indexer.index_qk_proj = gguf_merged_or_plain(
                 config.hidden_size,
                 [
-                    config.qwen4_args.indexer_n_heads
-                    * config.qwen4_args.indexer_head_dim,
-                    config.qwen4_args.indexer_kv_heads
-                    * config.qwen4_args.indexer_head_dim,
+                    config.qwen4_args.indexer_n_heads * config.qwen4_args.indexer_head_dim,
+                    config.qwen4_args.indexer_kv_heads * config.qwen4_args.indexer_head_dim,
                 ],
                 [
                     quant(layer_index, "indexer.q_proj.weight"),

@@ -12,7 +12,11 @@ import numpy as np
 import pytest
 import torch
 from freetoken.models.qwen4_exp.config import parse_config, parse_gguf_config
-from freetoken.models.qwen4_exp.gguf import _grouped_to_tiled_indices, _ungroup_v
+from freetoken.models.qwen4_exp.gguf import (
+    _centered_norm,
+    _grouped_to_tiled_indices,
+    _ungroup_v,
+)
 from freetoken.models.qwen4_exp.model import (
     Qwen4ExpForCausalLM,
     _ple_request_tokens,
@@ -266,6 +270,26 @@ def test_qwen4_gguf_v_head_reorder_roundtrip():
     assert torch.equal(grouped.flatten().index_select(0, indices), tiled)
 
 
+def test_qwen4_gguf_centered_norm_subtracts_before_bf16_narrowing():
+    effective = torch.tensor([1.001, 0.999], dtype=torch.float32)
+    tensor = SimpleNamespace(
+        packed=lambda: effective.view(torch.uint8),
+        ggml_type=0,
+        shape=(2,),
+    )
+
+    centered = _centered_norm(tensor)
+
+    assert centered.dtype == torch.bfloat16
+    assert torch.count_nonzero(centered) == 2
+    torch.testing.assert_close(
+        centered.float(),
+        torch.tensor([0.001, -0.001]),
+        atol=8e-6,
+        rtol=0,
+    )
+
+
 def test_mixed_gguf_projection_allocates_independent_buffers():
     from freetoken.layers.gguf import GGUFLinear, GGUFMergedLinear, gguf_merged_or_plain
 
@@ -283,9 +307,7 @@ def test_real_qwen_q4_and_q3_rows_match_pinned_reference_outputs():
     from freetoken.models.gguf.dequant import dequantize_reference
 
     fixture = json.loads(
-        (ROOT / "tests/fixtures/gguf/qwen38-reference-rows.json").read_text(
-            encoding="utf-8"
-        )
+        (ROOT / "tests/fixtures/gguf/qwen38-reference-rows.json").read_text(encoding="utf-8")
     )
     assert fixture["source_revision"] == "c8b5954a88c2775c546b92593eda40ea041d3176"
     assert {row["variant"] for row in fixture["rows"]} == {
