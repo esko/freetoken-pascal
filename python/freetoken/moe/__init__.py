@@ -52,8 +52,7 @@ class _Registry:
                 from argparse import ArgumentTypeError
 
                 raise ArgumentTypeError(
-                    f"Unsupported {self._type}: {name}. "
-                    f"Supported items: {self.supported_names()}"
+                    f"Unsupported {self._type}: {name}. Supported items: {self.supported_names()}"
                 )
 
 
@@ -114,6 +113,11 @@ def create_moe_backend(backend: str) -> BaseMoeBackend:
 
 
 def __getattr__(name: str):
+    if name == "QwenGGUFCpuMoELayer":
+        from .gguf_layer import QwenGGUFCpuMoELayer
+
+        globals()[name] = QwenGGUFCpuMoELayer
+        return QwenGGUFCpuMoELayer
     if name == "BaseMoeBackend":
         from .base import BaseMoeBackend
 
@@ -137,6 +141,7 @@ __all__ = [
     "OFFLOAD_MOE_BACKENDS",
     "SUPPORTED_MOE_BACKENDS",
     "BaseMoeBackend",
+    "QwenGGUFCpuMoELayer",
     "create_moe_backend",
     "is_offload_moe_backend",
 ]

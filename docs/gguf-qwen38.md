@@ -140,3 +140,12 @@ Build the native libraries first with `make target-cpu-native`, pass its `build.
 It requires five or more warmups and fails
 closed on scalar fallback or any output mismatch; this is preliminary H0 target-CPU evidence,
 not a P4 or full-engine performance claim.
+
+The H0 routed-layer adapter is available to CPU correctness probes through
+`freetoken.moe.QwenGGUFCpuMoELayer`. Construct it with an already-open
+`QwenGGUFCpuExpertBundle` and the exact layer geometry, then use `routed_forward` for a
+precomputed route or `forward` with CPU router logits. The adapter preserves the complete
+softmax denominator, accepts route widths up to the configured Qwen top-k, and forwards
+padding and bundle telemetry. Its caller owns the shared bundle and must close it after
+all layer adapters finish. It rejects CUDA, prefill, grouped, nonzero-cache and TP>1
+execution; it is not wired into Qwen model construction or the serving Engine.

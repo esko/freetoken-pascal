@@ -58,6 +58,12 @@ life of its heterogeneous CPU layout and Q4 executor. The CUDA engine rejects th
 combination until the production layer ABI can consume per-projection mappings without a
 homogeneous GPU cache; this is an integration blocker, not a hardware-performance claim.
 
+The H0 `QwenGGUFCpuMoELayer` is an explicit CPU-only adapter around that bundle. It
+supports routed decode with the existing full-softmax Torch reference when CPU router
+logits are supplied, plus precomputed routes for direct parity tests. It does not attach
+to Qwen model construction or the CUDA Engine, and it does not provide prefill, grouped,
+CUDA, TP>1 or performance evidence.
+
 ### Exit gate
 
 For each shipping quant and shape, the CPU expert output passes error tolerances against dequantize-plus-reference matmul. End-to-end cache-zero output remains correct.
