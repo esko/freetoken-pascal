@@ -30,8 +30,8 @@ env-clean:
 
 python-check:
 	python -m compileall -q python tests scripts
-	ruff check scripts python/freetoken/moe/cpu_abi.py tests/moe/test_cpu_abi.py
-	ruff format --check scripts python/freetoken/moe/cpu_abi.py tests/moe/test_cpu_abi.py
+	ruff check scripts python/freetoken/moe/cpu_abi.py python/freetoken/moe/ggml_reference.py python/freetoken/moe/q4_k.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py
+	ruff format --check scripts python/freetoken/moe/cpu_abi.py python/freetoken/moe/ggml_reference.py python/freetoken/moe/q4_k.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py
 
 hosted-tests:
-	PYTHONPATH=python pytest -q tests/project tests/daemon tests/moe/test_cpu_abi.py tests/moe/test_q4_k.py
+	PYTHONPATH=python pytest -q tests/project tests/daemon tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py

@@ -468,13 +468,14 @@ class CpuExecutionTelemetry:
     cancelled: bool = False
     error: str | None = None
     error_detail: str | None = None
+    kernel_census: tuple[str, ...] = ("reference",)
 
     @property
     def expert_count(self) -> int:
         """Compatibility alias for telemetry consumers using the issue wording."""
         return self.unique_experts
 
-    def as_dict(self) -> dict[str, int | str | bool | None]:
+    def as_dict(self) -> dict[str, object]:
         return {
             "backend": self.backend,
             "layer_id": self.layer_id,
@@ -491,6 +492,7 @@ class CpuExecutionTelemetry:
             "cancelled": self.cancelled,
             "error": self.error,
             "error_detail": self.error_detail,
+            "kernel_census": list(self.kernel_census),
         }
 
 

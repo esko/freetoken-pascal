@@ -91,10 +91,12 @@ baseline does not require newer instructions. A descriptor is eligible only when
 quant type and quant name both identify Q4_K and its input width and packed row stride
 match complete 256-value blocks; inconsistent or partial packed descriptors fail closed.
 The Q4 artifact remains heterogeneous: layer 2 gate/up Q5_K and Q5_1/Q8_0 down banks
-stay on the supplied reference decoder until their dedicated format work lands.
-This is an H0 pre-integration slice: the adapter is not yet wired into
+use the built-in bounded scalar reference decoders, while Q4_K remains the only direct
+packed GEMV path. Mixed-format execution is therefore explicit reference fallback for
+the promoted projections. This is an H0 pre-integration slice: the adapter is not yet
+wired into
 `python/freetoken/moe/cpu_executor.py`, and it does not replace the production
-runtime until the mixed-format decoder and runtime integration work is complete.
+runtime until the mixed-format runtime integration work is complete.
 
 ## MoE decode operation
 

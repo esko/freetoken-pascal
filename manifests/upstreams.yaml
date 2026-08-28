@@ -256,7 +256,7 @@ sources:
     upstream_ref: refs/pull/27742/head
     ref: eaf93765572e794b8e3754fe45adbe12d381e997
     license: MIT
-    role: GGUF and model correctness oracle
+    role: GGUF, model and mixed Q4_K/Q5_K/Q5_1/Q8_0 dequantization correctness oracle
     usage: reference
     responsible_issue: 11
     notice_required: false
