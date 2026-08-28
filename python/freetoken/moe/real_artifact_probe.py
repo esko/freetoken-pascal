@@ -966,6 +966,107 @@ def _compare_outputs(
     }
 
 
+def load_qwen38_expert_artifact(
+    *,
+    manifest_path: Path,
+    census_path: Path,
+    variant: str = DEFAULT_VARIANT,
+    layer: int = DEFAULT_LAYER,
+    expert: int = DEFAULT_EXPERT,
+    transport: RangeTransport | Callable[[str, int, int], RangeResponse] | None = None,
+    cache_dir: Path | None = None,
+    offline: bool = False,
+) -> dict[str, Any]:
+    """Fetch one expert's bounded ranges and build its validated CPU layout.
+
+    The returned object is the shared hand-off between the bounded artifact probe and
+    target-host benchmarks.  It deliberately retains the manifest/census source
+    identity, each selected range hash, and cache counters while keeping complete
+    shards out of memory and disk.
+    """
+    manifest = _load_json(Path(manifest_path), "manifest")
+    census = _load_json(Path(census_path), "census")
+    try:
+        census_sha256 = hashlib.sha256(Path(census_path).read_bytes()).hexdigest()
+    except OSError as error:
+        raise ArtifactProbeError(f"cannot hash census metadata {census_path}: {error}") from error
+    source, manifest_shards = _validate_metadata(manifest, census, variant)
+    records = _tensor_records(census, int(layer))
+    range_transport = transport or UrllibRangeTransport()
+    fetcher = RangeFetcher(range_transport, cache_dir=cache_dir)
+    sources: dict[str, bytes] = {}
+    ranges: list[dict[str, Any]] = []
+    for projection in _PROJECTIONS:
+        record = records[projection]
+        try:
+            shard_index = int(record["shard_index"])
+            if shard_index < 0:
+                raise IndexError(shard_index)
+            shard_name = str(census["shards"][shard_index]["name"])
+            shard_size = int(manifest_shards[shard_name]["size"])
+        except (KeyError, IndexError, TypeError, ValueError) as error:
+            raise ArtifactProbeError(
+                f"layer {layer} {projection}: invalid shard metadata"
+            ) from error
+        geometry = _record_geometry(
+            record,
+            shard_size=shard_size,
+            layer=int(layer),
+            projection=projection,
+            expert=int(expert),
+        )
+        url = f"{source['base_url']}/{shard_name}"
+        response = fetcher.fetch(
+            url,
+            geometry["expert_offset"],
+            geometry["bytes_per_expert"],
+            expected_total=shard_size,
+            offline=offline,
+        )
+        sources[projection] = response.body
+        ranges.append(
+            {
+                "projection": projection,
+                "url": url,
+                "shard": shard_name,
+                "shard_size": shard_size,
+                "declared_shard_sha256": str(manifest_shards[shard_name]["sha256"]),
+                "artifact_offset": geometry["expert_offset"],
+                "length": len(response.body),
+                "sha256": hashlib.sha256(response.body).hexdigest(),
+                "content_range": _header(response.headers, "Content-Range"),
+                "cache": "hit" if fetcher.last_cache_hit else "miss",
+            }
+        )
+    layout = build_probe_layout(
+        manifest,
+        census,
+        variant=variant,
+        layer=int(layer),
+        expert=int(expert),
+        sources=sources,
+    )
+    return {
+        "manifest": manifest,
+        "census": census,
+        "census_sha256": census_sha256,
+        "source": source,
+        "layout": layout,
+        "sources": sources,
+        "ranges": ranges,
+        "fetch": {
+            "transport": "http-range",
+            "offline": bool(offline),
+            "cache_dir": None if cache_dir is None else str(cache_dir),
+            "cache_hits": fetcher.cache_hits,
+            "cache_misses": fetcher.cache_misses,
+            "range_count": len(ranges),
+            "fetched_bytes": sum(item["length"] for item in ranges),
+            "full_shard_bytes": 0,
+        },
+    }
+
+
 def probe_qwen38_expert(
     *,
     manifest_path: Path,
@@ -1177,6 +1278,7 @@ __all__ = [
     "UrllibRangeTransport",
     "build_probe_layout",
     "gguf_oracle_identity",
+    "load_qwen38_expert_artifact",
     "probe_qwen38_expert",
     "run_gguf_oracle",
 ]

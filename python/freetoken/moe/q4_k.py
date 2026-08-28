@@ -269,8 +269,9 @@ def _host_supports_avx2() -> bool:
 
 
 class _NativeQ4K:
-    def __init__(self, library: ctypes.CDLL) -> None:
+    def __init__(self, library: ctypes.CDLL, source_path: str | None = None) -> None:
         self.library = library
+        self.source_path = source_path or str(library._name)
         self.library.freetoken_q4k_dot_avx2.argtypes = [
             ctypes.POINTER(ctypes.c_uint8),
             ctypes.POINTER(ctypes.c_float),
@@ -342,7 +343,7 @@ def _load_native() -> _NativeQ4K | None:
             available.argtypes = []
             available.restype = ctypes.c_int
             if available() and _host_supports_avx2():
-                return _NativeQ4K(library)
+                return _NativeQ4K(library, candidate)
         except (AttributeError, OSError):
             continue
     return None

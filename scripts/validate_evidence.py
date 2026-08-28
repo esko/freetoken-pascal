@@ -81,6 +81,114 @@ def _comparison_semantic_errors(comparisons: list[dict[str, Any]]) -> list[str]:
     return errors
 
 
+def _target_cpu_benchmark_semantic_errors(document: dict[str, Any]) -> list[str]:
+    """Check invariants that JSON Schema cannot express across report fields."""
+    errors: list[str] = []
+    warmups = document["warmups"]
+    warmup_count = warmups["count"]
+    for name in ("reference_cold_dequant_dense", "reference_dense_resident", "native"):
+        if len(warmups[name]) != warmup_count:
+            errors.append(f"warmups.{name} length must equal warmups.count")
+
+    samples = document["samples"]
+    sample_names = ("reference_cold_dequant_dense", "reference_dense_resident", "native")
+    sample_count = len(samples[sample_names[0]])
+    for name in sample_names:
+        if len(samples[name]) != sample_count:
+            errors.append(f"samples.{name} length must match the other raw sample arrays")
+    for group_name in ("dense_resident", "cold_dequant_dense"):
+        group = document["statistics"][group_name]
+        if group["reference"]["sample_count"] != sample_count:
+            errors.append(f"statistics.{group_name}.reference.sample_count must match raw samples")
+        if group["native"]["sample_count"] != sample_count:
+            errors.append(f"statistics.{group_name}.native.sample_count must match raw samples")
+        expected_ratio = (
+            group["reference"]["median_elapsed_ns"] / group["native"]["median_elapsed_ns"]
+        )
+        if not math.isclose(
+            group["reference_to_native_median_ratio"], expected_ratio, rel_tol=1e-12
+        ):
+            errors.append(
+                f"statistics.{group_name}.reference_to_native_median_ratio must match medians"
+            )
+
+    required_cold_components = {
+        "range/source validation",
+        "packed bytes/view setup",
+        "sha256 hashing",
+        "gguf.dequantize",
+        "dense_fp32_swiglu",
+    }
+    for index, sample in enumerate(samples["reference_cold_dequant_dense"]):
+        missing = required_cold_components - set(sample["timed_components"])
+        if missing:
+            errors.append(f"cold sample {index} omits timed components: {sorted(missing)}")
+    for index, sample in enumerate(samples["reference_dense_resident"]):
+        if "gguf.dequantize" in sample["timed_components"]:
+            errors.append(f"dense-resident sample {index} includes out-of-scope dequantization")
+        if "dense_fp32_swiglu" not in sample["timed_components"]:
+            errors.append(f"dense-resident sample {index} must include dense_fp32_swiglu")
+    selected = document["selected_behavior"]
+    native_observation_groups = (
+        ("warmups.native", warmups["native"]),
+        ("samples.native", samples["native"]),
+    )
+    for group_name, observations in native_observation_groups:
+        for index, sample in enumerate(observations):
+            if sample["timed_operation"] != "executor.execute":
+                errors.append(f"{group_name}[{index}] must time executor.execute")
+            telemetry = sample["telemetry"]
+            if telemetry.get("fallback_reason") is not None:
+                errors.append(f"{group_name}[{index}] reports fallback telemetry")
+            if telemetry.get("backend") != selected["backend"]:
+                errors.append(f"{group_name}[{index}] backend must match selected behavior")
+            if telemetry.get("kernel_census") != selected["kernel_census"]:
+                errors.append(f"{group_name}[{index}] kernels must match selected behavior")
+
+    for name in ("cold_dequant_dense", "dense_resident"):
+        group = document["correctness"][name]
+        if group["comparison_count"] != len(group["comparisons"]):
+            errors.append(f"correctness.{name}.comparison_count must match comparisons")
+        if not all(comparison["correct"] for comparison in group["comparisons"]):
+            errors.append(f"correctness.{name} contains a failed comparison")
+    comparisons_correct = all(
+        all(comparison["correct"] for comparison in document["correctness"][name]["comparisons"])
+        for name in ("cold_dequant_dense", "dense_resident")
+    )
+    if document["correctness"]["correct"] != comparisons_correct:
+        errors.append("correctness.correct must equal all per-sample comparisons")
+
+    if "avx2" not in selected["backend"]:
+        errors.append("selected_behavior.backend must identify avx2")
+    if not selected["kernel_census"] or any(
+        "avx2" not in kernel for kernel in selected["kernel_census"]
+    ):
+        errors.append("selected_behavior.kernel_census must identify only avx2 kernels")
+    if any(selected["fallbacks"].values()):
+        errors.append("selected_behavior.fallbacks must be empty for measured evidence")
+    identity_scope = document["metadata"]["identity_scope"].lower()
+    if "selected expert ranges" not in identity_scope or "full-model" not in identity_scope:
+        errors.append("metadata.identity_scope must state full-model identity and partial ranges")
+    cold_scope = document["statistics"]["cold_dequant_dense"]["scope"].lower()
+    for required in ("validation", "setup", "sha-256", "dequantization", "dense"):
+        if required not in cold_scope:
+            errors.append(f"cold_dequant_dense scope must mention {required}")
+    if document["warnings"]:
+        errors.append("measured target-CPU evidence cannot carry warning-only BLAS state")
+    native = document["metadata"]["native"]
+    build = native["build"]
+    if build["commit"] != document["metadata"]["commit"]:
+        errors.append("native build commit must match benchmark commit")
+    for name in ("q4_k", "mixed_gemv"):
+        measured_library = native["libraries"][name]
+        built_library = build["libraries"][name]
+        if built_library["sha256"] != measured_library["sha256"]:
+            errors.append(f"native build hash for {name} must match measured library")
+        if Path(built_library["path"]).resolve() != Path(measured_library["path"]).resolve():
+            errors.append(f"native build path for {name} must match measured library")
+    return errors
+
+
 def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
     if not isinstance(document, dict):
         return ["document root must be an object"]
@@ -172,6 +280,8 @@ def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
             ):
                 if document[party][key] != document["workload"][key]:
                     errors.append(f"{party}.{key} must match workload.{key}")
+    elif schema_name == "qwen38-real-artifact-target-cpu-benchmark.schema.json":
+        errors.extend(_target_cpu_benchmark_semantic_errors(document))
     if document.get("evidence_status") == "measured" and document.get("commit") == "0" * 40:
         errors.append("measured evidence cannot use the placeholder commit")
     return errors

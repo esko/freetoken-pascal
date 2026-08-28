@@ -161,8 +161,9 @@ def _host_supports_avx2() -> bool:
 
 
 class _NativeMixedGemv:
-    def __init__(self, library: ctypes.CDLL) -> None:
+    def __init__(self, library: ctypes.CDLL, source_path: str | None = None) -> None:
         self.library = library
+        self.source_path = source_path or str(library._name)
         float_pointer = ctypes.POINTER(ctypes.c_float)
         byte_pointer = ctypes.POINTER(ctypes.c_uint8)
         for name in _FORMATS:
@@ -244,7 +245,7 @@ def _load_native() -> _NativeMixedGemv | None:
             available.argtypes = []
             available.restype = ctypes.c_int
             if available() and _host_supports_avx2():
-                return _NativeMixedGemv(library)
+                return _NativeMixedGemv(library, candidate)
         except (AttributeError, OSError):
             continue
     return None
