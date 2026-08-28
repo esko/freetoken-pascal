@@ -36,7 +36,7 @@
         "variant": {"type": "string", "minLength": 1},
         "census_sha256": {"$ref": "#/$defs/sha256"},
         "model_sha256": {"$ref": "#/$defs/sha256"},
-        "model_sha256_status": {"enum": ["declared", "verified"]},
+        "model_sha256_status": {"const": "declared"},
         "identity_scope": {"type": "string", "minLength": 1},
         "range_hashes": {
           "type": "object",
@@ -218,7 +218,7 @@
     "native": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["libraries"],
+      "required": ["libraries", "build"],
       "properties": {
         "libraries": {
           "type": "object",
@@ -238,9 +238,8 @@
       "required": ["environment", "path", "sha256"],
       "properties": {
         "environment": {"type": "string", "minLength": 1},
-        "path": {"type": ["string", "null"]},
-        "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
-        "resolution": {"type": "string", "minLength": 1}
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
       }
     },
     "projection_hashes": {

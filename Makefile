@@ -31,8 +31,8 @@ expert-probe:
 target-cpu-native:
 	python scripts/build_target_cpu_native.py $(NATIVE_ARGS)
 
-target-cpu-expert-benchmark:
-	PYTHONPATH=python python benchmarks/bench_qwen38_real_expert.py $(BENCH_ARGS)
+target-cpu-expert-benchmark: target-cpu-native
+	PYTHONPATH=python python benchmarks/bench_qwen38_real_expert.py --native-build-metadata .cache/freetoken/target-cpu-native/build.json $(BENCH_ARGS)
 
 env-clean:
 	docker image rm freetoken-pascal:cpu freetoken-pascal:cuda126 2>/dev/null || true

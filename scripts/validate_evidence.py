@@ -128,9 +128,22 @@ def _target_cpu_benchmark_semantic_errors(document: dict[str, Any]) -> list[str]
             errors.append(f"dense-resident sample {index} includes out-of-scope dequantization")
         if "dense_fp32_swiglu" not in sample["timed_components"]:
             errors.append(f"dense-resident sample {index} must include dense_fp32_swiglu")
-    for index, sample in enumerate(samples["native"]):
-        if sample["timed_operation"] != "executor.execute":
-            errors.append(f"native sample {index} must time executor.execute")
+    selected = document["selected_behavior"]
+    native_observation_groups = (
+        ("warmups.native", warmups["native"]),
+        ("samples.native", samples["native"]),
+    )
+    for group_name, observations in native_observation_groups:
+        for index, sample in enumerate(observations):
+            if sample["timed_operation"] != "executor.execute":
+                errors.append(f"{group_name}[{index}] must time executor.execute")
+            telemetry = sample["telemetry"]
+            if telemetry.get("fallback_reason") is not None:
+                errors.append(f"{group_name}[{index}] reports fallback telemetry")
+            if telemetry.get("backend") != selected["backend"]:
+                errors.append(f"{group_name}[{index}] backend must match selected behavior")
+            if telemetry.get("kernel_census") != selected["kernel_census"]:
+                errors.append(f"{group_name}[{index}] kernels must match selected behavior")
 
     for name in ("cold_dequant_dense", "dense_resident"):
         group = document["correctness"][name]
@@ -145,7 +158,6 @@ def _target_cpu_benchmark_semantic_errors(document: dict[str, Any]) -> list[str]
     if document["correctness"]["correct"] != comparisons_correct:
         errors.append("correctness.correct must equal all per-sample comparisons")
 
-    selected = document["selected_behavior"]
     if "avx2" not in selected["backend"]:
         errors.append("selected_behavior.backend must identify avx2")
     if not selected["kernel_census"] or any(

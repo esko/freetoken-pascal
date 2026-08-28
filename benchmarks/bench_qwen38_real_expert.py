@@ -82,7 +82,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--native-build-metadata",
         type=Path,
-        help="optional JSON manifest from build_target_cpu_native.py",
+        required=True,
+        help="required JSON manifest from build_target_cpu_native.py",
     )
     parser.add_argument("--output", type=Path, help="write JSON report to this path")
     args = parser.parse_args(argv)

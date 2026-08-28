@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import itertools
+import json
 from pathlib import Path
 from typing import ClassVar
 
@@ -183,6 +185,25 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, *, output_delta: float = 0.0)
     )
     monkeypatch.setattr(benchmark.probe, "_load_gguf_oracle", lambda: object())
     monkeypatch.setattr(benchmark.probe, "Q4KExecutor", _FakeExecutor)
+    monkeypatch.setattr(
+        benchmark,
+        "_native_library_metadata",
+        lambda path: {
+            "libraries": {
+                "q4_k": {
+                    "environment": "FREETOKEN_Q4K_NATIVE_LIB",
+                    "path": "q4.so",
+                    "sha256": "a" * 64,
+                },
+                "mixed_gemv": {
+                    "environment": "FREETOKEN_MIXED_GEMV_NATIVE_LIB",
+                    "path": "mixed.so",
+                    "sha256": "b" * 64,
+                },
+            },
+            "build": {"commit": "1" * 40, "libraries": {}},
+        },
+    )
     _FakeExecutor.instances.clear()
     _FakeExecutor.output_delta = output_delta
 
@@ -329,3 +350,39 @@ def test_benchmark_report_schema_and_semantics_are_machine_validatable(
     )
     errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=ROOT / "schemas")
     assert any("cold sample 0 omits timed components" in error for error in errors)
+
+    invalid = copy.deepcopy(report)
+    invalid["samples"]["native"][0]["telemetry"]["fallback_reason"] = "scalar fallback"
+    errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=ROOT / "schemas")
+    assert any("samples.native[0] reports fallback telemetry" in error for error in errors)
+
+
+def test_native_build_metadata_is_required_and_hash_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(benchmark, "_git_commit", lambda: "1" * 40)
+    with pytest.raises(ArtifactProbeError, match="metadata is required"):
+        benchmark._native_library_metadata(None)
+
+    libraries = {}
+    for name, env_name in (
+        ("q4_k", "FREETOKEN_Q4K_NATIVE_LIB"),
+        ("mixed_gemv", "FREETOKEN_MIXED_GEMV_NATIVE_LIB"),
+    ):
+        path = tmp_path / f"{name}.so"
+        path.write_bytes(name.encode())
+        monkeypatch.setenv(env_name, str(path))
+        libraries[name] = {"sha256": hashlib.sha256(name.encode()).hexdigest()}
+    build_path = tmp_path / "build.json"
+    build_path.write_text(
+        json.dumps({"commit": "1" * 40, "libraries": libraries}), encoding="utf-8"
+    )
+
+    metadata = benchmark._native_library_metadata(build_path)
+    assert metadata["build"]["commit"] == "1" * 40
+    libraries["q4_k"]["sha256"] = "0" * 64
+    build_path.write_text(
+        json.dumps({"commit": "1" * 40, "libraries": libraries}), encoding="utf-8"
+    )
+    with pytest.raises(ArtifactProbeError, match="hash mismatch for q4_k"):
+        benchmark._native_library_metadata(build_path)

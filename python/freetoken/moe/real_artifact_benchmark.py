@@ -126,36 +126,48 @@ def _sha256_file(path: Path) -> str:
 
 
 def _native_library_metadata(build_metadata_path: Path | None) -> dict[str, Any]:
-    """Capture native helper paths/hashes and optional reproducible build metadata."""
+    """Capture native helper paths/hashes and require matching build metadata."""
+    if build_metadata_path is None:
+        raise ArtifactProbeError("native build metadata is required for measured evidence")
     libraries: dict[str, Any] = {}
     for name, env_name in (
         ("q4_k", "FREETOKEN_Q4K_NATIVE_LIB"),
         ("mixed_gemv", "FREETOKEN_MIXED_GEMV_NATIVE_LIB"),
     ):
         raw_path = os.environ.get(env_name)
-        entry: dict[str, Any] = {"environment": env_name, "path": raw_path}
-        if raw_path:
-            path = Path(raw_path)
-            if not path.is_file():
-                raise ArtifactProbeError(f"native helper {env_name} does not name a file: {path}")
-            entry["sha256"] = _sha256_file(path)
-        else:
-            entry["sha256"] = None
-            entry["resolution"] = "package/module discovery"
+        if not raw_path:
+            raise ArtifactProbeError(f"{env_name} must name the measured native helper library")
+        path = Path(raw_path)
+        if not path.is_file():
+            raise ArtifactProbeError(f"native helper {env_name} does not name a file: {path}")
+        entry: dict[str, Any] = {
+            "environment": env_name,
+            "path": raw_path,
+            "sha256": _sha256_file(path),
+        }
         libraries[name] = entry
-    metadata: dict[str, Any] = {"libraries": libraries}
-    if build_metadata_path is not None:
+    try:
+        build = json.loads(Path(build_metadata_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ArtifactProbeError(
+            f"cannot read native build metadata {build_metadata_path}: {error}"
+        ) from error
+    if not isinstance(build, dict) or build.get("commit") != _git_commit():
+        raise ArtifactProbeError("native build metadata commit must match the benchmark commit")
+    for name, library in libraries.items():
         try:
-            metadata["build"] = json.loads(Path(build_metadata_path).read_text(encoding="utf-8"))
-        except (OSError, ValueError) as error:
+            built_sha256 = build["libraries"][name]["sha256"]
+        except (KeyError, TypeError) as error:
             raise ArtifactProbeError(
-                f"cannot read native build metadata {build_metadata_path}: {error}"
+                f"native build metadata omits {name} library identity"
             ) from error
-    return metadata
+        if built_sha256 != library["sha256"]:
+            raise ArtifactProbeError(f"native build metadata hash mismatch for {name}")
+    return {"libraries": libraries, "build": build}
 
 
 def _census_identity(census: Mapping[str, Any]) -> dict[str, str]:
-    """Return the census-pinned model identity and its declared/verified status."""
+    """Return the census-pinned model identity without overstating partial verification."""
     model_sha256 = census.get("model_sha256")
     if (
         not isinstance(model_sha256, str)
@@ -163,13 +175,7 @@ def _census_identity(census: Mapping[str, Any]) -> dict[str, str]:
         or any(character not in "0123456789abcdef" for character in model_sha256)
     ):
         raise ArtifactProbeError("census must declare a lowercase 64-character model_sha256")
-    status = census.get("model_sha256_status")
-    if status is None:
-        shard_statuses = {str(item.get("sha256_status")) for item in census.get("shards", ())}
-        status = "verified" if shard_statuses == {"verified"} else "declared"
-    if status not in {"declared", "verified"}:
-        raise ArtifactProbeError(f"census has unsupported model_sha256_status {status!r}")
-    return {"model_sha256": model_sha256, "model_sha256_status": str(status)}
+    return {"model_sha256": model_sha256, "model_sha256_status": "declared"}
 
 
 def _hash_array(value: np.ndarray) -> str:
