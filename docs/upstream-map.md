@@ -18,14 +18,98 @@ This project is a downstream integration, not an independent reimplementation. E
 
 ## Integration method
 
-The first implementation issue merges upstream FreeToken history into this repository once, using the existing project-bootstrap commit as the other parent. From that point:
+FreeToken commit `9ef3651309fe4058672f2cc92069238dea06be1b` is the initial downstream base. It was merged once with `--allow-unrelated-histories`, using the project-bootstrap history as the other parent. Both histories are therefore ancestors of the integration merge.
 
-- `upstream/freetoken` tracks FreeToken main;
+From that point:
+
+- the canonical remote is named `upstream` and its fetched mainline is `upstream/main`;
+- a temporary local `upstream/freetoken` branch may be used to inspect a pinned source commit, but downstream commits never land on it;
 - feature PRs are imported or semantically replayed as focused commits;
 - local changes live in reviewable downstream commits;
 - no moving PR head is referenced without recording its SHA;
 - each copied file retains license headers;
 - `manifests/upstreams.yaml` records source path, destination path, source SHA and local differences.
+
+## Initial import commands
+
+The one-time import used these commands from the project bootstrap `main` branch:
+
+```bash
+git remote add upstream https://github.com/FlashML-org/FreeToken.git
+git fetch upstream main
+git switch -c issue-5-upstream-import
+git merge --allow-unrelated-histories --no-commit \
+  9ef3651309fe4058672f2cc92069238dea06be1b
+# Resolve the five add/add conflicts deliberately, stage the complete tree, then:
+git commit
+```
+
+The conflict decisions were:
+
+- keep the downstream README and contribution contract, updated to describe the imported runtime;
+- retain the upstream runtime build metadata while changing distribution identity and URLs to FreeToken-Pascal;
+- retain both FreeToken Authors and FreeToken-Pascal contributor copyright notices;
+- combine upstream ignore rules with downstream model, CUDA, trace, and private-result rules;
+- preserve all downstream `.github`, ADR, manifest, testing, release, and governance files.
+
+## Future FreeToken sync
+
+Start every broad sync from a clean, current downstream `main`. Never use an unpinned moving branch as the merge operand:
+
+```bash
+git remote get-url upstream
+# If the remote is absent in a fresh clone:
+git remote add upstream https://github.com/FlashML-org/FreeToken.git
+git fetch --prune upstream main
+git log --oneline --left-right main...upstream/main
+git diff --stat 9ef3651309fe4058672f2cc92069238dea06be1b..upstream/main
+git rev-parse upstream/main
+```
+
+Review the commits and select an exact 40-character SHA, recorded below as `<new-sha>`. Then create a dedicated sync branch and merge only that commit:
+
+```bash
+git switch main
+git pull --ff-only origin main
+git switch -c sync/freetoken-YYYYMMDD
+git branch --force upstream/freetoken <new-sha>
+git merge --no-commit <new-sha>
+```
+
+Resolve conflicts by preserving downstream product scope and identity while retaining upstream engine contracts. Inspect every conflict and never use a repository-wide `ours` or `theirs` resolution. Before committing:
+
+```bash
+git diff --name-only --diff-filter=U
+git diff --check
+python scripts/check_upstream_manifest.py
+python scripts/validate_docs.py
+```
+
+Update the `freetoken` manifest `ref`, import ledger, and any changed notices in the same sync commit. Complete the merge, validate it, and prove reachability:
+
+```bash
+git add <resolved-paths> manifests/upstreams.yaml docs/upstream-map.md NOTICE
+git commit
+git merge-base HEAD <new-sha>
+git merge-base --is-ancestor <new-sha> HEAD
+git merge-base --is-ancestor origin/main HEAD
+make check
+```
+
+If the selected upstream range touches kernels, model graphs, cache maps, quant loaders, or tensor parallelism, the sync PR remains open until the applicable H2/H3 gates can run. Do not claim hardware validation from H0 or H1 results.
+
+## Focused upstream PR imports
+
+Fetch and pin the PR head without merging a moving GitHub ref directly:
+
+```bash
+git fetch upstream refs/pull/<number>/head
+git rev-parse FETCH_HEAD
+git switch -c import/freetoken-pr-<number>-<short-name> main
+git cherry-pick --no-commit <pinned-pr-sha>
+```
+
+Record the exact PR SHA and source/destination paths in `manifests/upstreams.yaml`. Adapt only the issue-scoped files, preserve source headers, and document semantic reimplementations as local modifications.
 
 ## Conflict policy
 

@@ -1,6 +1,6 @@
-.PHONY: check docs-check python-check
+.PHONY: check docs-check python-check hosted-tests
 
-check: docs-check python-check
+check: docs-check python-check hosted-tests
 	pre-commit run --all-files
 
 docs-check:
@@ -8,14 +8,9 @@ docs-check:
 	python scripts/check_upstream_manifest.py
 
 python-check:
-	@dirs=""; \
-	for dir in src tests scripts; do \
-		if [ -d "$$dir" ]; then dirs="$$dirs $$dir"; fi; \
-	done; \
-	if [ -n "$$dirs" ]; then \
-		python -m compileall -q $$dirs; \
-		ruff check $$dirs; \
-		ruff format --check $$dirs; \
-	else \
-		echo "No Python source directories yet"; \
-	fi
+	python -m compileall -q python tests scripts
+	ruff check scripts
+	ruff format --check scripts
+
+hosted-tests:
+	PYTHONPATH=python pytest -q tests/daemon

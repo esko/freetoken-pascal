@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "manifests" / "upstreams.yaml"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ALLOWED_PLACEHOLDER = "TO_BE_PINNED"
+REQUIRED_PINNED = {"freetoken"}
 
 
 def main() -> int:
@@ -31,6 +32,8 @@ def main() -> int:
         ref = source.get("ref", "")
         if ref != ALLOWED_PLACEHOLDER and not SHA_RE.fullmatch(ref):
             errors.append(f"{source_id}: ref must be a 40-char SHA or {ALLOWED_PLACEHOLDER}")
+        if source_id in REQUIRED_PINNED and ref == ALLOWED_PLACEHOLDER:
+            errors.append(f"{source_id}: primary downstream base must be pinned")
         if not str(source.get("repository", "")).startswith("https://github.com/"):
             errors.append(f"{source_id}: repository must be a GitHub URL")
         if not isinstance(source.get("imports"), list):

@@ -26,34 +26,29 @@ jobs:
       - name: Install repository tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pre-commit ruff pytest pyyaml
+          python -m pip install \
+            fastapi \
+            msgpack \
+            pre-commit \
+            pydantic \
+            pytest \
+            pyyaml \
+            pyzmq \
+            ruff \
+            uvicorn
       - name: Pre-commit
         run: pre-commit run --all-files --show-diff-on-failure
       - name: Validate documentation and manifests
         run: |
           python scripts/validate_docs.py
           python scripts/check_upstream_manifest.py
-      - name: Python checks for existing source roots
-        shell: bash
+      - name: Compile imported source and tests
+        run: python -m compileall -q python tests scripts
+      - name: Lint downstream repository tooling
         run: |
-          set -euo pipefail
-          dirs=()
-          for dir in src tests scripts; do
-            [[ -d "$dir" ]] && dirs+=("$dir")
-          done
-          if ((${#dirs[@]})); then
-            python -m compileall -q "${dirs[@]}"
-            ruff check "${dirs[@]}"
-            ruff format --check "${dirs[@]}"
-          else
-            echo "No Python source directories yet."
-          fi
-      - name: Unit tests when tests exist
-        shell: bash
-        run: |
-          set -euo pipefail
-          if find tests -type f -name 'test_*.py' -print -quit 2>/dev/null | grep -q .; then
-            pytest -m "not sm61 and not dual_p4 and not large_model and not benchmark"
-          else
-            echo "No hosted unit tests yet."
-          fi
+          ruff check scripts
+          ruff format --check scripts
+      - name: Run viable CPU-safe upstream tests
+        env:
+          PYTHONPATH: python
+        run: pytest -q tests/daemon

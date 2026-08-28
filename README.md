@@ -4,11 +4,11 @@
 
 FreeToken-Pascal is a downstream engineering project to run large hybrid MoE models efficiently on NVIDIA Pascal GPUs, with the first complete target being **Qwen3.8-Flash-Next on a dual Tesla P4 (`sm_61`) server**.
 
-The project keeps FreeToken's dynamic expert paging and CPU/GPU hybrid execution model, adds a reproducible CUDA 12.6 Pascal toolchain, low-bit GGUF expert banks, AVX2 CPU expert kernels, Pascal-focused GPU kernels, dual-GPU ownership, and production-grade validation.
+The project is based on [FlashML-org/FreeToken](https://github.com/FlashML-org/FreeToken) and retains its source history. It is independently maintained, is not endorsed by FlashML, and keeps the upstream `freetoken` Python import package and `ft` command while publishing downstream metadata as FreeToken-Pascal.
 
 ## Status
 
-The repository is implementation-ready: product scope, architecture, ADRs, agent contracts, CI and a dependency-ordered v1 backlog are in place. The first implementation item is [issue #5](https://github.com/esko/freetoken-pascal/issues/5); the complete release checklist is [epic #4](https://github.com/esko/freetoken-pascal/issues/4).
+The complete upstream runtime source tree was imported at the commit pinned in `manifests/upstreams.yaml`. Pascal/CUDA 12.6 integration, Qwen3.8 support, low-bit host experts, and the remaining v1 work proceed through the dependency-ordered [epic #4](https://github.com/esko/freetoken-pascal/issues/4).
 
 The target P4 GPUs have not arrived yet. Hardware qualification issues [#9](https://github.com/esko/freetoken-pascal/issues/9) and [#29](https://github.com/esko/freetoken-pascal/issues/29) are explicitly blocked, while hosted, CPU, converter, cache-simulation, tiny-model and `sm_61` compile work proceeds.
 
@@ -27,6 +27,21 @@ The v1 product is a text-serving runtime with:
 - long-context GDN/QSA/PLE correctness;
 - OpenAI-compatible serving, telemetry, reproducible benchmarks, and operational packaging.
 
+## Source checkout
+
+Clone the downstream repository with its complete history:
+
+```bash
+git clone https://github.com/esko/freetoken-pascal.git
+cd freetoken-pascal
+git remote add upstream https://github.com/FlashML-org/FreeToken.git
+git fetch upstream
+```
+
+The imported upstream currently targets its own CUDA environment. The pinned CUDA 12.6/Python 3.12 downstream environment is delivered separately by issue #7; do not treat upstream's CUDA 13 defaults as the Pascal release environment.
+
+See [the upstream installation guide](docs/install.md) for the imported runtime's prerequisites and [the downstream integration map](docs/upstream-map.md) for the exact sync procedure.
+
 ## Documentation
 
 - [Documentation index](docs/README.md)
@@ -38,6 +53,7 @@ The v1 product is a text-serving runtime with:
 - [Architecture decisions](docs/adr/README.md)
 - [Testing strategy](docs/testing-strategy.md)
 - [Release criteria](docs/release-criteria.md)
+- [Upstream integration map](docs/upstream-map.md)
 
 ## Source projects
 
@@ -67,4 +83,4 @@ Exact revisions must be recorded in `manifests/upstreams.yaml`; branch names and
 
 ## License
 
-Apache-2.0. Upstream copyright and license notices must be preserved for copied or modified source.
+Apache-2.0. Upstream copyright and license notices are preserved. See `NOTICE` and `manifests/upstreams.yaml` for attribution and exact provenance.
