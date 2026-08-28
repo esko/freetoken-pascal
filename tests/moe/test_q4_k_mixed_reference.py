@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 from freetoken.moe.cpu_abi import CpuExpertDescriptor, CpuExpertLayout
 from freetoken.moe.ggml_reference import (
@@ -93,13 +96,32 @@ def _descriptor(
     )
 
 
+def _pinned_promoted_layers() -> tuple[int, ...]:
+    census_path = (
+        Path(__file__).resolve().parents[2]
+        / "tests/fixtures/results/qwen38-q4-census.metadata.json"
+    )
+    census = json.loads(census_path.read_text(encoding="utf-8"))
+    return tuple(
+        int(item["layer"]) for item in census["expert_layers"] if "Q8_0" in item["quant_types"]
+    )
+
+
 def test_q4k_executor_registers_builtin_decoders_for_actual_mixed_layers() -> None:
     experts = 2
     descriptors = []
-    for layer, gate_up_quant, gate_up_name, down_quant, down_name in (
-        (0, 12, "Q4_K", 7, "Q5_1"),
-        (1, 13, "Q5_K", 8, "Q8_0"),
-    ):
+    promoted_layers = _pinned_promoted_layers()
+    assert promoted_layers == (2, 4, 30, 46, 47)
+    layers = (0, *promoted_layers)
+    for layer in layers:
+        if layer == 2:
+            gate_up_quant, gate_up_name = 13, "Q5_K"
+        else:
+            gate_up_quant, gate_up_name = 12, "Q4_K"
+        if layer in promoted_layers:
+            down_quant, down_name = 8, "Q8_0"
+        else:
+            down_quant, down_name = 7, "Q5_1"
         gate_up_block = Q4K_BLOCK_BYTES if gate_up_name == "Q4_K" else Q5_K_BLOCK_BYTES
         for projection in ("gate", "up"):
             descriptors.append(
@@ -124,18 +146,36 @@ def test_q4k_executor_registers_builtin_decoders_for_actual_mixed_layers() -> No
             )
         )
 
+    for descriptor in descriptors:
+        source = descriptor.source
+        assert source is not None
+        for expert in (0, experts // 2, experts - 1):
+            actual_address = int(source.expert_packed(expert).__array_interface__["data"][0])
+            expected_address = descriptor.source_address + expert * descriptor.expert_stride_bytes
+            assert actual_address == expected_address
+
     executor = Q4KExecutor(CpuExpertLayout(tuple(descriptors), top_k=2), mode="scalar")
     executor.prepare(max_tokens=1, max_routes=2)
     hidden = np.full((1, 256), 0.01, dtype=np.float32)
     ids = np.array([[1, 1]], dtype=np.int32)
     weights = np.array([[0.25, 0.75]], dtype=np.float32)
 
-    for layer in (0, 1):
+    for layer in (0, 2, 4):
         result = executor.execute(layer, hidden, ids, weights)
         gate = np.full(256, 2.56, dtype=np.float32)
         up = np.full(256, 2.56, dtype=np.float32)
         activated = gate / (1.0 + np.exp(-gate)) * up
         expected = np.full(256, np.sum(activated), dtype=np.float32)
         np.testing.assert_allclose(result.output[0], expected, rtol=2e-6, atol=2e-6)
-        assert result.telemetry.backend == "reference"
-        assert result.telemetry.fallback_reason == "unsupported_quant_type"
+        expected_census = {
+            0: ("q4_k_scalar", "reference_q5_1"),
+            2: ("reference_q5_k", "reference_q8_0"),
+            4: ("q4_k_scalar", "reference_q8_0"),
+        }[layer]
+        expected_backend = "reference" if layer == 2 else "mixed"
+        expected_fallback = (
+            "reference_dequant_packed_workspace" if layer == 2 else "mixed_reference_formats"
+        )
+        assert result.telemetry.backend == expected_backend
+        assert result.telemetry.kernel_census == expected_census
+        assert result.telemetry.fallback_reason == expected_fallback

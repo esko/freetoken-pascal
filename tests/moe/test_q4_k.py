@@ -196,6 +196,7 @@ def test_q4_k_executor_handles_first_middle_last_and_duplicate_routes() -> None:
             expected[token] += (down @ activated) * weights[token, route]
     np.testing.assert_allclose(result.output, expected, rtol=3e-5, atol=3e-5)
     assert result.telemetry.backend == "q4_k_scalar"
+    assert result.telemetry.kernel_census == ("q4_k_scalar",)
     assert result.telemetry.unique_experts == 3
     assert result.telemetry.routes_executed == 7
 
@@ -430,6 +431,7 @@ def test_q4_k_unsupported_format_falls_back_through_reference_abi() -> None:
         np.ones((1, 1), dtype=np.float32),
     )
     assert result.telemetry.backend == "reference"
+    assert result.telemetry.kernel_census == ("reference",)
     assert result.telemetry.fallback_reason == "unsupported_quant_type"
 
 
@@ -467,8 +469,9 @@ def test_q4_k_mixed_promoted_projection_uses_supplied_reference_decoder() -> Non
         np.ones((1, 1), dtype=np.float32),
     )
     assert np.isfinite(result.output).all()
-    assert result.telemetry.backend == "reference"
-    assert result.telemetry.fallback_reason == "unsupported_quant_type"
+    assert result.telemetry.backend == "mixed"
+    assert result.telemetry.kernel_census == ("q4_k_scalar", "reference_q5_1")
+    assert result.telemetry.fallback_reason == "mixed_reference_formats"
 
 
 @pytest.mark.skipif(shutil.which("g++") is None, reason="g++ unavailable")

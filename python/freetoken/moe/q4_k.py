@@ -503,6 +503,12 @@ class Q4KExecutor:
         self.layout = layout
         self.primitive = select_q4_k_primitive(mode)
         self.requested_mode = str(mode).lower()
+        q4_descriptors = frozenset(
+            (descriptor.layer_id, descriptor.projection)
+            for descriptor in layout.descriptors
+            if _is_q4_k_descriptor(descriptor) and _has_q4_k_geometry(descriptor)
+        )
+        self._q4_descriptors = q4_descriptors
         primitive_fallback_reason = self.primitive.fallback_reason
         capability_fallback_reason: str | None = None
         q4_compatible = True
@@ -530,11 +536,25 @@ class Q4KExecutor:
 
         self._q4_compatible = q4_compatible
         self._fallback_reason = capability_fallback_reason or primitive_fallback_reason
-        q4_descriptors = frozenset(
-            (descriptor.layer_id, descriptor.projection)
+        reference_descriptors = tuple(
+            descriptor
             for descriptor in layout.descriptors
-            if _is_q4_k_descriptor(descriptor) and _has_q4_k_geometry(descriptor)
+            if (descriptor.layer_id, descriptor.projection) not in q4_descriptors
         )
+        if (
+            q4_descriptors
+            and not q4_compatible
+            and reference_descriptors
+            and all(
+                not _has_q4_k_marker(descriptor)
+                and (
+                    descriptor.quant_type in BUILTIN_REFERENCE_DECODERS
+                    or descriptor.quant_name in BUILTIN_REFERENCE_DECODERS
+                )
+                for descriptor in reference_descriptors
+            )
+        ):
+            self._fallback_reason = "mixed_reference_formats"
         decoders = dict(reference_decoders or {})
         for quant_key, decoder in BUILTIN_REFERENCE_DECODERS.items():
             decoders.setdefault(quant_key, decoder)
@@ -557,7 +577,53 @@ class Q4KExecutor:
 
     @property
     def backend(self) -> str:
-        return self.primitive.backend if self._q4_compatible else "reference"
+        return self._backend_for(None)
+
+    def _backend_for(self, layer_id: int | None) -> str:
+        descriptors = self.layout.descriptors
+        if layer_id is not None:
+            descriptors = tuple(item for item in descriptors if item.layer_id == layer_id)
+        direct = {
+            (descriptor.layer_id, descriptor.projection)
+            for descriptor in descriptors
+            if (descriptor.layer_id, descriptor.projection) in self._q4_descriptors
+        }
+        if not direct:
+            return "reference"
+        if len(direct) == len(descriptors):
+            return self.primitive.backend
+        return "mixed"
+
+    def _kernel_census(self, layer_id: int | None) -> tuple[str, ...]:
+        """Return the selected direct/reference kernels for the executed layer."""
+        descriptors = self.layout.descriptors
+        if layer_id is not None:
+            descriptors = tuple(item for item in descriptors if item.layer_id == layer_id)
+        selected: set[str] = set()
+        for descriptor in descriptors:
+            key = (descriptor.layer_id, descriptor.projection)
+            if key in self._q4_descriptors:
+                selected.add(self.primitive.backend)
+                continue
+            source = descriptor.source
+            if isinstance(source, np.ndarray) or hasattr(source, "expert_dense"):
+                selected.add("reference")
+            elif (
+                descriptor.quant_type in BUILTIN_REFERENCE_DECODERS
+                or descriptor.quant_name in BUILTIN_REFERENCE_DECODERS
+            ):
+                selected.add(f"reference_{descriptor.quant_name.lower()}")
+            else:
+                selected.add("reference")
+        return tuple(sorted(selected or {"reference"}))
+
+    def _fallback_for(self, telemetry: CpuExecutionTelemetry) -> str | None:
+        backend = self._backend_for(telemetry.layer_id)
+        if backend == "mixed":
+            return self._fallback_reason
+        if backend == "reference" and not self._q4_descriptors:
+            return self._fallback_reason or telemetry.fallback_reason
+        return telemetry.fallback_reason if backend == "reference" else self._fallback_reason
 
     @property
     def last_telemetry(self) -> CpuExecutionTelemetry | None:
@@ -595,10 +661,9 @@ class Q4KExecutor:
     def _decorate(self, telemetry: CpuExecutionTelemetry) -> CpuExecutionTelemetry:
         return replace(
             telemetry,
-            backend=self.backend,
-            fallback_reason=self._fallback_reason
-            if self._fallback_reason is not None
-            else (None if self._q4_compatible else telemetry.fallback_reason),
+            backend=self._backend_for(telemetry.layer_id),
+            kernel_census=self._kernel_census(telemetry.layer_id),
+            fallback_reason=self._fallback_for(telemetry),
         )
 
     def execute(self, *args: Any, **kwargs: Any) -> CpuExecutionResult:
