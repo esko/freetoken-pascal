@@ -200,7 +200,7 @@ def append_original_expert_state(
     prefix: str,
 ) -> dict[str, Any]:
     """Keep runtime adapter replacement out of the model state-dict surface."""
-    attachment = model._gguf_cpu_attachment
+    attachment = getattr(model, "_gguf_cpu_attachment", None)
     if attachment is None:
         return result
     for index, (_layer, _mlp, original, _adapter) in enumerate(attachment.replacements):
