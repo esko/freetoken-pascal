@@ -131,9 +131,15 @@ interface for H0 CPU decode probes. It accepts explicit CPU router logits or a p
 CPU route, preserves full-softmax and observer semantics (Qwen's default is no selected-
 route renormalization), and returns the bundle's CPU result without creating a cache.
 The adapter requires an explicit decode phase and a single request group. It is an explicit test/reference seam only: it is not
-attached during Qwen model construction, does not transfer CUDA tensors, and does not
-enable the serving Engine. End-to-end model-layer registration remains blocked until
-`OffloadMoELayer` accepts this per-projection mapped-bank ABI without allocating GPU slots.
+attached implicitly during Qwen model construction, does not transfer CUDA tensors, and
+does not enable the serving Engine. An explicit
+`Qwen4ExpModel.attach_gguf_cpu_expert_bundle()` (and the matching
+`Qwen4ExpForCausalLM` delegate) can transactionally replace every layer's routed expert
+object for H0 construction and lifecycle tests. It validates all layer IDs, dimensions,
+expert counts, top-k, activation, router-weight placement, and TP1 before mutation;
+detach restores the exact objects and never closes the caller-owned bundle. The
+model's CPU adapter does not make its CUDA-oriented trunk, router, shared expert, or
+LM head CPU-runnable, and the Engine registration guard remains in place.
 
 ## MoE decode operation
 

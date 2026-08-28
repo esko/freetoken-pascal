@@ -66,6 +66,14 @@ existing renormalized mode explicitly. Calls require phase `decode` and group si
 It does not attach to Qwen model construction or the CUDA Engine, and it does not provide
 prefill, grouped, CUDA, TP>1 or performance evidence.
 
+The H0 model-graph bridge adds explicit
+Qwen4ExpModel.attach_gguf_cpu_expert_bundle() and matching detach methods, with a
+ForCausalLM delegate. Attachment is opt-in, validates every layer against the shared
+bundle before mutation, and preserves the exact resident expert state-dict surface.
+The bundle remains caller-owned and is never closed by the model. This construction and
+lifetime foundation does not make the CUDA-oriented trunk, router, shared expert, or
+LM head CPU-runnable, and it does not remove the Engine guard.
+
 ### Exit gate
 
 For each shipping quant and shape, the CPU expert output passes error tolerances against dequantize-plus-reference matmul. End-to-end cache-zero output remains correct.

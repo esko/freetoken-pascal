@@ -27,6 +27,13 @@ from freetoken.layers import (
 from freetoken.models.blocks import BaseLLMModel
 from freetoken.models.qwen3_5_moe.attention import Qwen3_5Attention
 from freetoken.models.qwen3_5_moe.gdn import Qwen3_5GatedDeltaNet
+from freetoken.models.qwen4_exp.gguf_attach import (
+    GGUFCpuExpertAttachment,
+    append_original_expert_state,
+    attach_gguf_cpu_expert_bundle,
+    detach_gguf_cpu_expert_bundle,
+)
+from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
 from freetoken.utils import download_hf_weight, nvtx_annotate
 
 if TYPE_CHECKING:
@@ -754,6 +761,7 @@ class Qwen4ExpDecoderLayer(BaseOP):
 
 class Qwen4ExpModel(BaseOP):
     def __init__(self, config: ModelConfig):
+        self._config = config
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.layers = OPList(
             [Qwen4ExpDecoderLayer(config, layer_id) for layer_id in range(config.num_layers)]
@@ -762,10 +770,29 @@ class Qwen4ExpModel(BaseOP):
         self.hc_count = config.qwen4_args.hc_count
         self._image_token_id = config.image_token_id
         self._debug_observer: ObservationHook | None = None
+        self._gguf_cpu_attachment: GGUFCpuExpertAttachment | None = None
 
     def set_debug_observer(self, observer: ObservationHook | None) -> None:
         """Enable semantic intermediate snapshots for an opt-in correctness probe."""
         self._debug_observer = observer
+
+    def attach_gguf_cpu_expert_bundle(self, bundle: QwenGGUFCpuExpertBundle) -> None:
+        """Attach a borrowed decode-only bundle to every Qwen routed-expert layer."""
+        attach_gguf_cpu_expert_bundle(self, bundle)
+
+    def detach_gguf_cpu_expert_bundle(self) -> None:
+        """Restore the original routed-expert objects without closing the bundle."""
+        detach_gguf_cpu_expert_bundle(self)
+
+    def state_dict(
+        self,
+        *,
+        prefix: str = "",
+        result: dict[str, torch.Tensor] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Keep runtime expert attachment orthogonal to model weight serialization."""
+        result = super().state_dict(prefix=prefix, result=result)
+        return append_original_expert_state(self, result, prefix=prefix)
 
     def load_host_weights(
         self,
@@ -839,6 +866,14 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         set_observer = getattr(self.model, "set_debug_observer", None)
         if set_observer is not None:
             set_observer(self._record_debug_event if hook is not None else None)
+
+    def attach_gguf_cpu_expert_bundle(self, bundle: QwenGGUFCpuExpertBundle) -> None:
+        """Attach a borrowed decode-only GGUF CPU bundle to the inner Qwen model."""
+        self.model.attach_gguf_cpu_expert_bundle(bundle)
+
+    def detach_gguf_cpu_expert_bundle(self) -> None:
+        """Detach the borrowed GGUF CPU bundle without closing its host mappings."""
+        self.model.detach_gguf_cpu_expert_bundle()
 
     def _record_debug_event(self, name: str, payload: dict[str, object]) -> None:
         self._debug_events.setdefault(name, []).append(payload)
