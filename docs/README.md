@@ -17,6 +17,7 @@
 - [Benchmarking](benchmarking.md)
 - [Operations](operations.md)
 - [Reproducible development environments](development-environments.md)
+- [Pascal compatibility profile](pascal-compatibility.md)
 - [Test fixtures and evidence](test-evidence.md)
 - [Release criteria](release-criteria.md)
 

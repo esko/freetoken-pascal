@@ -5,10 +5,14 @@ ops; otherwise they fall back to the pure-Triton kernels in
 ``freetoken.kernel.triton``. ``find_spec`` only checks that the package is
 importable (no import side effects), and the result is cached.
 """
+
 from __future__ import annotations
 
 import functools
 import importlib.util
+
+from freetoken.compatibility import OPTIONAL_PACKAGE_MINIMUM_CC
+from freetoken.utils.arch import is_arch_supported
 
 
 def _importable(name: str) -> bool:
@@ -40,6 +44,23 @@ def is_triton_kernels_installed() -> bool:
     ``freetoken.kernel.triton`` reimplements, so its call-site carries its own fallback.
     """
     return _importable("triton_kernels")
+
+
+def _package_usable(name: str, installed: bool) -> bool:
+    minimum = OPTIONAL_PACKAGE_MINIMUM_CC[name]
+    return installed and is_arch_supported(*minimum)
+
+
+def is_flashinfer_usable() -> bool:
+    return _package_usable("flashinfer", is_flashinfer_installed())
+
+
+def is_sgl_kernel_usable() -> bool:
+    return _package_usable("sgl_kernel", is_sgl_kernel_installed())
+
+
+def is_triton_kernels_usable() -> bool:
+    return _package_usable("triton_kernels", is_triton_kernels_installed())
 
 
 @functools.cache

@@ -44,11 +44,11 @@ def fused_topk(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
-    from freetoken.kernel.backend import is_triton_kernels_installed
+    from freetoken.kernel.backend import is_triton_kernels_usable
 
     # triton_kernels ships no Windows wheel, and unlike flashinfer/sgl_kernel it is not one
     # of the six ops the in-repo triton kernels cover -- so this router needs its own fallback.
-    if not is_triton_kernels_installed():
+    if not is_triton_kernels_usable():
         global _warned_torch_topk
         if not _warned_torch_topk:
             _warned_torch_topk = True
@@ -56,7 +56,8 @@ def fused_topk(
             # triton_kernels used to fail fast with ImportError; keep the misconfiguration
             # visible without giving up the fallback that Windows needs.
             logger.warning_rank0(
-                "fused_topk: triton_kernels is not installed -> pure-torch router fallback "
+                "fused_topk: triton_kernels is not installed or is incompatible with this GPU "
+                "-> pure-torch router fallback "
                 "(numerically equivalent, slower). Expected on Windows (no wheel); on Linux "
                 "install triton_kernels to restore the fused router."
             )
@@ -125,9 +126,22 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
-    from freetoken.kernel.backend import is_sgl_kernel_installed
+    from freetoken.kernel.backend import is_sgl_kernel_usable
 
-    if not is_sgl_kernel_installed():
+    if not is_sgl_kernel_usable():
+        from freetoken.utils.arch import is_sm70_supported
+
+        if not is_sm70_supported():
+            # The fused triton path ranks the scatter with tl.atomic_add, and triton
+            # lowers every atomic to a scoped+ordered PTX encoding that only sm_70+
+            # can assemble -- there is no sem=/scope= that avoids it. The staged
+            # implementation computes the same buffers with a counts/cumsum chain and
+            # no atomics, so pre-Volta routes there instead. Slower (5 launches vs 1),
+            # which is the right trade against not running at all.
+            from freetoken.kernel import moe_align_block_size_triton
+
+            return moe_align_block_size_triton(topk_ids, block_size, num_experts)
+
         from freetoken.kernel.triton.moe_align import (
             moe_align_block_size as triton_moe_align_block_size,
         )

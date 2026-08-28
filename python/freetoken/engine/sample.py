@@ -27,10 +27,15 @@ def sample_impl(
     top_k: torch.Tensor | int | None,
     top_p: torch.Tensor | float | None,
 ) -> torch.Tensor:
-    from freetoken.kernel.backend import is_flashinfer_installed
+    from freetoken.kernel.backend import is_flashinfer_usable
+    from freetoken.utils.arch import is_sm70_supported
 
-    if is_flashinfer_installed():
+    if is_flashinfer_usable():
         import flashinfer.sampling as sampling
+    elif not is_sm70_supported():
+        # The triton top-p/top-k threshold search accumulates through tl.atomic_*, which
+        # triton can only lower to sm_70+ encodings. Sort with torch instead.
+        import freetoken.kernel.torch_sampling as sampling
     else:
         import freetoken.kernel.triton.sampling as sampling
 
