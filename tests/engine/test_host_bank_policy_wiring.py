@@ -91,6 +91,70 @@ def test_mutated_policy_is_revalidated_before_ftw_preflight(tmp_path):
         policy.prepare_layer_bytes([4096])
 
 
+def test_pinned_policy_rejects_skip_pin_hook(monkeypatch):
+    from freetoken.moe.host_banks import HostBankPolicy
+
+    monkeypatch.setenv("FREETOKEN_SKIP_BANK_PIN", "1")
+    with pytest.raises(ValueError, match="SKIP_BANK_PIN"):
+        HostBankPolicy(strategy="pinned", max_pinned_bytes=4096).prepare_layer_bytes([4096])
+
+
+@pytest.mark.parametrize(
+    ("strategy", "message"),
+    (
+        ("pageable", "pageable.*preflight-only"),
+        ("bounded-staging", "bounded-staging.*preflight-only"),
+    ),
+)
+def test_engine_rejects_unwired_nonpinned_strategies(strategy, message):
+    from freetoken.engine.engine import Engine
+    from freetoken.moe.host_banks import HostBankPolicy
+
+    engine = Engine.__new__(Engine)
+    engine.model = SimpleNamespace()
+    config = SimpleNamespace(
+        host_bank_policy=HostBankPolicy(
+            strategy=strategy,
+            staging_bytes=4096 if strategy == "bounded-staging" else 0,
+            max_staging_bytes=4096 if strategy == "bounded-staging" else 0,
+        ),
+        model_config=SimpleNamespace(num_moe_layers=1),
+        moe_cache_auto=False,
+    )
+    with patch("freetoken.engine.engine._guard_qwen_gguf_engine_setup"):
+        with pytest.raises(NotImplementedError, match=message):
+            engine._init_offload_moe_cache(config)
+
+
+def test_engine_cleanup_drops_cache_references_before_bank_owners():
+    from freetoken.engine.engine import Engine
+
+    events = []
+    engine = Engine.__new__(Engine)
+    engine.cpu_moe_executor = object()
+    engine.moe_offload_cache = SimpleNamespace(
+        cpu_executor=object(),
+        bank_sources={"gate_up": [object()]},
+        banks=[object()],
+        bank_caches={"gate_up": object()},
+        gate_up_alpha=object(),
+        down_alpha=object(),
+        _copy_src_ptrs=object(),
+        _copy_dst_ptrs=object(),
+        _copy_feat_bytes=object(),
+    )
+
+    class Banks:
+        def close(self):
+            events.append((not engine.moe_offload_cache.bank_sources, engine.cpu_moe_executor))
+
+    engine._expert_banks = Banks()
+    engine._cleanup_host_bank_resources()
+
+    assert events == [(True, None)]
+    assert engine._expert_banks is None
+
+
 def test_ftw_policy_preflight_runs_before_loader_and_reports_page_rounded_bytes(tmp_path):
     from freetoken.moe.expert_banks import ExpertBanks, load_expert_banks
     from freetoken.moe.host_banks import HostBankPolicy

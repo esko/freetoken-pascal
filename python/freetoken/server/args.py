@@ -505,7 +505,7 @@ def parse_args(
         default=None,
         help=(
             "Opt in to host expert-bank residency policy. Omitted preserves legacy "
-            "loader behavior; explicit policies are currently supported for FTW checkpoints."
+            "loader behavior; Engine serving currently accepts pinned FTW policy only."
         ),
     )
     parser.add_argument(

@@ -65,7 +65,8 @@ The explicit `pinned` strategy registers only its selected layers after fill and
 The explicit `bounded-staging` strategy keeps all sources pageable and allocates a fixed `HostStagingRing` only within `max_staging_bytes`.
 Plans and startup accounting expose source bytes, requested and applied pinned/staging bytes, per-layer residency, and the selected NUMA intent.
 The NUMA intent is a bounded policy hook in this slice and does not claim physical placement until target-host validation.
-The CLI and `EngineConfig` construct and validate the policy directly, and unsupported custom-provider or dummy paths reject an explicit policy instead of silently dropping it.
+The CLI and `EngineConfig` construct and validate the policy directly.
+Engine serving currently accepts only explicit `pinned` FTW policy; `pageable` and `bounded-staging` remain preflight-only until their serving transfer paths are wired, and unsupported custom-provider or dummy paths reject an explicit policy instead of silently dropping it.
 
 The CPU expert boundary is model-agnostic. An immutable layout supplies layer and
 projection identities, expert count and top-k, matrix geometry, native quant type,

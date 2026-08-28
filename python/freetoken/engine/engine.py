@@ -361,7 +361,11 @@ class Engine:
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
         if is_offload_moe_backend(config.moe_backend):
-            self._init_offload_moe_cache(config)
+            try:
+                self._init_offload_moe_cache(config)
+            except BaseException:
+                self._cleanup_host_bank_resources()
+                raise
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
 
@@ -528,6 +532,19 @@ class Engine:
         # falls back to per-quant providers, and the engine wires the banks into cache.
         _guard_qwen_gguf_engine_setup(config)
         cache_factory = getattr(self.model, "make_offload_moe_cache", None)
+        if config.host_bank_policy is not None:
+            config.host_bank_policy.validate_for_config()
+            strategy = config.host_bank_policy.strategy.value
+            if strategy == "pageable":
+                raise NotImplementedError(
+                    "explicit pageable host-bank policy is preflight-only in Engine; "
+                    "use --host-bank-strategy pinned for FTW serving"
+                )
+            if strategy == "bounded-staging":
+                raise NotImplementedError(
+                    "bounded-staging host-bank policy is preflight-only until its transfer "
+                    "path is wired; use --host-bank-strategy pinned for FTW serving"
+                )
         if config.host_bank_policy is not None and cache_factory is not None:
             raise NotImplementedError(
                 "explicit host-bank policy is not supported for models with a custom "
@@ -1042,6 +1059,24 @@ class Engine:
 
     def shutdown(self) -> None:
         self.graph_runner.destroy_cuda_graphs()
+        self._cleanup_host_bank_resources()
+        torch.distributed.destroy_process_group()
+        destroy_distributed()
+
+    def _cleanup_host_bank_resources(self) -> None:
+        """Release cache/executor tensor references before closing mmap-backed banks."""
+        cache = getattr(self, "moe_offload_cache", None)
+        if cache is not None:
+            cache.cpu_executor = None
+            cache.bank_sources.clear()
+            cache.banks.clear()
+            cache.bank_caches.clear()
+            cache.gate_up_alpha = None
+            cache.down_alpha = None
+            cache._copy_src_ptrs = None
+            cache._copy_dst_ptrs = None
+            cache._copy_feat_bytes = None
+        self.cpu_moe_executor = None
         if self._expert_banks is not None:
             try:
                 self._expert_banks.close()
@@ -1049,8 +1084,6 @@ class Engine:
                 logger.error(f"Host expert-bank cleanup failed: {exc}")
             finally:
                 self._expert_banks = None
-        torch.distributed.destroy_process_group()
-        destroy_distributed()
 
 
 def _profile_gpu(index: "int | None" = None) -> Tuple[str | None, str | None]:

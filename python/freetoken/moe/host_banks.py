@@ -241,6 +241,14 @@ class HostBankPolicy:
     def validate_for_config(self) -> None:
         """Validate strategy-level requirements before a model is loaded."""
         self._validate_configuration()
+        if (
+            self.strategy is HostBankStrategy.PINNED
+            and os.environ.get("FREETOKEN_SKIP_BANK_PIN", "").strip().lower()
+            in ("1", "true", "yes", "on")
+        ):
+            raise ValueError(
+                "pinned host-bank policy cannot run with FREETOKEN_SKIP_BANK_PIN enabled"
+            )
         if self.strategy is HostBankStrategy.PINNED and self.max_pinned_bytes is None:
             raise ValueError("pinned strategy requires finite max_pinned_bytes")
         if self.strategy is HostBankStrategy.BOUNDED_STAGING:
@@ -268,7 +276,7 @@ class HostBankPolicy:
         # Policy fields remain public for compatibility, so callers may mutate
         # them after construction.  Revalidate before deriving any allocation
         # decision to keep that mutation fail-closed.
-        self._validate_configuration()
+        self.validate_for_config()
         self.accounting = HostBankAccounting(
             strategy=self.strategy,
             numa_policy=self.numa_policy,
@@ -307,7 +315,7 @@ class HostBankPolicy:
         # invalid mutated policy must not continue exposing a successful old
         # reservation as though it were still active.
         self.accounting = HostBankAccounting(strategy=HostBankStrategy.PAGEABLE)
-        self._validate_configuration()
+        self.validate_for_config()
         per_layer = list(layer_bytes)
         if not per_layer or any(
             isinstance(value, bool) or not isinstance(value, int) or value <= 0
