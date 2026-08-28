@@ -30,6 +30,7 @@ def test_pascal_profile_selects_every_required_fallback() -> None:
         "gelu_tanh": "libdevice",
         "moe_align": "staged-atomic-free",
         "sampling": "torch-sort",
+        "qsa_sparse_attention": "torch-fp32-reference",
         "attention_tiles": "shared-memory-budgeted",
     }
     assert not any(state["selected"] for state in profile["optional_packages"].values())
@@ -72,6 +73,7 @@ def test_compatibility_inventory_is_complete_and_points_to_sources() -> None:
         "moe-align-atomics",
         "sampling-atomics",
         "attention-shared-memory",
+        "qsa-dot-product",
     }
     for entry in inventory["features"]:
         assert entry["fallback"]

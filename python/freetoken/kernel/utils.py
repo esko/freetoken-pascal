@@ -4,7 +4,6 @@ import importlib
 import os
 import pathlib
 import re
-import sys
 from typing import TYPE_CHECKING, List, NamedTuple, Tuple, TypeAlias, Union
 
 if TYPE_CHECKING:
@@ -18,9 +17,7 @@ DISABLE_KERNEL_CACHE_VERSION_CHECK_ENV = "FREETOKEN_DISABLE_KERNEL_CACHE_VERSION
 DISABLE_JIT_ENV = "FREETOKEN_DISABLE_JIT"
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 DEFAULT_INCLUDE = [str(KERNEL_PATH / "include")]
-DEFAULT_CFLAGS = (
-    ["/std:c++20", "/O2"] if sys.platform == "win32" else ["-std=c++20", "-O3"]
-)
+DEFAULT_CFLAGS = ["-std=c++20", "-O3"]
 DEFAULT_CUDA_CFLAGS = ["-std=c++20", "-O3", "--expt-relaxed-constexpr"]
 DEFAULT_LDFLAGS = []
 
@@ -148,18 +145,6 @@ def _kernel_cache_dir() -> pathlib.Path | None:
     return pathlib.Path(get_jit_cache_dir()).expanduser()
 
 
-def _prebuilt_library_path(
-    cache_dir: pathlib.Path,
-    name: str,
-    *,
-    platform: str | None = None,
-) -> pathlib.Path:
-    """Return the platform-native cached kernel library path."""
-    platform = sys.platform if platform is None else platform
-    suffix = ".dll" if platform == "win32" else ".so"
-    return cache_dir / name / f"{name}{suffix}"
-
-
 def _load_prebuilt(name: str) -> Module | None:
     cache_dir = _kernel_cache_dir()
     if cache_dir is None:
@@ -170,16 +155,16 @@ def _load_prebuilt(name: str) -> Module | None:
             )
         return None
 
-    library_path = _prebuilt_library_path(cache_dir, name)
-    if library_path.exists():
+    so_path = cache_dir / name / f"{name}.so"
+    if so_path.exists():
         import tvm_ffi
 
-        return tvm_ffi.load_module(str(library_path))
+        return tvm_ffi.load_module(str(so_path))
 
     if _env_enabled(DISABLE_JIT_ENV):
         raise RuntimeError(
             "JIT compilation is disabled by FREETOKEN_DISABLE_JIT, "
-            f"but prebuilt kernel {name!r} was not found at {library_path}"
+            f"but prebuilt kernel {name!r} was not found at {so_path}"
         )
     return None
 

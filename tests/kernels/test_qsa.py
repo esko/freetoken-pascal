@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 import torch
-
 from freetoken.attention.qsa import _compact_expanded_selection, select_qsa_logical_rows
 from freetoken.kernel.triton.qsa import qsa_sparse_gqa
 
@@ -29,12 +28,26 @@ def test_qsa_selection_obeys_query_causality_for_prefill_rows():
     q = torch.randn(4, 4, 8)
     keys = torch.randn(2, 1, 8)
     positions = torch.tensor([0, 3, 4, 7])
-    selected, counts = select_qsa_logical_rows(
-        q, keys, positions, compress_ratio=4, token_budget=8
-    )
+    selected, counts = select_qsa_logical_rows(q, keys, positions, compress_ratio=4, token_budget=8)
     assert counts.tolist() == [1, 4, 5, 8]
     for row, position in enumerate(positions.tolist()):
         assert set(selected[row, : counts[row]].tolist()) == set(range(position + 1))
+
+
+def test_qsa_selection_uses_scores_beyond_dense_budget():
+    q = torch.tensor([[[1.0, 0.0], [1.0, 0.0]]])
+    keys = torch.tensor([[[0.1, 0.0]], [[3.0, 0.0]], [[1.0, 0.0]], [[2.0, 0.0]]])
+
+    selected, counts = select_qsa_logical_rows(
+        q,
+        keys,
+        torch.tensor([7]),
+        compress_ratio=2,
+        token_budget=4,
+    )
+
+    assert counts.tolist() == [4]
+    assert selected[0, :4].tolist() == [2, 3, 6, 7]
 
 
 def test_qsa_sparse_gqa_matches_explicit_attention_cpu():
@@ -42,9 +55,7 @@ def test_qsa_sparse_gqa_matches_explicit_attention_cpu():
     q = torch.randn(3, 4, 8, dtype=torch.bfloat16)
     k = torch.randn(12, 2, 8, dtype=torch.bfloat16)
     v = torch.randn(12, 2, 8, dtype=torch.bfloat16)
-    rows = torch.tensor(
-        [[0, 2, 4, -1], [1, 3, 5, 7], [8, 9, -1, -1]], dtype=torch.int32
-    )
+    rows = torch.tensor([[0, 2, 4, -1], [1, 3, 5, 7], [8, 9, -1, -1]], dtype=torch.int32)
     counts = torch.tensor([3, 4, 2], dtype=torch.int32)
     actual = qsa_sparse_gqa(q, k, v, rows, counts, 8**-0.5)
 
@@ -53,13 +64,14 @@ def test_qsa_sparse_gqa_matches_explicit_attention_cpu():
         chosen = rows[row, : counts[row]].long()
         for kv_head in range(2):
             heads = slice(kv_head * 2, (kv_head + 1) * 2)
-            score = torch.einsum(
-                "hd,td->ht", q[row, heads].float(), k[chosen, kv_head].float()
-            ) * 8**-0.5
+            score = (
+                torch.einsum("hd,td->ht", q[row, heads].float(), k[chosen, kv_head].float())
+                * 8**-0.5
+            )
             expected[row, heads] = torch.einsum(
                 "ht,td->hd",
-                torch.softmax(score, dim=-1).to(v.dtype),
-                v[chosen, kv_head],
+                torch.softmax(score, dim=-1),
+                v[chosen, kv_head].float(),
             ).to(expected.dtype)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
@@ -73,9 +85,7 @@ def test_qsa_sparse_gqa_matches_reference_on_cuda():
     rows = torch.randint(0, 4096, (3, 131), device="cuda", dtype=torch.int32)
     counts = torch.tensor([131, 97, 41], device="cuda", dtype=torch.int32)
     actual = qsa_sparse_gqa(q, k, v, rows, counts, 256**-0.5)
-    reference = qsa_sparse_gqa(
-        q.cpu(), k.cpu(), v.cpu(), rows.cpu(), counts.cpu(), 256**-0.5
-    )
+    reference = qsa_sparse_gqa(q.cpu(), k.cpu(), v.cpu(), rows.cpu(), counts.cpu(), 256**-0.5)
     torch.testing.assert_close(actual.cpu(), reference, rtol=0.03, atol=0.01)
 
 

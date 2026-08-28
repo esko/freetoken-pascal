@@ -4,22 +4,6 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class Qwen4VisionConfig:
-    depth: int
-    hidden_size: int
-    intermediate_size: int
-    num_heads: int
-    num_position_embeddings: int
-    out_hidden_size: int
-    patch_size: int
-    spatial_merge_size: int
-    temporal_patch_size: int
-    in_channels: int
-    hidden_act: str
-    deepstack_visual_indexes: tuple[int, ...]
-
-
-@dataclass(frozen=True)
 class Qwen4ExpArgs:
     hc_count: int
     hc_lowrank: int
@@ -37,8 +21,6 @@ class Qwen4ExpArgs:
     indexer_budget: int
     indexer_compress_ratio: int
     output_gate_type: str
-    mrope_section: tuple[int, int, int]
-    mrope_interleaved: bool
 
 
-__all__ = ["Qwen4ExpArgs", "Qwen4VisionConfig"]
+__all__ = ["Qwen4ExpArgs"]

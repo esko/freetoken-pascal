@@ -18,6 +18,7 @@
 - [Operations](operations.md)
 - [Reproducible development environments](development-environments.md)
 - [Pascal compatibility profile](pascal-compatibility.md)
+- [Qwen3.8 Flash Next text architecture](qwen38-text.md)
 - [Test fixtures and evidence](test-evidence.md)
 - [Release criteria](release-criteria.md)
 

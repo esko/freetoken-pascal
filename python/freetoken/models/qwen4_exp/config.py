@@ -10,7 +10,7 @@ from freetoken.models.config import (
     detect_expert_quant,
 )
 
-from .args import Qwen4ExpArgs, Qwen4VisionConfig
+from .args import Qwen4ExpArgs
 
 
 def parse_config(hf_config: Any) -> ModelConfig:
@@ -84,35 +84,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
         indexer_budget=indexer_budget,
         indexer_compress_ratio=int(text.indexer_compress_ratio),
         output_gate_type=str(text.output_gate_type or text.hidden_act),
-        mrope_section=tuple(int(value) for value in rope["mrope_section"]),
-        mrope_interleaved=bool(rope.get("mrope_interleaved", False)),
     )
-    if not qwen4_args.mrope_interleaved:
-        raise ValueError("Qwen4-Exp requires interleaved MRoPE")
-    if sum(qwen4_args.mrope_section) * 2 != rotary_dim:
-        raise ValueError(
-            "Qwen4-Exp mrope_section must cover the rotary dimension: "
-            f"{qwen4_args.mrope_section} vs {rotary_dim}"
-        )
-    raw_vision = getattr(hf_config, "vision_config", None)
-    vision_config = None
-    if raw_vision is not None:
-        vision_config = Qwen4VisionConfig(
-            depth=int(raw_vision.depth),
-            hidden_size=int(raw_vision.hidden_size),
-            intermediate_size=int(raw_vision.intermediate_size),
-            num_heads=int(raw_vision.num_heads),
-            num_position_embeddings=int(raw_vision.num_position_embeddings),
-            out_hidden_size=int(raw_vision.out_hidden_size),
-            patch_size=int(raw_vision.patch_size),
-            spatial_merge_size=int(raw_vision.spatial_merge_size),
-            temporal_patch_size=int(raw_vision.temporal_patch_size),
-            in_channels=int(raw_vision.in_channels),
-            hidden_act=str(raw_vision.hidden_act),
-            deepstack_visual_indexes=tuple(
-                int(index) for index in raw_vision.deepstack_visual_indexes
-            ),
-        )
 
     quant = getattr(hf_config, "quantization_config", None)
     get_quant = (
@@ -127,14 +99,13 @@ def parse_config(hf_config: Any) -> ModelConfig:
             tuple(int(value) for value in raw_block_size) if raw_block_size is not None else None
         )
         if block_size != (128, 128):
-            raise ValueError(
-                "Qwen4-Exp block-FP8 checkpoints require a 128x128 weight block size"
-            )
+            raise ValueError("Qwen4-Exp block-FP8 checkpoints require a 128x128 weight block size")
         expert_quant = "fp8_block"
     elif detected_quant == "nvfp4":
         # RadixArk's ModelOpt checkpoint quantizes only the routed experts. The
-        # attention, GDN, mHC, shared experts, router, embeddings, lm_head, and
-        # vision tensors remain BF16; PLE remains its source FP8 format.
+        # attention, GDN, mHC, shared experts, router, embeddings, and lm_head
+        # remain BF16; PLE remains its source FP8 format. Vision is not loaded
+        # by the downstream text-only runtime.
         block_size = None
         expert_quant = "nvfp4"
     else:
@@ -173,9 +144,9 @@ def parse_config(hf_config: Any) -> ModelConfig:
         dense_quant="none",
         lm_head_quant="none",
         use_qk_norm=True,
-        # Qwen3.8-Flash-Next is a VL checkpoint. Vision is part of this model,
-        # not an optional text-only add-on.
-        vision_config=vision_config,
+        # The released checkpoint also carries a vision tower. FreeToken-Pascal v1
+        # deliberately loads only the language backbone and rejects image inputs.
+        vision_config=None,
         image_token_id=getattr(hf_config, "image_token_id", None),
         attention_groups=groups,
         qwen4_args=qwen4_args,

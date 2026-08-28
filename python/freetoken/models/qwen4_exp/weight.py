@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 import safetensors
 import torch
-from freetoken.distributed import get_tp_info
-from freetoken.models.loader import iter_weight_files
 from tqdm import tqdm
 
+from freetoken.distributed import get_tp_info
+from freetoken.models.loader import iter_weight_files
 from freetoken.models.qwen3_5_moe.weight import (
     iter_weights_parallel,
     load_nvfp4_expert_sources,
     load_nvfp4_expert_sources_parallel,
     setup_offload_expert_banks,
 )
-
 
 _FUSIONS = {
     ".self_attn.qkv_proj.weight": (
@@ -39,9 +38,9 @@ def _rename(raw_name: str) -> str | None:
     if raw_name.startswith("mtp."):
         return None
     if raw_name.startswith("model.visual."):
-        return "visual." + raw_name[len("model.visual.") :]
+        return None
     if raw_name.startswith("visual."):
-        return raw_name
+        return None
     if ".ple.ple_embedding.ngram_embedding." in raw_name:
         return None
     if raw_name.startswith("model.language_model."):

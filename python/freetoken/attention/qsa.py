@@ -8,12 +8,13 @@ therefore uses the model's original K/V values without approximation.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 import torch
+
 from freetoken.core import Batch, get_global_ctx
+from freetoken.utils import init_logger
 
 from .base import AttentionSpec, BaseAttnBackend, BaseAttnMetadata
 
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from freetoken.models import ModelConfig
 
 _SCORE_WORKSPACE_BYTES = 128 << 20
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -110,12 +112,12 @@ def select_qsa_logical_rows(
     Index scores are ``sum_h(relu(q_h dot k)) / sqrt(dim)``.  Row tiling
     bounds the FP32 score workspace without changing the per-row top-k result.
     """
+    from freetoken.utils.arch import is_sm70_supported
+
     rows, heads, dim = index_q.shape
     blocks = compressed_keys.shape[0]
     block_budget = token_budget // compress_ratio
-    output_blocks = torch.full(
-        (rows, block_budget), -1, dtype=torch.int32, device=index_q.device
-    )
+    output_blocks = torch.full((rows, block_budget), -1, dtype=torch.int32, device=index_q.device)
     if rows == 0:
         return _compact_expanded_selection(
             output_blocks,
@@ -132,7 +134,11 @@ def select_qsa_logical_rows(
         for start in range(0, rows, row_chunk):
             stop = min(start + row_chunk, rows)
             queries = index_q[start:stop].reshape((stop - start) * heads, dim)
-            if queries.is_cuda and queries.dtype in (torch.bfloat16, torch.float16):
+            if (
+                queries.is_cuda
+                and queries.dtype in (torch.bfloat16, torch.float16)
+                and is_sm70_supported()
+            ):
                 # Tensor-core BF16/FP16 inputs with FP32 accumulation/output.
                 # This avoids materializing a full FP32 copy of the long index
                 # cache on every sparse layer and decode step.
@@ -151,9 +157,7 @@ def select_qsa_logical_rows(
             width = min(block_budget, blocks)
             if width:
                 scores, picks = torch.topk(logits, width, dim=1)
-                picks = torch.where(
-                    torch.isfinite(scores), picks, torch.full_like(picks, -1)
-                )
+                picks = torch.where(torch.isfinite(scores), picks, torch.full_like(picks, -1))
                 output_blocks[start:stop, :width] = picks.to(torch.int32)
     return _compact_expanded_selection(
         output_blocks,
@@ -177,6 +181,10 @@ class QSAAttnBackend(BaseAttnBackend):
         self.token_budget = int(self.args.indexer_budget)
         if self.token_budget % self.compress_ratio:
             raise ValueError("QSA token budget must divide by its compression ratio")
+        from freetoken.utils.arch import is_sm70_supported
+
+        qsa_path = "triton" if is_sm70_supported() else "torch-fp32-reference"
+        logger.info_rank0(f"QSA sparse attention path: {qsa_path}")
 
     def prepare_metadata(self, batch: Batch) -> None:
         reqs = batch.padded_reqs if hasattr(batch, "padded_reqs") else batch.reqs
@@ -185,22 +193,26 @@ class QSAAttnBackend(BaseAttnBackend):
         for length in lengths:
             cu_host.append(cu_host[-1] + length)
         cu = torch.tensor(cu_host, dtype=torch.int32, device=self.device)
-        logical = torch.cat(
-            [
-                torch.arange(req.cached_len, req.device_len, device=self.device)
-                for req in reqs
-                if req.extend_len
-            ],
-            dim=0,
-        ) if sum(lengths) else torch.empty(0, dtype=torch.int64, device=self.device)
+        logical = (
+            torch.cat(
+                [
+                    torch.arange(req.cached_len, req.device_len, device=self.device)
+                    for req in reqs
+                    if req.extend_len
+                ],
+                dim=0,
+            )
+            if sum(lengths)
+            else torch.empty(0, dtype=torch.int64, device=self.device)
+        )
         page_table = get_global_ctx().page_table
         compressed_rows: list[torch.Tensor] = []
         for req in reqs:
             complete_blocks = int(req.device_len) // self.compress_ratio
             if complete_blocks:
-                starts = torch.arange(
-                    complete_blocks, device=self.device, dtype=torch.long
-                ).mul_(self.compress_ratio)
+                starts = torch.arange(complete_blocks, device=self.device, dtype=torch.long).mul_(
+                    self.compress_ratio
+                )
                 full_rows = page_table[int(req.table_idx)].index_select(0, starts)
                 rows = torch.div(
                     full_rows.to(torch.int64),
@@ -329,9 +341,9 @@ class QSAAttnBackend(BaseAttnBackend):
                 token_budget=self.token_budget,
             )
             safe = logical.clamp_min(0).long()
-            physical = page_table[int(req.table_idx)].index_select(
-                0, safe.reshape(-1)
-            ).reshape_as(logical)
+            physical = (
+                page_table[int(req.table_idx)].index_select(0, safe.reshape(-1)).reshape_as(logical)
+            )
             physical = torch.where(logical >= 0, physical, torch.full_like(physical, -1))
             selections.append(physical.to(torch.int32))
             counts.append(live)
@@ -374,7 +386,7 @@ class QSAAttnBackend(BaseAttnBackend):
             q.shape[-1] ** -0.5,
         )
 
-    def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
+    def init_capture_graph(self, max_seq_len: int, bs_list: list[int]) -> None:
         # Qwen4-Exp disables CUDA graphs because PLE owns per-request recurrent state.
         return None
 

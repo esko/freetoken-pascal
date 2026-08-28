@@ -1181,55 +1181,12 @@ def _cpu_moe_executor_viable(model_config) -> bool:
 def _pin_budget_bytes() -> int | None:
     """Bytes this process can safely cudaHostRegister, or None when the platform does not cap pinning (plain Linux).
 
-    Native Windows and WSL both use WDDM-backed CUDA, which caps registered host
-    memory near half of physical RAM and shares that pool across processes. Keep
-    20% headroom by budgeting 40%. ``FREETOKEN_PIN_BUDGET_GB`` overrides this on
-    every platform."""
+    WSL's WDDM-backed CUDA caps pinning near half of RAM, shared across processes -- budget 40%. FREETOKEN_PIN_BUDGET_GB overrides anywhere."""
     if env := os.environ.get("FREETOKEN_PIN_BUDGET_GB"):
         return int(float(env) * 2**30)
-
-    if os.name == "nt":
-        total = _windows_total_physical_memory()
-        return int(total * 0.4) if total is not None else None
-
-    if not hasattr(os, "uname") or "microsoft" not in os.uname().release.lower():
+    if not hasattr(os, "uname") or "microsoft" not in os.uname().release.lower():  # WSL kernel tag
         return None
     return int(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") * 0.4)
-
-
-def _windows_total_physical_memory() -> int | None:
-    """Return native-Windows physical RAM through ``GlobalMemoryStatusEx``.
-
-    This stays stdlib-only because the server must make the pin-budget decision
-    before optional monitoring packages are available. ``None`` is a defensive
-    fallback for an unexpected Win32 API failure; callers then retain the old
-    explicit-override behavior through ``FREETOKEN_PIN_BUDGET_GB``.
-    """
-    if os.name != "nt":
-        return None
-
-    import ctypes
-
-    class _MemoryStatusEx(ctypes.Structure):
-        _fields_ = [
-            ("dwLength", ctypes.c_ulong),
-            ("dwMemoryLoad", ctypes.c_ulong),
-            ("ullTotalPhys", ctypes.c_ulonglong),
-            ("ullAvailPhys", ctypes.c_ulonglong),
-            ("ullTotalPageFile", ctypes.c_ulonglong),
-            ("ullAvailPageFile", ctypes.c_ulonglong),
-            ("ullTotalVirtual", ctypes.c_ulonglong),
-            ("ullAvailVirtual", ctypes.c_ulonglong),
-            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-        ]
-
-    status = _MemoryStatusEx()
-    status.dwLength = ctypes.sizeof(_MemoryStatusEx)
-    try:
-        ok = ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-    except (AttributeError, OSError):
-        return None
-    return int(status.ullTotalPhys) if ok else None
 
 
 def _auto_cpu_layers(config: EngineConfig, num_moe_layers: int) -> frozenset[int]:

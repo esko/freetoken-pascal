@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import pytest
 import torch
-
 from freetoken.distributed.info import DistributedInfo
 from freetoken.kvcache.qsa_pool import QSAKVCache
 
@@ -55,3 +55,11 @@ def test_qsa_pending_ring_validates_logical_positions(monkeypatch):
     pool.store_pending(5, 2, positions, keys, rope)
     assert torch.equal(pool.pending_group(5, 2, positions), keys)
     assert torch.equal(pool.pending_rope_group(5, 2, positions), rope)
+
+
+def test_qsa_pending_ring_rejects_missing_state(monkeypatch):
+    pool = _pool(monkeypatch)
+    pool.ensure_pending_capacity(1)
+
+    with pytest.raises(RuntimeError, match="pending-key state is missing"):
+        pool.pending_group(1, 0, torch.tensor([3]))

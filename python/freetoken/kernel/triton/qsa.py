@@ -104,14 +104,32 @@ def compact_qsa_blocks(
 
 @triton.jit
 def _qsa_sparse_gqa_kernel(
-    q_ptr, k_ptr, v_ptr, rows_ptr, counts_ptr, out_ptr,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    rows_ptr,
+    counts_ptr,
+    out_ptr,
     scale,
-    H, KVH, D, TOPK, GQA,
-    stride_qn, stride_qh, stride_qd,
-    stride_kr, stride_kh, stride_kd,
-    stride_vr, stride_vh, stride_vd,
-    stride_rn, stride_rt,
-    stride_on, stride_oh, stride_od,
+    H,
+    KVH,
+    D,
+    TOPK,
+    GQA,
+    stride_qn,
+    stride_qh,
+    stride_qd,
+    stride_kr,
+    stride_kh,
+    stride_kd,
+    stride_vr,
+    stride_vh,
+    stride_vd,
+    stride_rn,
+    stride_rt,
+    stride_on,
+    stride_oh,
+    stride_od,
     BLOCK_D: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_T: tl.constexpr,
@@ -139,16 +157,11 @@ def _qsa_sparse_gqa_kernel(
     for tile in range(0, tl.cdiv(active, BLOCK_T)):
         token_offsets = tile * BLOCK_T + tl.arange(0, BLOCK_T)
         token_mask = token_offsets < active
-        physical = tl.load(
-            row_base + token_offsets * stride_rt, mask=token_mask, other=-1
-        )
+        physical = tl.load(row_base + token_offsets * stride_rt, mask=token_mask, other=-1)
         valid = token_mask & (physical >= 0)
         physical = tl.maximum(physical, 0)
         k = tl.load(
-            k_ptr
-            + physical[None, :] * stride_kr
-            + kv_head * stride_kh
-            + dims[:, None] * stride_kd,
+            k_ptr + physical[None, :] * stride_kr + kv_head * stride_kh + dims[:, None] * stride_kd,
             mask=dim_mask[:, None] & valid[None, :],
             other=0.0,
         )
@@ -160,10 +173,7 @@ def _qsa_sparse_gqa_kernel(
         running_sum = running_sum * alpha + tl.sum(probs, axis=1)
         acc *= alpha[:, None]
         v = tl.load(
-            v_ptr
-            + physical[:, None] * stride_vr
-            + kv_head * stride_vh
-            + dims[None, :] * stride_vd,
+            v_ptr + physical[:, None] * stride_vr + kv_head * stride_vh + dims[None, :] * stride_vd,
             mask=valid[:, None] & dim_mask[None, :],
             other=0.0,
         )
@@ -198,13 +208,14 @@ def _torch_qsa_sparse_gqa(
         values = v_rows.index_select(0, indices)
         for kv_head in range(k_rows.shape[1]):
             heads = slice(kv_head * gqa, (kv_head + 1) * gqa)
-            scores = torch.einsum(
-                "hd,td->ht", q[row, heads].float(), keys[:, kv_head].float()
-            ) * sm_scale
-            probs = torch.softmax(scores, dim=-1).to(values.dtype)
-            output[row, heads] = torch.einsum(
-                "ht,td->hd", probs, values[:, kv_head]
-            ).to(output.dtype)
+            scores = (
+                torch.einsum("hd,td->ht", q[row, heads].float(), keys[:, kv_head].float())
+                * sm_scale
+            )
+            probs = torch.softmax(scores, dim=-1)
+            output[row, heads] = torch.einsum("ht,td->hd", probs, values[:, kv_head].float()).to(
+                output.dtype
+            )
     return output
 
 
@@ -229,7 +240,9 @@ def qsa_sparse_gqa(
         raise ValueError("QSA requires matching head dimensions and integral GQA groups")
     if selected_rows.shape[0] != q.shape[0] or counts.numel() != q.shape[0]:
         raise ValueError("QSA selection rows must match query rows")
-    if not q.is_cuda:
+    from freetoken.utils.arch import is_sm70_supported
+
+    if not q.is_cuda or not is_sm70_supported():
         return _torch_qsa_sparse_gqa(q, k_rows, v_rows, selected_rows, counts, sm_scale)
 
     q = q.contiguous()
@@ -244,14 +257,32 @@ def qsa_sparse_gqa(
     if gqa > BLOCK_H:
         raise ValueError(f"QSA Triton kernel supports a GQA group up to {BLOCK_H}, got {gqa}")
     _qsa_sparse_gqa_kernel[(n, kv_heads)](
-        q, k_rows, v_rows, selected_rows, counts, output,
+        q,
+        k_rows,
+        v_rows,
+        selected_rows,
+        counts,
+        output,
         float(sm_scale),
-        heads, kv_heads, dim, selected_rows.shape[1], gqa,
-        q.stride(0), q.stride(1), q.stride(2),
-        k_rows.stride(0), k_rows.stride(1), k_rows.stride(2),
-        v_rows.stride(0), v_rows.stride(1), v_rows.stride(2),
-        selected_rows.stride(0), selected_rows.stride(1),
-        output.stride(0), output.stride(1), output.stride(2),
+        heads,
+        kv_heads,
+        dim,
+        selected_rows.shape[1],
+        gqa,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k_rows.stride(0),
+        k_rows.stride(1),
+        k_rows.stride(2),
+        v_rows.stride(0),
+        v_rows.stride(1),
+        v_rows.stride(2),
+        selected_rows.stride(0),
+        selected_rows.stride(1),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
         BLOCK_D=triton.next_power_of_2(dim),
         BLOCK_H=BLOCK_H,
         BLOCK_T=BLOCK_T,

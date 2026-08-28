@@ -12,5 +12,5 @@
     "model.norm.weight",
     "lm_head.weight"
   ],
-  "note": "Synthetic shape contract only; Issue #11 owns generation of executable tiny weights."
+  "note": "Synthetic shape and deterministic reference contract; real runtime generation remains H2-gated."
 }

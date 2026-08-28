@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import safetensors
 import torch
 import torch.nn.functional as F
+
 from freetoken.core import get_global_ctx
 from freetoken.layers import (
     BaseOP,
@@ -21,8 +23,6 @@ from freetoken.layers import (
     VocabParallelEmbedding,
     make_moe_layer,
     silu_and_mul,
-    StateLessOP,
-    get_rope,
 )
 from freetoken.models.blocks import BaseLLMModel
 from freetoken.models.qwen3_5_moe.attention import Qwen3_5Attention
@@ -33,108 +33,6 @@ if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
 
     from .args import Qwen4ExpArgs
-
-
-class _Qwen4MRoPE(StateLessOP):
-    """Partial, interleaved temporal/height/width RoPE for Qwen4-Exp."""
-
-    def __init__(self, config: ModelConfig):
-        rotary = config.rotary_config
-        self._base = get_rope(
-            head_dim=rotary.head_dim,
-            rotary_dim=rotary.rotary_dim,
-            max_position=rotary.max_position,
-            base=rotary.base,
-        )
-        self.mrope_section = tuple(config.qwen4_args.mrope_section)
-
-    @property
-    def head_size(self) -> int:
-        return self._base.head_size
-
-    @property
-    def rotary_dim(self) -> int:
-        return self._base.rotary_dim
-
-    @property
-    def is_neox(self) -> bool:
-        return self._base.is_neox
-
-    @property
-    def _cos_sin_cache(self) -> torch.Tensor:
-        return self._base._cos_sin_cache
-
-    @_cos_sin_cache.setter
-    def _cos_sin_cache(self, value: torch.Tensor) -> None:
-        self._base._cos_sin_cache = value
-
-    def apply_inplace(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        head_size: int | None = None,
-    ) -> None:
-        head_size = self.head_size if head_size is None else int(head_size)
-        if positions.ndim == 1:
-            self._base.apply_rope_with_cos_sin_cache_inplace(
-                positions=positions,
-                query=query,
-                key=key,
-                head_size=head_size,
-                cos_sin_cache=self._cos_sin_cache,
-                is_neox=self.is_neox,
-            )
-            return
-        if query.is_cuda:
-            from freetoken.kernel.triton.rope import (
-                apply_mrope_with_cos_sin_cache_inplace,
-            )
-
-            apply_mrope_with_cos_sin_cache_inplace(
-                positions=positions,
-                query=query,
-                key=key,
-                head_size=head_size,
-                cos_sin_cache=self._cos_sin_cache,
-                mrope_section=self.mrope_section,
-                is_neox=self.is_neox,
-            )
-            return
-
-        # CPU reference path for exact unit tests and configuration checks.
-        if positions.ndim != 2 or positions.shape != (3, query.shape[0]):
-            raise ValueError(
-                f"MRoPE positions must have shape (3, {query.shape[0]}), got "
-                f"{tuple(positions.shape)}"
-            )
-        half = self.rotary_dim // 2
-        pair = torch.arange(half, device=positions.device)
-        axis = torch.zeros(half, dtype=torch.long, device=positions.device)
-        axis[(pair % 3 == 1) & (pair < self.mrope_section[1] * 3)] = 1
-        axis[(pair % 3 == 2) & (pair < self.mrope_section[2] * 3)] = 2
-        selected = positions.long().transpose(0, 1)[:, axis]
-        dim = pair.view(1, -1).expand_as(selected)
-        cos = self._cos_sin_cache[:, :half][selected, dim]
-        sin = self._cos_sin_cache[:, half:][selected, dim]
-        for tensor in (query, key):
-            heads = tensor.shape[1] // head_size
-            view = tensor.view(tensor.shape[0], heads, head_size)
-            first = view[..., :half].float().clone()
-            second = view[..., half : self.rotary_dim].float().clone()
-            view[..., :half].copy_((first * cos[:, None] - second * sin[:, None]).to(view.dtype))
-            view[..., half : self.rotary_dim].copy_(
-                (second * cos[:, None] + first * sin[:, None]).to(view.dtype)
-            )
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        self.apply_inplace(positions, query, key)
-        return query, key
 
 
 class _GroupedRMSNorm(BaseOP):
@@ -262,9 +160,7 @@ def build_ngram_ids(
     offsets: torch.Tensor,
 ) -> torch.Tensor:
     tokens = tokens.to(dtype=torch.long, device="cpu")
-    shifted = [
-        _shift_right_ignore_eos(tokens, shift, eos_token_id) for shift in range(ngram_size)
-    ]
+    shifted = [_shift_right_ignore_eos(tokens, shift, eos_token_id) for shift in range(ngram_size)]
     blocks = []
     for ngram in range(2, ngram_size + 1):
         start = (ngram - 2) * heads_per_ngram
@@ -332,10 +228,7 @@ class _HostNGramEmbedding(BaseOP):
         index_path = os.path.join(folder, "model.safetensors.index.json")
         with open(index_path) as index_file:
             weight_map = json.load(index_file)["weight_map"]
-        prefix = (
-            f"model.language_model.layers.{self.layer_id}.ple.ple_embedding."
-            "ngram_embedding"
-        )
+        prefix = f"model.language_model.layers.{self.layer_id}.ple.ple_embedding.ngram_embedding"
         shard_count = len([key for key in weight_map if key.startswith(prefix + ".shard_")])
         if shard_count != self.split_ngram_parts:
             raise RuntimeError(
@@ -357,7 +250,9 @@ class _HostNGramEmbedding(BaseOP):
                 handles[filename] = handle
             shard = handle.get_tensor(key)
             if shard.dtype != torch.float8_e4m3fn or shard.shape[1] != self.head_dim:
-                raise RuntimeError(f"Unexpected PLE shard {key}: {shard.dtype} {tuple(shard.shape)}")
+                raise RuntimeError(
+                    f"Unexpected PLE shard {key}: {shard.dtype} {tuple(shard.shape)}"
+                )
             shards.append(shard.view(torch.uint8))
         scale_key = prefix + ".weight_scale"
         scale_handle = handles.get(weight_map[scale_key])
@@ -397,9 +292,7 @@ class _HostNGramEmbedding(BaseOP):
             if req.input_ids.numel() < req.device_len:
                 if forwarded_host is None:
                     forwarded_host = batch.input_ids.detach().to(device="cpu")
-                forwarded = forwarded_host[
-                    forwarded_offset : forwarded_offset + extend_len
-                ]
+                forwarded = forwarded_host[forwarded_offset : forwarded_offset + extend_len]
             tokens = _ple_request_tokens(req, forwarded)
             all_ids = build_ngram_ids(
                 tokens,
@@ -468,6 +361,10 @@ class _PLELayer(BaseOP):
     def load_host_weights(self, model_path: str, *, dummy: bool = False) -> None:
         self.ple_embedding.load_host_weights(model_path, dummy=dummy)
 
+    def debug_state(self) -> dict[int, torch.Tensor]:
+        """Return detached PLE convolution state for opt-in correctness probes."""
+        return {slot: state.detach().clone() for slot, state in self._conv_states.items()}
+
     def _short_conv(self, hidden: torch.Tensor) -> torch.Tensor:
         batch = get_global_ctx().batch
         reqs = batch.padded_reqs if batch.is_decode else batch.reqs
@@ -482,7 +379,8 @@ class _PLELayer(BaseOP):
                 state = current.new_zeros(1, current.shape[1], self.state_len)
             elif state is None:
                 raise RuntimeError(
-                    "Qwen4-Exp PLE state cannot resume a radix prefix; serve with --cache-type naive"
+                    "Qwen4-Exp PLE state cannot resume a radix prefix; "
+                    "serve with --cache-type naive"
                 )
             combined = torch.cat([state, current], dim=-1)
             convolved = F.conv1d(
@@ -539,14 +437,14 @@ class _QSAIndexer(BaseOP):
         # The shared RoPE object was built for 256-wide main heads.  Call its
         # kernel with the 128-wide QSA head size instead of using forward(),
         # which would interpret the fused index-query row with the wrong stride.
-        dummy_key = torch.zeros(
-            shape[0], self.head_dim, dtype=tensor.dtype, device=tensor.device
-        )
-        self.rotary.apply_inplace(
+        dummy_key = torch.zeros(shape[0], self.head_dim, dtype=tensor.dtype, device=tensor.device)
+        self.rotary.apply_rope_with_cos_sin_cache_inplace(
             positions=positions,
             query=flat,
             key=dummy_key,
             head_size=self.head_dim,
+            cos_sin_cache=self.rotary._cos_sin_cache,
+            is_neox=self.rotary.is_neox,
         )
         return flat.view(shape)
 
@@ -569,7 +467,6 @@ class _QSAIndexer(BaseOP):
 class Qwen4ExpAttention(Qwen3_5Attention):
     def __init__(self, config: ModelConfig, layer_id: int):
         super().__init__(config, layer_id)
-        self.rotary = _Qwen4MRoPE(config)
         # Qwen4 stores centered q/k norm weights (effective scale is 1 + w).
         self.q_norm = GemmaPlusOneRMSNorm(config.head_dim, config.rms_norm_eps)
         self.k_norm = GemmaPlusOneRMSNorm(config.head_dim, config.rms_norm_eps)
@@ -578,9 +475,7 @@ class Qwen4ExpAttention(Qwen3_5Attention):
     @nvtx_annotate("QSA")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         ctx = get_global_ctx()
-        rope_positions = ctx.batch.rope_positions
-        if rope_positions is None:
-            rope_positions = ctx.batch.positions
+        rope_positions = ctx.batch.positions
         q, k, v, gate = self._project(x, rope_positions)
         index_q, index_k = self.indexer.project(x, rope_positions)
         output = ctx.attn_backend.qsa_forward(
@@ -625,9 +520,7 @@ class Qwen4ExpDecoderLayer(BaseOP):
             self.self_attn = Qwen4ExpAttention(dense_config, layer_id)
         self.mlp = _SparseMoE(config, layer_id)
         self.ple = (
-            _PLELayer(config, layer_id)
-            if layer_id in config.qwen4_args.ple_layer_ids
-            else None
+            _PLELayer(config, layer_id) if layer_id in config.qwen4_args.ple_layer_ids else None
         )
         self.attn_hyper_connection = _GatedResidual(config)
         self.mlp_hyper_connection = _GatedResidual(config)
@@ -638,9 +531,7 @@ class Qwen4ExpDecoderLayer(BaseOP):
             hidden = hidden + self.ple.forward(hidden)
         mixed, residual, weights = self.attn_hyper_connection.forward(hidden)
         mixed = (
-            self.linear_attn.forward(mixed)
-            if self._is_linear
-            else self.self_attn.forward(mixed)
+            self.linear_attn.forward(mixed) if self._is_linear else self.self_attn.forward(mixed)
         )
         hidden = residual + (mixed.unsqueeze(1) * weights.unsqueeze(-1)).flatten(1)
         mixed, residual, weights = self.mlp_hyper_connection.forward(hidden)
@@ -663,18 +554,22 @@ class Qwen4ExpModel(BaseOP):
             if layer.ple is not None:
                 layer.ple.load_host_weights(model_path, dummy=dummy)
 
+    def debug_state(self) -> dict[int, dict[int, torch.Tensor]]:
+        return {
+            layer._layer_id: layer.ple.debug_state()
+            for layer in self.layers.op_list
+            if layer.ple is not None
+        }
+
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         hidden = self.embed_tokens.forward(input_ids)
-        mm_embeds = getattr(get_global_ctx().batch, "mm_embeds", None)
-        if mm_embeds is not None and self._image_token_id is not None:
-            mask = input_ids == self._image_token_id
-            slots = int(mask.sum().item())
-            if slots != mm_embeds.shape[0]:
-                raise ValueError(
-                    f"image-token slots ({slots}) do not match vision features "
-                    f"({mm_embeds.shape[0]})"
-                )
-            hidden = hidden.masked_scatter(mask.unsqueeze(-1), mm_embeds.to(hidden.dtype))
+        batch = get_global_ctx().batch
+        if getattr(batch, "mm_embeds", None) is not None or (
+            self._image_token_id is not None and bool((input_ids == self._image_token_id).any())
+        ):
+            raise RuntimeError(
+                "Qwen3.8 vision inputs are outside FreeToken-Pascal v1; use text-only prompts"
+            )
         hidden = hidden.repeat(1, self.hc_count)
         for layer in self.layers.op_list:
             hidden = layer.forward(hidden)
@@ -690,26 +585,36 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
             tie_word_embeddings=config.tie_word_embeddings,
             tied_embedding=self.model.embed_tokens if config.tie_word_embeddings else None,
         )
-        if config.is_multimodal:
-            from .vision import Qwen4VisionModel
-
-            self.visual = Qwen4VisionModel(config.vision_config)
+        self._debug_hook: Callable[[dict[str, object]], None] | None = None
         super().__init__()
+
+    def set_debug_hook(self, hook: Callable[[dict[str, object]], None] | None) -> None:
+        """Install an internal correctness hook; production defaults to disabled."""
+        self._debug_hook = hook
 
     @torch.inference_mode()
     def encode_images(
         self, pixel_values: torch.Tensor, image_grid_thw: torch.Tensor
     ) -> torch.Tensor:
-        if not hasattr(self, "visual"):
-            raise RuntimeError("Qwen4-Exp vision weights are not loaded")
-        return self.visual.forward(pixel_values, image_grid_thw)
+        del pixel_values, image_grid_thw
+        raise RuntimeError(
+            "Qwen3.8 vision inputs are outside FreeToken-Pascal v1; use text-only prompts"
+        )
 
     def load_host_weights(self, model_path: str, *, dummy: bool = False) -> None:
         self.model.load_host_weights(model_path, dummy=dummy)
 
     def forward(self) -> torch.Tensor:
         hidden = self.model.forward(get_global_ctx().batch.input_ids)
-        return self.lm_head.forward(hidden)
+        logits = self.lm_head.forward(hidden)
+        if self._debug_hook is not None:
+            self._debug_hook(
+                {
+                    "logits": logits.detach().clone(),
+                    "ple_state": self.model.debug_state(),
+                }
+            )
+        return logits
 
 
 __all__ = ["Qwen4ExpForCausalLM", "build_ngram_ids"]

@@ -50,6 +50,14 @@
       "selector": "_select_decode_tile and _select_extend_tiles",
       "sources": ["python/freetoken/kernel/triton/attention.py"],
       "validation": ["tests/kernels/test_triton_attention.py"]
+    },
+    {
+      "id": "qsa-dot-product",
+      "minimum_capability": "7.0",
+      "fallback": "Torch FP32 exact gathered-row GQA",
+      "selector": "is_sm70_supported",
+      "sources": ["python/freetoken/attention/qsa.py", "python/freetoken/kernel/triton/qsa.py"],
+      "validation": ["tests/kernels/test_qsa.py", "H2 QSA parity deferred"]
     }
   ],
   "optional_packages": [
