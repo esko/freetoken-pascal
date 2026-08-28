@@ -34,4 +34,4 @@ python-check:
 	ruff format --check scripts python/freetoken/moe/cpu_abi.py tests/moe/test_cpu_abi.py
 
 hosted-tests:
-	PYTHONPATH=python pytest -q tests/project tests/daemon tests/moe/test_cpu_abi.py
+	PYTHONPATH=python pytest -q tests/project tests/daemon tests/moe/test_cpu_abi.py tests/moe/test_q4_k.py

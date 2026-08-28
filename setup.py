@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from setuptools import setup
+from setuptools import Extension, setup
 from torch.utils.cpp_extension import BuildExtension, CUDA_HOME, CppExtension
 
 
@@ -37,6 +37,15 @@ _check_toolchain()
 
 setup(
     ext_modules=[
+        Extension(
+            name="freetoken.moe._q4_k_native",
+            sources=[
+                "python/freetoken/moe/q4_k_native.cpp",
+                "python/freetoken/moe/q4_k_scalar.cpp",
+                "python/freetoken/moe/q4_k_avx2.cpp",
+            ],
+            extra_compile_args=["-O3", "-std=c++17"],
+        ),
         CppExtension(
             name="freetoken.kernel._pinned_tensor",
             sources=[

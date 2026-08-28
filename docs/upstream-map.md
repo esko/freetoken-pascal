@@ -16,6 +16,14 @@ Each source has one usage state:
 
 Only `imported` sources declare destination paths. Changing a source to `imported` requires the responsible issue/PR, exact source and destination paths, import method, local differences, license, and header policy in the same commit.
 
+Issue #16 pins FreeToken commit
+`6f6c8640145eeca9df013e383ff51bf6bbff22f9` as the Q4_K W4A16 arithmetic oracle.
+The pinned llama.cpp `eaf93765572e794b8e3754fe45adbe12d381e997` and PXQ
+`066a37e9540a1ca21375fdeb377836fe69ecb729` implementations confirm the packed
+Q4_K layout, but their AVX2 vector-dot paths require Q8_K activations and are not copied
+into this backend. The downstream AVX2 W4A16 implementation is original code; these
+sources remain reference-only and therefore add no NOTICE entry.
+
 ## Primary upstreams
 
 | Capability | Primary source | Secondary oracle |
@@ -26,7 +34,7 @@ Only `imported` sources declare destination paths. Changing a source to `importe
 | GGUF K/I types and Qwen MoE loader | FreeToken PR #131 | llama.cpp; humanjesse/vllm-v100 |
 | Qwen MoE TP patterns | FreeToken PR #104 | vLLM Qwen3.8 TP |
 | low-bit Pascal GPU kernels | PXA/PXQ llama | llama.cpp CPU reference |
-| AVX2 low-bit CPU kernels | llama.cpp / ik_llama / PXA | dequantize + dense reference |
+| AVX2 low-bit CPU kernels | downstream implementation using FreeToken `6f6c8640` W4A16 semantics | llama.cpp/PXQ Q4_K layout and dequantize + dense reference |
 | expert cache policy concepts | FreeToken / flashlib | vLLM #37190; Colibrì |
 | transfer/prefetch design | FreeToken | vLLM #29941/#51710 |
 
