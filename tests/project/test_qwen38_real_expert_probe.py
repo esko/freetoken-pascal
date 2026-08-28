@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 from pathlib import Path
 
@@ -13,11 +14,145 @@ from freetoken.moe.real_artifact_probe import (
     UrllibRangeTransport,
     build_probe_layout,
     probe_qwen38_expert,
+    run_gguf_oracle,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "manifests/qwen38-gguf.json"
 CENSUS = ROOT / "tests/fixtures/results/qwen38-q4-census.metadata.json"
+
+
+def _q8_row(codes: np.ndarray) -> bytes:
+    """Build one deterministic GGML Q8_0 row for the independent oracle tests."""
+    assert codes.shape == (32,)
+    scale = np.asarray(np.array([1.0], dtype="<f2").view(np.uint8), dtype=np.uint8).tobytes()
+    return scale + np.asarray(codes, dtype=np.int8).tobytes()
+
+
+def _oracle_layout_and_sources() -> tuple[object, dict[str, bytes]]:
+    descriptors = []
+    sources: dict[str, bytes] = {}
+    for projection in ("gate", "up", "down"):
+        rows = []
+        for row in range(32):
+            codes = np.zeros(32, dtype=np.int8)
+            if projection == "gate":
+                codes[0] = 1 if row == 1 else 0
+            elif projection == "up":
+                codes[0] = 2 if row == 1 else 0
+            elif row == 0:
+                codes[1] = 1
+            rows.append(_q8_row(codes))
+        packed = b"".join(rows)
+        sources[projection] = packed
+        descriptors.append(
+            real_artifact_probe.CpuExpertDescriptor(
+                layer_id=0,
+                projection=projection,
+                quant_type=8,
+                quant_name="Q8_0",
+                num_experts=1,
+                output_dim=32,
+                input_dim=32,
+                rows_per_expert=32,
+                row_stride_bytes=34,
+                expert_stride_bytes=32 * 34,
+                tensor_bytes=32 * 34,
+                source=np.frombuffer(packed, dtype=np.uint8).reshape(1, 32, 34),
+            )
+        )
+    return real_artifact_probe.CpuExpertLayout(tuple(descriptors), top_k=2), sources
+
+
+def test_gguf_oracle_uses_projection_orientation_and_duplicate_route_weights() -> None:
+    pytest.importorskip("gguf")
+    layout, sources = _oracle_layout_and_sources()
+    hidden = np.ones((1, 32), dtype=np.float32)
+    expert_ids = np.array([[0, 0]], dtype=np.int32)
+    weights = np.array([[0.25, 0.5]], dtype=np.float32)
+
+    actual = run_gguf_oracle(layout, sources, hidden, expert_ids, weights)
+
+    expected = np.zeros((1, 32), dtype=np.float32)
+    expected[0, 0] = 0.75 * (2.0 / (1.0 + np.exp(-1.0)))
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-6)
+
+
+def test_gguf_oracle_rejects_fetched_source_shape_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("freetoken.moe.real_artifact_probe._load_gguf_oracle", lambda: object())
+    layout, sources = _oracle_layout_and_sources()
+    sources["down"] = sources["down"][:-1]
+    with pytest.raises(ArtifactProbeError, match=r"down.*bytes"):
+        run_gguf_oracle(
+            layout,
+            sources,
+            np.ones((1, 32), dtype=np.float32),
+            np.array([[0]], dtype=np.int32),
+            np.array([[1.0]], dtype=np.float32),
+        )
+
+
+def test_gguf_oracle_dependency_failure_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_import = builtins.__import__
+
+    def reject_gguf(name, *args, **kwargs):
+        if name == "gguf":
+            raise ModuleNotFoundError("simulated missing gguf")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_gguf)
+    with pytest.raises(ArtifactProbeError, match=r"gguf-py==0.19.0.*cpu.lock"):
+        real_artifact_probe._load_gguf_oracle()
+
+
+def test_probe_reports_oracle_mismatch_separately_from_scalar_native_ab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, payloads, total = _ranges_for_layer(0)
+    transport = _FakeTransport(payloads, total=total)
+    monkeypatch.setattr("freetoken.moe.real_artifact_probe._load_gguf_oracle", lambda: object())
+
+    def fake_mode(*args, **kwargs):
+        output = np.zeros((2, 2560), dtype=np.float32)
+        if kwargs["mode"] == "forced_avx2":
+            output[0, 0] = 1.0
+        return output, {
+            "requested_mode": kwargs["mode"],
+            "selected_backend": "reference",
+            "q4k_isa": "scalar",
+            "q4k_fallback_reason": None,
+            "mixed_isa": "scalar",
+            "mixed_fallback_reason": None,
+            "raw_elapsed_ns": [1],
+            "telemetry": [],
+        }
+
+    monkeypatch.setattr("freetoken.moe.real_artifact_probe._run_mode", fake_mode)
+    monkeypatch.setattr(
+        "freetoken.moe.real_artifact_probe._run_gguf_oracle",
+        lambda *args, **kwargs: (
+            np.zeros((2, 2560), dtype=np.float32),
+            real_artifact_probe.gguf_oracle_identity(),
+        ),
+    )
+    result = probe_qwen38_expert(
+        manifest_path=MANIFEST,
+        census_path=CENSUS,
+        layer=0,
+        expert=0,
+        repeats=1,
+        warmup=0,
+        transport=transport,
+        cache_dir=tmp_path,
+    )
+
+    assert result["ab"]["oracle_vs_scalar"]["correct"] is True
+    assert result["ab"]["oracle_vs_native"]["correct"] is False
+    assert result["ab"]["scalar_vs_native"]["correct"] is False
+    assert result["ab"]["oracle_vs_native"]["max_abs_error"] == 1.0
+    assert result["ab"]["correct"] is False
 
 
 def _metadata(*, layer: int = 0, expert: int = 0) -> tuple[dict, dict, dict]:
@@ -220,6 +355,7 @@ def test_probe_fetches_normal_and_promoted_layers_and_reports_ab(
     census, payloads, total = _ranges_for_layer(0)
     del census
     transport = _FakeTransport(payloads, total=total)
+    monkeypatch.setattr("freetoken.moe.real_artifact_probe._load_gguf_oracle", lambda: object())
     monkeypatch.setattr(
         "freetoken.moe.real_artifact_probe._run_mode",
         lambda *args, **kwargs: (
@@ -234,6 +370,13 @@ def test_probe_fetches_normal_and_promoted_layers_and_reports_ab(
                 "raw_elapsed_ns": [1],
                 "telemetry": [],
             },
+        ),
+    )
+    monkeypatch.setattr(
+        "freetoken.moe.real_artifact_probe._run_gguf_oracle",
+        lambda *args, **kwargs: (
+            np.zeros((2, 2560), dtype=np.float32),
+            real_artifact_probe.gguf_oracle_identity(),
         ),
     )
     result = probe_qwen38_expert(
@@ -253,6 +396,9 @@ def test_probe_fetches_normal_and_promoted_layers_and_reports_ab(
     assert result["fetch"]["full_shard_bytes"] == 0
     assert result["fetch"]["range_count"] == 3
     assert result["ab"]["correct"] is True
+    assert result["oracle"]["name"] == "gguf-py"
+    assert result["oracle"]["version"] == "0.19.0"
+    assert result["ab"]["oracle"]["operation"] == "dequantize + FP32 dense SwiGLU"
     assert len(result["ab"]["scalar"]["raw_elapsed_ns"]) == 1
     assert len(transport.requests) == 3
 
@@ -262,6 +408,7 @@ def test_promoted_layer_selection_is_explicit(
 ) -> None:
     _, payloads, total = _ranges_for_layer(2)
     transport = _FakeTransport(payloads, total=total)
+    monkeypatch.setattr("freetoken.moe.real_artifact_probe._load_gguf_oracle", lambda: object())
     monkeypatch.setattr(
         "freetoken.moe.real_artifact_probe._run_mode",
         lambda *args, **kwargs: (
@@ -276,6 +423,13 @@ def test_promoted_layer_selection_is_explicit(
                 "raw_elapsed_ns": [1],
                 "telemetry": [],
             },
+        ),
+    )
+    monkeypatch.setattr(
+        "freetoken.moe.real_artifact_probe._run_gguf_oracle",
+        lambda *args, **kwargs: (
+            np.zeros((2, 2560), dtype=np.float32),
+            real_artifact_probe.gguf_oracle_identity(),
         ),
     )
     result = probe_qwen38_expert(

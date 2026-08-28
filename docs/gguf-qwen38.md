@@ -119,7 +119,9 @@ PYTHONPATH=python python scripts/probe_qwen38_expert.py \
 Use `--layer 2` to probe the promoted Q5_K/Q8_0 projection family, and `--offline` to require
 the selected ranges to already exist in the cache. Cache files contain only the three selected
 ranges; no complete shard is downloaded or committed. The JSON report keeps raw timing samples
-and kernel telemetry for an internal forced-scalar versus forced-AVX2 executor A/B comparison,
-labels the partial payload as `range_evidence: measured/artifact-byte`, and remains H0/no-P4
-evidence. It is not an independent dense oracle and makes no cache, hybrid-split or full-engine
-performance claim.
+and kernel telemetry for an internal forced-scalar versus native executor A/B comparison, and separately compares
+both executor outputs against the pinned independent `gguf-py==0.19.0` `dequantize` plus dense FP32 SwiGLU oracle
+over the same three fetched byte ranges. Oracle identity, packed and dense output hashes, comparison errors and
+tolerances are recorded separately from raw timing, and missing or mismatched gguf versions fail a real probe
+clearly. The report labels the partial payload as `range_evidence: measured/artifact-byte`, remains H0/no-P4
+evidence, and makes no cache, hybrid-split or full-engine performance claim.

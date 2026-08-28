@@ -2,13 +2,15 @@
 
 The probe is intentionally narrower than a model loader.  It fetches one expert
 from each of the selected layer's gate, up and down banks with HTTP Range, builds
-the existing CPU expert ABI over those three byte ranges, and records a scalar
-versus forced-AVX2 A/B run.  It never downloads or hashes a complete shard.
+the existing CPU expert ABI over those three byte ranges, and records scalar and
+native A/B runs against an independent gguf-py dense FP32 SwiGLU oracle.  It never
+downloads or hashes a complete shard.
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -35,10 +37,55 @@ DEFAULT_SEED = 1600
 SUPPORTED_EXPERT_TYPES = frozenset({7, 8, 12, 13})
 _CONTENT_RANGE = re.compile(r"^bytes\s+(\d+)-(\d+)/(\d+)$", re.IGNORECASE)
 _PROJECTIONS = ("gate", "up", "down")
+GGUF_ORACLE_PACKAGE = "gguf"
+GGUF_ORACLE_NAME = "gguf-py"
+GGUF_ORACLE_VERSION = "0.19.0"
+GGUF_ORACLE_OPERATION = "dequantize + FP32 dense SwiGLU"
+ORACLE_RTOL = 5e-4
+ORACLE_ATOL = 5e-4
 
 
 class ArtifactProbeError(RuntimeError):
     """Raised when an artifact range or descriptor cannot be proven safe."""
+
+
+def gguf_oracle_identity() -> dict[str, str]:
+    """Return the pinned independent oracle identity without importing gguf."""
+    return {
+        "name": GGUF_ORACLE_NAME,
+        "package": GGUF_ORACLE_PACKAGE,
+        "version": GGUF_ORACLE_VERSION,
+        "operation": GGUF_ORACLE_OPERATION,
+    }
+
+
+def _load_gguf_oracle() -> Any:
+    """Load exactly the dependency version used to establish the oracle contract."""
+    try:
+        import gguf
+    except (ImportError, ModuleNotFoundError) as error:
+        raise ArtifactProbeError(
+            "gguf-py==0.19.0 is required for a real expert probe; install the pinned "
+            "requirements/cpu.lock environment"
+        ) from error
+    try:
+        version = importlib.metadata.version(GGUF_ORACLE_PACKAGE)
+    except importlib.metadata.PackageNotFoundError as error:
+        raise ArtifactProbeError(
+            "gguf-py==0.19.0 is required for a real expert probe, but its distribution "
+            "metadata is unavailable"
+        ) from error
+    if version != GGUF_ORACLE_VERSION:
+        raise ArtifactProbeError(
+            f"real expert probe requires gguf-py=={GGUF_ORACLE_VERSION}, got {version}"
+        )
+    if not callable(getattr(gguf, "dequantize", None)):
+        raise ArtifactProbeError(f"gguf-py=={GGUF_ORACLE_VERSION} does not expose gguf.dequantize")
+    if not hasattr(gguf, "GGMLQuantizationType"):
+        raise ArtifactProbeError(
+            f"gguf-py=={GGUF_ORACLE_VERSION} does not expose GGMLQuantizationType"
+        )
+    return gguf
 
 
 @dataclass(frozen=True)
@@ -640,6 +687,277 @@ def _hash_array(value: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
 
 
+def _packed_source_bytes(
+    layout: CpuExpertLayout,
+    projection: str,
+    fetched: bytes,
+) -> bytes:
+    """Validate that the oracle sees precisely the bytes returned by RangeFetcher."""
+    descriptor = layout.descriptor(layout.layers[0], projection)
+    expected_size = descriptor.output_dim * descriptor.row_stride_bytes
+    if len(fetched) != expected_size:
+        raise ArtifactProbeError(
+            f"oracle {projection}: fetched {len(fetched)} bytes, expected {expected_size}"
+        )
+    source = descriptor.source
+    if isinstance(source, np.ndarray):
+        expected_source_shape = (
+            descriptor.num_experts,
+            descriptor.output_dim,
+            descriptor.row_stride_bytes,
+        )
+        if source.shape != expected_source_shape:
+            raise ArtifactProbeError(
+                f"oracle {projection}: layout source shape {source.shape} disagrees with "
+                f"expected {expected_source_shape}"
+            )
+        source_bytes = np.ascontiguousarray(source[0]).tobytes()
+    else:
+        getter = getattr(source, "expert_packed", None)
+        if not callable(getter):
+            raise ArtifactProbeError(
+                f"oracle {projection}: layout source has no expert_packed accessor"
+            )
+        try:
+            source_bytes = np.ascontiguousarray(getter(0)).tobytes()
+        except (IndexError, TypeError, ValueError) as error:
+            raise ArtifactProbeError(
+                f"oracle {projection}: layout source cannot expose selected expert bytes"
+            ) from error
+    if source_bytes != fetched:
+        raise ArtifactProbeError(
+            f"oracle {projection}: fetched bytes disagree with the validated layout source"
+        )
+    return fetched
+
+
+def _oracle_dense_projections(
+    layout: CpuExpertLayout,
+    fetched_sources: Mapping[str, bytes],
+    gguf: Any,
+) -> tuple[dict[str, np.ndarray], dict[str, str]]:
+    """Dequantize each fetched projection with the independent gguf-py decoder."""
+    if len(layout.layers) != 1:
+        raise ArtifactProbeError(
+            f"real-artifact oracle requires exactly one layer, got {layout.layers}"
+        )
+    layer_id = layout.layers[0]
+    dense: dict[str, np.ndarray] = {}
+    packed_hashes: dict[str, str] = {}
+    packed_rows: dict[str, np.ndarray] = {}
+    for projection in _PROJECTIONS:
+        descriptor = layout.descriptor(layer_id, projection)
+        if projection not in fetched_sources:
+            raise ArtifactProbeError(f"oracle missing fetched source for {projection}")
+        fetched = _packed_source_bytes(layout, projection, bytes(fetched_sources[projection]))
+        packed_rows[projection] = np.frombuffer(fetched, dtype=np.uint8).reshape(
+            descriptor.output_dim, descriptor.row_stride_bytes
+        )
+        packed_hashes[projection] = hashlib.sha256(fetched).hexdigest()
+    for projection in _PROJECTIONS:
+        descriptor = layout.descriptor(layer_id, projection)
+        packed = packed_rows[projection]
+        try:
+            quant_type = gguf.GGMLQuantizationType(int(descriptor.quant_type))
+        except (TypeError, ValueError) as error:
+            raise ArtifactProbeError(
+                f"oracle {projection}: unsupported GGML quant type {descriptor.quant_type!r}"
+            ) from error
+        try:
+            values = gguf.dequantize(packed, quant_type)
+        except Exception as error:
+            raise ArtifactProbeError(
+                f"gguf-py dequantize failed for {projection} {quant_type.name}: {error}"
+            ) from error
+        values = np.asarray(values, dtype=np.float32)
+        expected_shape = (descriptor.output_dim, descriptor.input_dim)
+        if values.shape != expected_shape:
+            raise ArtifactProbeError(
+                f"oracle {projection}: gguf-py returned shape {values.shape}, expected "
+                f"{expected_shape}"
+            )
+        if not np.isfinite(values).all():
+            raise ArtifactProbeError(f"oracle {projection}: gguf-py returned non-finite values")
+        dense[projection] = np.ascontiguousarray(values, dtype=np.float32)
+    gate = layout.descriptor(layer_id, "gate")
+    up = layout.descriptor(layer_id, "up")
+    down = layout.descriptor(layer_id, "down")
+    if (gate.input_dim, gate.output_dim) != (up.input_dim, up.output_dim):
+        raise ArtifactProbeError("oracle gate/up geometry disagrees")
+    if (down.output_dim, down.input_dim) != (gate.input_dim, gate.output_dim):
+        raise ArtifactProbeError("oracle down geometry is not transposed")
+    return dense, packed_hashes
+
+
+def _validate_oracle_arrays(
+    layout: CpuExpertLayout,
+    hidden: np.ndarray,
+    expert_ids: np.ndarray,
+    routing_weights: np.ndarray,
+    num_token_non_padded: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    layer_id = layout.layers[0]
+    descriptor = layout.descriptor(layer_id, "gate")
+    hidden = np.asarray(hidden)
+    expert_ids = np.asarray(expert_ids)
+    routing_weights = np.asarray(routing_weights)
+    if hidden.ndim != 2 or hidden.shape[1] != descriptor.input_dim:
+        raise ArtifactProbeError(
+            f"oracle hidden shape {hidden.shape} does not match (*, {descriptor.input_dim})"
+        )
+    if expert_ids.ndim != 2 or routing_weights.ndim != 2:
+        raise ArtifactProbeError("oracle expert_ids and routing_weights must be rank 2")
+    if expert_ids.shape != routing_weights.shape or expert_ids.shape[0] != hidden.shape[0]:
+        raise ArtifactProbeError("oracle hidden and routing arrays have incompatible shapes")
+    if not np.issubdtype(hidden.dtype, np.floating):
+        raise ArtifactProbeError(f"oracle hidden must be floating point, got {hidden.dtype}")
+    if not np.issubdtype(expert_ids.dtype, np.integer):
+        raise ArtifactProbeError(f"oracle expert_ids must be integer, got {expert_ids.dtype}")
+    if not np.issubdtype(routing_weights.dtype, np.floating):
+        raise ArtifactProbeError(
+            f"oracle routing_weights must be floating point, got {routing_weights.dtype}"
+        )
+    active_tokens = hidden.shape[0] if num_token_non_padded is None else int(num_token_non_padded)
+    if num_token_non_padded is not None and not 0 <= active_tokens <= hidden.shape[0]:
+        raise ArtifactProbeError(
+            f"oracle num_token_non_padded={active_tokens} outside [0, {hidden.shape[0]}]"
+        )
+    if not np.isfinite(hidden).all() or not np.isfinite(routing_weights).all():
+        raise ArtifactProbeError("oracle hidden and routing weights must be finite")
+    invalid = (expert_ids < -1) | (expert_ids > 0)
+    if np.any(invalid[:active_tokens]):
+        token, route = np.argwhere(invalid[:active_tokens])[0]
+        raise ArtifactProbeError(
+            f"oracle expert id {int(expert_ids[token, route])} is invalid at "
+            f"token={token}, route={route}; selected ranges remap only expert 0"
+        )
+    return (
+        hidden.astype(np.float32, copy=False),
+        expert_ids,
+        routing_weights.astype(np.float32, copy=False),
+        active_tokens,
+    )
+
+
+def _run_gguf_oracle(
+    layout: CpuExpertLayout,
+    fetched_sources: Mapping[str, bytes],
+    hidden: np.ndarray,
+    expert_ids: np.ndarray,
+    routing_weights: np.ndarray,
+    *,
+    num_token_non_padded: int | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Run dense FP32 SwiGLU using gguf-py's independent dequantization."""
+    if len(layout.layers) != 1:
+        raise ArtifactProbeError(
+            f"real-artifact oracle requires exactly one layer, got {layout.layers}"
+        )
+    gguf = _load_gguf_oracle()
+    hidden, expert_ids, routing_weights, active_tokens = _validate_oracle_arrays(
+        layout, hidden, expert_ids, routing_weights, num_token_non_padded
+    )
+    dense, packed_hashes = _oracle_dense_projections(layout, fetched_sources, gguf)
+    gate = dense["gate"]
+    up = dense["up"]
+    down = dense["down"]
+    output = np.zeros((hidden.shape[0], gate.shape[1]), dtype=np.float32)
+    activated = np.empty(gate.shape[0], dtype=np.float32)
+    for token in range(active_tokens):
+        for route in range(expert_ids.shape[1]):
+            expert = int(expert_ids[token, route])
+            if expert == -1:
+                continue
+            # Selected ranges contain one remapped expert, so every valid route uses
+            # the same independently dequantized matrices.  Duplicate IDs remain
+            # separate routes and their weights are accumulated independently.
+            gate_values = np.matmul(gate, hidden[token]).astype(np.float32, copy=False)
+            up_values = np.matmul(up, hidden[token]).astype(np.float32, copy=False)
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                activated[:] = gate_values / (1.0 + np.exp(-gate_values))
+            np.multiply(activated, up_values, out=activated)
+            contribution = np.matmul(down, activated).astype(np.float32, copy=False)
+            np.multiply(contribution, np.float32(routing_weights[token, route]), out=contribution)
+            np.add(output[token], contribution, out=output[token])
+    return output, {
+        **gguf_oracle_identity(),
+        "packed_source_sha256": packed_hashes,
+        "dense_projection_sha256": {
+            projection: _hash_array(dense[projection]) for projection in _PROJECTIONS
+        },
+        "output_sha256": _hash_array(output),
+    }
+
+
+def run_gguf_oracle(
+    layout: CpuExpertLayout,
+    fetched_sources: Mapping[str, bytes],
+    hidden: np.ndarray,
+    expert_ids: np.ndarray,
+    routing_weights: np.ndarray,
+    *,
+    num_token_non_padded: int | None = None,
+) -> np.ndarray:
+    """Return an independent gguf-py dense FP32 expert result for exact fetched bytes."""
+    output, _ = _run_gguf_oracle(
+        layout,
+        fetched_sources,
+        hidden,
+        expert_ids,
+        routing_weights,
+        num_token_non_padded=num_token_non_padded,
+    )
+    return output
+
+
+def _compare_outputs(
+    expected: np.ndarray,
+    actual: np.ndarray,
+    *,
+    expected_name: str,
+    actual_name: str,
+    rtol: float = ORACLE_RTOL,
+    atol: float = ORACLE_ATOL,
+) -> dict[str, Any]:
+    expected = np.asarray(expected)
+    actual = np.asarray(actual)
+    shape_match = expected.shape == actual.shape
+    expected_finite = bool(np.isfinite(expected).all())
+    actual_finite = bool(np.isfinite(actual).all())
+    finite = expected_finite and actual_finite
+    max_abs: float | None = None
+    relative_rms: float | None = None
+    correct = False
+    if shape_match and finite:
+        difference = np.abs(expected.astype(np.float32) - actual.astype(np.float32))
+        max_abs = float(difference.max(initial=0.0))
+        rms = float(np.sqrt(np.mean(np.square(difference), dtype=np.float64)))
+        denominator = float(np.sqrt(np.mean(np.square(expected), dtype=np.float64)))
+        relative_rms = rms / max(denominator, np.finfo(np.float32).tiny)
+        correct = bool(np.allclose(expected, actual, rtol=rtol, atol=atol))
+    error: str | None = None
+    if not shape_match:
+        error = f"shape mismatch: {actual_name} {actual.shape}, {expected_name} {expected.shape}"
+    elif not finite:
+        error = f"non-finite values in {actual_name if not actual_finite else expected_name}"
+    elif not correct:
+        error = f"max_abs_error={max_abs} exceeds rtol={rtol}, atol={atol}"
+    return {
+        "expected": expected_name,
+        "actual": actual_name,
+        "expected_output_sha256": _hash_array(expected),
+        "actual_output_sha256": _hash_array(actual),
+        "shape_match": shape_match,
+        "finite": finite,
+        "max_abs_error": max_abs,
+        "relative_rms_error": relative_rms,
+        "rtol": rtol,
+        "atol": atol,
+        "correct": correct,
+        "error": error,
+    }
+
+
 def probe_qwen38_expert(
     *,
     manifest_path: Path,
@@ -657,6 +975,10 @@ def probe_qwen38_expert(
     """Run the bounded real-byte H0 probe and return a JSON-serializable report."""
     if repeats <= 0 or warmup < 0:
         raise ArtifactProbeError("repeats must be positive and warmup must be non-negative")
+    # Validate the independent reference before making any network request.  A real
+    # probe without gguf-py would otherwise consume selected ranges and fail only after
+    # the transport work had completed.
+    _load_gguf_oracle()
     manifest = _load_json(Path(manifest_path), "manifest")
     census = _load_json(Path(census_path), "census")
     source, manifest_shards = _validate_metadata(manifest, census, variant)
@@ -739,10 +1061,39 @@ def probe_qwen38_expert(
         repeats=int(repeats),
         warmup=int(warmup),
     )
-    difference = np.abs(scalar_output - avx_output)
-    finite = bool(np.isfinite(scalar_output).all() and np.isfinite(avx_output).all())
-    max_abs = float(difference.max(initial=0.0))
-    correct = finite and bool(np.allclose(scalar_output, avx_output, rtol=5e-4, atol=5e-4))
+    oracle_output, oracle = _run_gguf_oracle(
+        layout,
+        sources,
+        hidden,
+        expert_ids,
+        weights,
+    )
+    scalar["output_sha256"] = _hash_array(scalar_output)
+    avx2["output_sha256"] = _hash_array(avx_output)
+    oracle_vs_scalar = _compare_outputs(
+        oracle_output,
+        scalar_output,
+        expected_name="gguf-py oracle",
+        actual_name="scalar",
+    )
+    oracle_vs_native = _compare_outputs(
+        oracle_output,
+        avx_output,
+        expected_name="gguf-py oracle",
+        actual_name="native executor",
+    )
+    scalar_vs_native = _compare_outputs(
+        scalar_output,
+        avx_output,
+        expected_name="scalar",
+        actual_name="native executor",
+    )
+    correct = bool(
+        oracle_vs_scalar["correct"] and oracle_vs_native["correct"] and scalar_vs_native["correct"]
+    )
+    finite = bool(
+        oracle_vs_scalar["finite"] and oracle_vs_native["finite"] and scalar_vs_native["finite"]
+    )
     promoted = any(
         descriptor["quant_name"] in {"Q5_K", "Q8_0"}
         for descriptor in _descriptor_summary(layout, expert=int(expert))
@@ -757,6 +1108,7 @@ def probe_qwen38_expert(
             "CPU executor A/B only; no P4, cache, hybrid split or full-engine claim",
         ],
         "source": source,
+        "oracle": oracle,
         "selection": {
             "variant": variant,
             "layer": int(layer),
@@ -783,15 +1135,28 @@ def probe_qwen38_expert(
             "descriptors": _descriptor_summary(layout, expert=int(expert)),
         },
         "ab": {
-            "comparison": "internal Q4KExecutor scalar/reference versus forced-AVX2 paths",
-            "independent_oracle": False,
+            "comparison": (
+                "gguf-py dense FP32 oracle versus scalar and native executor outputs; "
+                "internal scalar/native A/B retained separately"
+            ),
+            "independent_oracle": True,
             "correct": correct,
             "finite": finite,
-            "max_abs_error": max_abs,
-            "rtol": 5e-4,
-            "atol": 5e-4,
+            "max_abs_error": scalar_vs_native["max_abs_error"],
+            "rtol": ORACLE_RTOL,
+            "atol": ORACLE_ATOL,
+            "oracle": oracle,
+            "oracle_vs_scalar": oracle_vs_scalar,
+            "oracle_vs_native": oracle_vs_native,
+            "scalar_vs_native": scalar_vs_native,
+            "timing": {
+                "scalar_raw_elapsed_ns": scalar["raw_elapsed_ns"],
+                "native_raw_elapsed_ns": avx2["raw_elapsed_ns"],
+                "oracle_timed": False,
+            },
             "scalar": scalar,
             "avx2": avx2,
+            "native": avx2,
         },
     }
 
@@ -802,5 +1167,7 @@ __all__ = [
     "RangeResponse",
     "UrllibRangeTransport",
     "build_probe_layout",
+    "gguf_oracle_identity",
     "probe_qwen38_expert",
+    "run_gguf_oracle",
 ]
