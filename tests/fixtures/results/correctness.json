@@ -7,6 +7,8 @@
     "implementation": "freetoken-pascal-scalar",
     "revision": "fixture-subject-v2",
     "commit": "0000000000000000000000000000000000000000",
+    "tokenizer_repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "tokenizer_revision": "c8b5954a88c2775c546b92593eda40ea041d3176",
     "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
     "quant_census_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
     "quantization": "synthetic-q4-0",
@@ -22,6 +24,8 @@
     "implementation": "independent-hand-calculation",
     "revision": "fixture-reference-v2",
     "commit": "0000000000000000000000000000000000000000",
+    "tokenizer_repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "tokenizer_revision": "c8b5954a88c2775c546b92593eda40ea041d3176",
     "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
     "quant_census_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
     "quantization": "synthetic-q4-0",
@@ -34,6 +38,8 @@
     "context_tokens": 32
   },
   "workload": {
+    "tokenizer_repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "tokenizer_revision": "c8b5954a88c2775c546b92593eda40ea041d3176",
     "corpus_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
     "prompt_id": "q4-0-block",
     "prompt_sha256": "5555555555555555555555555555555555555555555555555555555555555555",

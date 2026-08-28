@@ -26,6 +26,8 @@ _IDENTITY_FIELDS = frozenset(
         "implementation",
         "revision",
         "commit",
+        "tokenizer_repository",
+        "tokenizer_revision",
         "artifact_sha256",
         "quant_census_sha256",
         "corpus_sha256",
@@ -41,6 +43,8 @@ _IDENTITY_FIELDS = frozenset(
 _WORKLOAD_FIELDS = (
     "artifact_sha256",
     "quant_census_sha256",
+    "tokenizer_repository",
+    "tokenizer_revision",
     "corpus_sha256",
     "prompt_id",
     "prompt_sha256",
@@ -128,6 +132,17 @@ def _validate_identity(identity: Any) -> dict[str, Any]:
     ):
         if not isinstance(identity[key], str) or not identity[key]:
             raise ValueError(f"identity {key} must be a non-empty string")
+    if (
+        not isinstance(identity["tokenizer_repository"], str)
+        or not identity["tokenizer_repository"]
+    ):
+        raise ValueError("identity tokenizer_repository must be a non-empty string")
+    if not isinstance(identity["tokenizer_revision"], str) or not _COMMIT_RE.fullmatch(
+        identity["tokenizer_revision"]
+    ):
+        raise ValueError(
+            "identity tokenizer_revision must be a 40-character lowercase hex revision"
+        )
     if not isinstance(identity["commit"], str) or not _COMMIT_RE.fullmatch(identity["commit"]):
         raise ValueError("identity commit must be a 40-character lowercase hex revision")
     if not isinstance(identity["revision"], str) or not (
@@ -432,6 +447,8 @@ def compare_observation_bundles(
             "implementation",
             "revision",
             "commit",
+            "tokenizer_repository",
+            "tokenizer_revision",
             "artifact_sha256",
             "quant_census_sha256",
             "quantization",
@@ -450,6 +467,8 @@ def compare_observation_bundles(
             "implementation",
             "revision",
             "commit",
+            "tokenizer_repository",
+            "tokenizer_revision",
             "artifact_sha256",
             "quant_census_sha256",
             "quantization",
@@ -470,6 +489,8 @@ def compare_observation_bundles(
         "subject": subject_summary,
         "reference": reference_summary,
         "workload": {
+            "tokenizer_repository": subject_identity["tokenizer_repository"],
+            "tokenizer_revision": subject_identity["tokenizer_revision"],
             "corpus_sha256": subject_identity["corpus_sha256"],
             "prompt_id": subject_identity["prompt_id"],
             "prompt_sha256": subject_identity["prompt_sha256"],
@@ -619,6 +640,16 @@ def _validate_corpus(document: Any) -> list[str]:
                 if isinstance(message, dict)
             ):
                 errors.append(f"case {case_id} context is not inserted into a message")
+            elif isinstance(messages, list):
+                placeholder_count = sum(
+                    message.get("content", "").count("{{CONTEXT}}")
+                    for message in messages
+                    if isinstance(message, dict) and isinstance(message.get("content"), str)
+                )
+                if placeholder_count != 1:
+                    errors.append(
+                        f"case {case_id} context must have exactly one {{CONTEXT}} placeholder"
+                    )
     if not _REQUIRED_CATEGORIES <= categories:
         errors.append(
             f"prompt corpus misses categories {sorted(_REQUIRED_CATEGORIES - categories)}"
@@ -712,13 +743,24 @@ def materialize_prompt_case(
     corpus: dict[str, Any],
     case_id: str,
     *,
+    render_prompt: Any,
+    token_counter: Any,
     context_text: str | None = None,
-    token_counter: Any | None = None,
 ) -> dict[str, Any]:
-    """Materialize a case and prove the tokenizer-specific target token count."""
+    """Render a case and prove its tokenizer-specific target token count.
+
+    ``render_prompt`` must be the exact chat-template renderer used by the
+    serving implementation. ``token_counter`` receives that rendered string,
+    never the intermediate message objects, so the returned digest and count
+    bind the evidence to the actual prompt bytes and pinned tokenizer.
+    """
     errors = _validate_corpus(corpus)
     if errors:
         raise ValueError("invalid prompt corpus: " + "; ".join(errors))
+    if not callable(render_prompt):
+        raise ValueError("render_prompt must be callable")
+    if not callable(token_counter):
+        raise ValueError("token_counter must be callable")
     matches = [case for case in corpus["cases"] if case["id"] == case_id]
     if not matches:
         raise ValueError(f"unknown prompt case {case_id!r}")
@@ -727,10 +769,26 @@ def materialize_prompt_case(
     if context is None and context_text is not None:
         raise ValueError("context_text was supplied for a case without a context generator")
     if context is not None:
-        if context_text is None or token_counter is None or not callable(token_counter):
-            raise ValueError("context cases require context_text and a callable token_counter")
+        if context_text is None:
+            raise ValueError("context cases require context_text")
         if not isinstance(context_text, str) or not context_text:
             raise ValueError("context_text must be a non-empty string")
+        needle_tokens = context["needle"].split()
+        context_tokens = context_text.split()
+        matches = [
+            index
+            for index in range(len(context_tokens) - len(needle_tokens) + 1)
+            if context_tokens[index : index + len(needle_tokens)] == needle_tokens
+        ]
+        if len(matches) != 1:
+            raise ValueError("context_text must contain the needle exactly once")
+        actual_fraction = matches[0] / max(len(context_tokens) - len(needle_tokens), 1)
+        tolerance = max(0.02, 2.0 / max(len(context_tokens), 1))
+        if abs(actual_fraction - context["needle_fraction"]) > tolerance:
+            raise ValueError(
+                "context needle position differs from the declared fraction: "
+                f"expected {context['needle_fraction']}, observed {actual_fraction:.6f}"
+            )
     messages = [dict(message) for message in case["messages"]]
     if context is not None:
         messages = [
@@ -740,25 +798,36 @@ def materialize_prompt_case(
             }
             for message in messages
         ]
-        observed_tokens = token_counter(messages)
-        if (
-            not isinstance(observed_tokens, int)
-            or isinstance(observed_tokens, bool)
-            or observed_tokens != context["target_tokens"]
-        ):
-            raise ValueError(
-                "materialized prompt token count mismatch: "
-                f"expected {context['target_tokens']}, observed {observed_tokens!r}"
-            )
-    else:
-        observed_tokens = token_counter(messages) if callable(token_counter) else 0
-        if not isinstance(observed_tokens, int) or isinstance(observed_tokens, bool):
-            raise ValueError("token_counter must return an integer")
+    try:
+        rendered_prompt = render_prompt(messages)
+    except Exception as error:
+        raise ValueError(f"render_prompt failed: {error}") from error
+    if not isinstance(rendered_prompt, str) or not rendered_prompt:
+        raise ValueError("render_prompt must return a non-empty string")
+    try:
+        observed_tokens = token_counter(rendered_prompt)
+    except Exception as error:
+        raise ValueError(f"token_counter failed: {error}") from error
+    if (
+        not isinstance(observed_tokens, int)
+        or isinstance(observed_tokens, bool)
+        or observed_tokens < 0
+    ):
+        raise ValueError("token_counter must return a non-negative integer")
+    if context is not None and observed_tokens != context["target_tokens"]:
+        raise ValueError(
+            "materialized prompt token count mismatch: "
+            f"expected {context['target_tokens']}, observed {observed_tokens!r}"
+        )
     return {
         "case_id": case_id,
         "messages": messages,
-        "prompt_sha256": _sha256(_canonical_json(messages)),
+        "rendered_prompt": rendered_prompt,
+        "prompt_sha256": _sha256(rendered_prompt.encode("utf-8")),
         "context_tokens": observed_tokens,
+        "tokenizer": dict(corpus["tokenizer"]),
+        "tokenizer_repository": corpus["tokenizer"]["repository"],
+        "tokenizer_revision": corpus["tokenizer"]["revision"],
     }
 
 

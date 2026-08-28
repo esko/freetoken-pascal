@@ -40,6 +40,47 @@ def _nonfinite_paths(value: Any, path: str = "$") -> list[str]:
     return []
 
 
+def _finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, TypeError):
+        return False
+
+
+def _comparison_semantic_errors(comparisons: list[dict[str, Any]]) -> list[str]:
+    """Reject well-typed metric records whose predicate is nevertheless forged."""
+    errors: list[str] = []
+    for index, comparison in enumerate(comparisons):
+        metric = comparison["metric"]
+        observed = comparison["observed"]
+        limit = comparison["limit"]
+        passed = comparison["passed"]
+        if metric in {"max_abs", "relative_rms"}:
+            if not _finite_number(observed) or not _finite_number(limit):
+                errors.append(f"comparisons[{index}] {metric} values must be finite numbers")
+                continue
+            expected = observed <= limit
+        elif metric == "cosine":
+            if not _finite_number(observed) or not _finite_number(limit):
+                errors.append(f"comparisons[{index}] cosine values must be finite numbers")
+                continue
+            if not -1 <= observed <= 1 or not -1 <= limit <= 1:
+                errors.append(f"comparisons[{index}] cosine values must be in [-1, 1]")
+                continue
+            expected = observed >= limit
+        elif metric == "array_exact":
+            expected = observed
+        else:
+            # String comparisons are exact contracts: a producer cannot mark two
+            # different syntax/status or state-hash values as passing.
+            expected = observed == limit
+        if passed is not expected:
+            errors.append(f"comparisons[{index}] {metric}.passed must equal its metric predicate")
+    return errors
+
+
 def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
     if not isinstance(document, dict):
         return ["document root must be an object"]
@@ -93,6 +134,8 @@ def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
         comparison_passed = all(comparison["passed"] for comparison in document["comparisons"])
         if document["passed"] != comparison_passed:
             errors.append("passed must equal the conjunction of comparison results")
+        else:
+            errors.extend(_comparison_semantic_errors(document["comparisons"]))
         if document["commit"] != document["subject"]["commit"]:
             errors.append("commit must identify the subject implementation commit")
         for key in (
@@ -119,7 +162,14 @@ def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
         ):
             errors.append("measured correctness evidence requires distinct immutable revisions")
         for party in ("subject", "reference"):
-            for key in ("corpus_sha256", "prompt_id", "prompt_sha256", "context_tokens"):
+            for key in (
+                "tokenizer_repository",
+                "tokenizer_revision",
+                "corpus_sha256",
+                "prompt_id",
+                "prompt_sha256",
+                "context_tokens",
+            ):
                 if document[party][key] != document["workload"][key]:
                     errors.append(f"{party}.{key} must match workload.{key}")
     if document.get("evidence_status") == "measured" and document.get("commit") == "0" * 40:

@@ -39,6 +39,8 @@ def _identity(implementation: str, *, mode: str = "incremental") -> dict[str, ob
         "implementation": implementation,
         "revision": "1" * 40 if implementation == "freetoken" else "2" * 40,
         "commit": "3" * 40,
+        "tokenizer_repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+        "tokenizer_revision": "c8b5954a88c2775c546b92593eda40ea041d3176",
         "artifact_sha256": "4" * 64,
         "quant_census_sha256": "5" * 64,
         "corpus_sha256": "6" * 64,
@@ -98,21 +100,37 @@ def test_materialized_context_has_exact_declared_token_count(
     needle = case["context"]["needle"]
     # This deliberately uses a tiny deterministic fixture tokenizer. The rendered
     # prompt has eight fixed words outside CONTEXT, so the context contributes the
-    # remaining words and the materializer must prove the exact total.
-    context_text = " ".join(["fixture-token"] * (target_tokens - 9) + [needle])
+    # remaining words and the materializer must prove the exact total. Place the
+    # retrieval needle at the corpus-declared fraction as well.
+    context_word_count = target_tokens - 8
+    needle_index = int((context_word_count - 1) * case["context"]["needle_fraction"])
+    context_words = ["fixture-token"] * context_word_count
+    context_words[needle_index] = needle
+    context_text = " ".join(context_words)
 
-    def fixture_token_counter(messages: list[dict[str, str]]) -> int:
-        return sum(len(message["content"].split()) for message in messages)
+    def fixture_render_prompt(messages: list[dict[str, str]]) -> str:
+        return messages[0]["content"]
+
+    def fixture_token_counter(rendered_prompt: str) -> int:
+        return len(rendered_prompt.split())
 
     materialized = materialize_prompt_case(
         corpus,
         case_id,
+        render_prompt=fixture_render_prompt,
         context_text=context_text,
         token_counter=fixture_token_counter,
     )
 
     assert materialized["context_tokens"] == target_tokens
     assert needle in materialized["messages"][0]["content"]
+    assert materialized["tokenizer"] == corpus["tokenizer"]
+    assert materialized["tokenizer_repository"] == corpus["tokenizer"]["repository"]
+    assert materialized["tokenizer_revision"] == corpus["tokenizer"]["revision"]
+    assert (
+        hashlib.sha256(materialized["rendered_prompt"].encode()).hexdigest()
+        == materialized["prompt_sha256"]
+    )
     assert len(materialized["prompt_sha256"]) == 64
 
 
@@ -123,8 +141,100 @@ def test_materializer_rejects_a_context_token_count_mismatch() -> None:
         materialize_prompt_case(
             corpus,
             "retrieval-32k",
-            context_text="too short",
-            token_counter=lambda messages: 1,
+            render_prompt=lambda messages: messages[0]["content"],
+            context_text=" ".join(
+                ["fixture-token"] * 5 + ["FT-PASCAL-32K"] + ["fixture-token"] * 5
+            ),
+            token_counter=lambda rendered_prompt: 1,
+        )
+
+
+def test_materializer_requires_renderer_and_counter_for_short_cases() -> None:
+    corpus = load_prompt_corpus(CORPUS)
+
+    with pytest.raises(ValueError, match="render_prompt"):
+        materialize_prompt_case(
+            corpus,
+            "factual-short",
+            render_prompt=None,
+            token_counter=lambda rendered_prompt: 1,
+        )
+    with pytest.raises(ValueError, match="token_counter"):
+        materialize_prompt_case(
+            corpus,
+            "factual-short",
+            render_prompt=lambda messages: messages[0]["content"],
+            token_counter=None,
+        )
+
+
+def test_materializer_hashes_exact_rendered_prompt_and_binds_tokenizer() -> None:
+    corpus = load_prompt_corpus(CORPUS)
+    rendered = "<fixture-chat-template>exact bytes</fixture-chat-template>"
+    seen: list[str] = []
+
+    def render_prompt(messages: list[dict[str, str]]) -> str:
+        assert messages
+        return rendered
+
+    def token_counter(prompt: str) -> int:
+        seen.append(prompt)
+        return 17
+
+    materialized = materialize_prompt_case(
+        corpus,
+        "factual-short",
+        render_prompt=render_prompt,
+        token_counter=token_counter,
+    )
+
+    assert seen == [rendered]
+    assert materialized["rendered_prompt"] == rendered
+    assert materialized["prompt_sha256"] == hashlib.sha256(rendered.encode()).hexdigest()
+    assert materialized["context_tokens"] == 17
+    assert materialized["tokenizer"] == corpus["tokenizer"]
+
+
+def test_materializer_rejects_missing_duplicate_or_misplaced_needle() -> None:
+    corpus = load_prompt_corpus(CORPUS)
+    case = next(case for case in corpus["cases"] if case["id"] == "retrieval-32k")
+    needle = case["context"]["needle"]
+    filler = ["fixture-token"] * 100
+
+    def renderer(messages: list[dict[str, str]]) -> str:
+        return messages[0]["content"]
+
+    def counter(rendered_prompt: str) -> int:
+        return len(rendered_prompt.split())
+
+    with pytest.raises(ValueError, match="exactly once"):
+        materialize_prompt_case(
+            corpus,
+            case["id"],
+            render_prompt=renderer,
+            context_text=" ".join(filler),
+            token_counter=counter,
+        )
+    duplicate = filler.copy()
+    duplicate[49] = needle
+    duplicate[50] = needle
+    with pytest.raises(ValueError, match="exactly once"):
+        materialize_prompt_case(
+            corpus,
+            case["id"],
+            render_prompt=renderer,
+            context_text=" ".join(duplicate),
+            token_counter=counter,
+        )
+    misplaced = filler.copy()
+    misplaced[0] = needle
+    with pytest.raises(ValueError, match="declared fraction"):
+        materialize_prompt_case(
+            corpus,
+            case["id"],
+            render_prompt=renderer,
+            context_text=" ".join(misplaced),
+            token_counter=counter,
         )
 
 
@@ -288,6 +398,7 @@ def test_comparison_rejects_different_model_quant_or_workload(
         ("prompt_id", "different-prompt"),
         ("cache_mode", "static"),
         ("quant_census_sha256", "9" * 64),
+        ("tokenizer_revision", "8" * 40),
     ],
 )
 def test_comparison_binds_every_workload_identity_field(
@@ -354,6 +465,12 @@ def test_nonfinite_observation_fails_before_comparison(tmp_path: Path) -> None:
         lambda document: document["sampling"].pop("top_p"),
         lambda document: document["sampling"].__setitem__("temperature", "0.0"),
         lambda document: document["cases"][4]["context"].__setitem__("needle_fraction", "0.5"),
+        lambda document: document["cases"][4]["messages"][0].__setitem__(
+            "content", "missing context placeholder"
+        ),
+        lambda document: document["cases"][4]["messages"][0].__setitem__(
+            "content", "{{CONTEXT}} {{CONTEXT}}"
+        ),
         lambda document: document["cases"][2]["expectation"].__setitem__("required", []),
         lambda document: document["cases"][0]["expectation"].pop("value"),
     ],
@@ -383,6 +500,31 @@ def test_evidence_validator_rejects_nonfinite_json_numbers() -> None:
     errors = VALIDATE_EVIDENCE.validate_document(evidence, schema_dir=ROOT / "schemas")
 
     assert any("finite" in error.lower() or "nan" in error.lower() for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("metric", "observed", "limit", "passed"),
+    [
+        ("max_abs", "forged", 0.0, True),
+        ("max_abs", 1.0, 0.0, True),
+        ("relative_rms", -1.0, 0.0, True),
+        ("cosine", 0.25, 0.75, True),
+        ("array_exact", False, True, True),
+        ("state_hash", "observed-hash", "expected-hash", True),
+        ("json_syntax", "invalid", "valid", True),
+    ],
+)
+def test_evidence_validator_rejects_metric_type_or_predicate_forgery(
+    metric: str, observed: object, limit: object, passed: bool
+) -> None:
+    evidence = json.loads(
+        (ROOT / "tests/fixtures/results/correctness.json").read_text(encoding="utf-8")
+    )
+    evidence["comparisons"][0].update(metric=metric, observed=observed, limit=limit, passed=passed)
+
+    errors = VALIDATE_EVIDENCE.validate_document(evidence, schema_dir=ROOT / "schemas")
+
+    assert errors
 
 
 @pytest.mark.parametrize("party", ["subject", "reference"])
@@ -481,5 +623,12 @@ def test_observation_cli_emits_schema_v2_comparison(tmp_path: Path) -> None:
     assert evidence["passed"] is True
     assert evidence["workload"] == {
         key: _identity("freetoken")[key]
-        for key in ("corpus_sha256", "prompt_id", "prompt_sha256", "context_tokens")
+        for key in (
+            "tokenizer_repository",
+            "tokenizer_revision",
+            "corpus_sha256",
+            "prompt_id",
+            "prompt_sha256",
+            "context_tokens",
+        )
     }

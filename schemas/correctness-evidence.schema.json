@@ -15,8 +15,10 @@
     "workload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["corpus_sha256", "prompt_id", "prompt_sha256", "context_tokens"],
+      "required": ["tokenizer_repository", "tokenizer_revision", "corpus_sha256", "prompt_id", "prompt_sha256", "context_tokens"],
       "properties": {
+        "tokenizer_repository": {"type": "string", "minLength": 1},
+        "tokenizer_revision": {"$ref": "#/$defs/commit"},
         "corpus_sha256": {"$ref": "#/$defs/sha256"},
         "prompt_id": {"type": "string", "minLength": 1},
         "prompt_sha256": {"$ref": "#/$defs/sha256"},
@@ -36,7 +38,57 @@
           "observed": {"type": ["number", "string", "boolean"]},
           "limit": {"type": ["number", "string", "boolean"]},
           "passed": {"type": "boolean"}
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "metric": {"const": "max_abs"},
+              "observed": {"type": "number", "minimum": 0},
+              "limit": {"type": "number", "minimum": 0}
+            },
+            "required": ["observed", "limit"]
+          },
+          {
+            "properties": {
+              "metric": {"const": "relative_rms"},
+              "observed": {"type": "number", "minimum": 0},
+              "limit": {"type": "number", "minimum": 0}
+            },
+            "required": ["observed", "limit"]
+          },
+          {
+            "properties": {
+              "metric": {"const": "cosine"},
+              "observed": {"type": "number", "minimum": -1, "maximum": 1},
+              "limit": {"type": "number", "minimum": -1, "maximum": 1}
+            },
+            "required": ["observed", "limit"]
+          },
+          {
+            "properties": {
+              "metric": {"const": "array_exact"},
+              "observed": {"type": "boolean"},
+              "limit": {"const": true}
+            },
+            "required": ["observed", "limit"]
+          },
+          {
+            "properties": {
+              "metric": {"const": "json_syntax"},
+              "observed": {"type": "string"},
+              "limit": {"type": "string"}
+            },
+            "required": ["observed", "limit"]
+          },
+          {
+            "properties": {
+              "metric": {"const": "state_hash"},
+              "observed": {"type": "string"},
+              "limit": {"type": "string"}
+            },
+            "required": ["observed", "limit"]
+          }
+        ]
       }
     },
     "passed": {"type": "boolean"}
@@ -53,11 +105,13 @@
     "implementation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["implementation", "revision", "commit", "artifact_sha256", "quant_census_sha256", "quantization", "dtype", "cache_mode", "execution_mode", "corpus_sha256", "prompt_id", "prompt_sha256", "context_tokens"],
+      "required": ["implementation", "revision", "commit", "tokenizer_repository", "tokenizer_revision", "artifact_sha256", "quant_census_sha256", "quantization", "dtype", "cache_mode", "execution_mode", "corpus_sha256", "prompt_id", "prompt_sha256", "context_tokens"],
       "properties": {
         "implementation": {"type": "string", "minLength": 1},
         "revision": {"$ref": "#/$defs/revision"},
         "commit": {"$ref": "#/$defs/commit"},
+        "tokenizer_repository": {"type": "string", "minLength": 1},
+        "tokenizer_revision": {"$ref": "#/$defs/commit"},
         "artifact_sha256": {"$ref": "#/$defs/sha256"},
         "quant_census_sha256": {"$ref": "#/$defs/sha256"},
         "quantization": {"type": "string", "minLength": 1},
