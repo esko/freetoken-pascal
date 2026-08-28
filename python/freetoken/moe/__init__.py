@@ -118,6 +118,42 @@ def __getattr__(name: str):
 
         globals()[name] = QwenGGUFCpuMoELayer
         return QwenGGUFCpuMoELayer
+    if name in {
+        "BlockingTensorTransfer",
+        "EagerTransferSeam",
+        "GGUFCpuEagerBridge",
+        "GGUFEagerBridgeBusy",
+        "GGUFEagerBridgeError",
+        "GGUFEagerBridgeTelemetry",
+        "GGUFTransferTelemetry",
+        "QwenGGUFCpuDeviceBridge",
+        "QwenGGUFCpuEagerBridge",
+    }:
+        from .gguf_transfer import (
+            BlockingTensorTransfer,
+            EagerTransferSeam,
+            GGUFCpuEagerBridge,
+            GGUFEagerBridgeBusy,
+            GGUFEagerBridgeError,
+            GGUFEagerBridgeTelemetry,
+            GGUFTransferTelemetry,
+            QwenGGUFCpuDeviceBridge,
+            QwenGGUFCpuEagerBridge,
+        )
+
+        values = {
+            "BlockingTensorTransfer": BlockingTensorTransfer,
+            "EagerTransferSeam": EagerTransferSeam,
+            "GGUFCpuEagerBridge": GGUFCpuEagerBridge,
+            "GGUFEagerBridgeBusy": GGUFEagerBridgeBusy,
+            "GGUFEagerBridgeError": GGUFEagerBridgeError,
+            "GGUFEagerBridgeTelemetry": GGUFEagerBridgeTelemetry,
+            "GGUFTransferTelemetry": GGUFTransferTelemetry,
+            "QwenGGUFCpuDeviceBridge": QwenGGUFCpuDeviceBridge,
+            "QwenGGUFCpuEagerBridge": QwenGGUFCpuEagerBridge,
+        }
+        globals().update(values)
+        return values[name]
     if name == "BaseMoeBackend":
         from .base import BaseMoeBackend
 
@@ -141,6 +177,15 @@ __all__ = [
     "OFFLOAD_MOE_BACKENDS",
     "SUPPORTED_MOE_BACKENDS",
     "BaseMoeBackend",
+    "BlockingTensorTransfer",
+    "EagerTransferSeam",
+    "GGUFCpuEagerBridge",
+    "GGUFEagerBridgeBusy",
+    "GGUFEagerBridgeError",
+    "GGUFEagerBridgeTelemetry",
+    "GGUFTransferTelemetry",
+    "QwenGGUFCpuDeviceBridge",
+    "QwenGGUFCpuEagerBridge",
     "QwenGGUFCpuMoELayer",
     "create_moe_backend",
     "is_offload_moe_backend",
