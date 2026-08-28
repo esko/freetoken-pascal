@@ -94,6 +94,28 @@ def test_selective_pinned_policy_only_registers_selected_layers():
     assert report["applied_layers"] == ["pageable", "pinned", "pageable"]
 
 
+def test_legacy_scalar_pin_banks_stays_pinned_under_pageable_layer_plan():
+    from freetoken.moe.host_banks import HostResidency, pin_banks, requested_residency
+
+    class FakeBank:
+        allocated_nbytes = 4096
+        residency = HostResidency.PAGEABLE
+
+        def __init__(self):
+            self.pin_calls = 0
+
+        def pin(self):
+            self.pin_calls += 1
+            self.residency = HostResidency.PINNED
+
+    bank = FakeBank()
+    with requested_residency(["pageable"]):
+        pin_banks({"scalar": bank})
+
+    assert bank.pin_calls == 1
+    assert bank.residency is HostResidency.PINNED
+
+
 def test_registered_bank_cleanup_unregisters_exactly_once(monkeypatch):
     from freetoken.kernel import pinned
     from freetoken.moe.host_banks import _LIVE_BUFFERS, HostBank
@@ -177,6 +199,27 @@ def test_staging_constructor_rollback_closes_all_allocated_slots():
     with pytest.raises(RuntimeError, match="allocation failed"):
         HostStagingRing(12288, slots=3, allocator=allocate)
     assert closed == [0, 1]
+
+
+def test_staging_constructor_closes_wrong_sized_current_slot():
+    from freetoken.moe.host_banks import HostStagingRing
+
+    closed = []
+
+    class Slot(bytearray):
+        def __init__(self, size, number):
+            super().__init__(size)
+            self.number = number
+
+        def close(self):
+            closed.append(self.number)
+
+    allocations = iter((Slot(4096, 0), Slot(2048, 1)))
+
+    with pytest.raises(ValueError, match="require exactly"):
+        HostStagingRing(8192, slots=2, allocator=lambda _size: next(allocations))
+
+    assert sorted(closed) == [0, 1]
 
 
 def test_policy_rejects_empty_specs_before_allocation():
@@ -266,3 +309,27 @@ def test_failed_reprepare_invalidates_plan_and_partial_settlement_is_rejected():
 
     with pytest.raises(ValueError, match="complete bank set"):
         policy.settle({"gate_up": [FakeBank()]})
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("max_pinned_bytes", -1, "max_pinned_bytes"),
+        ("staging_slots", 0, "staging_slots"),
+        ("strategy", "surprise", "unknown host-bank strategy"),
+    ),
+)
+def test_prepare_revalidates_mutated_policy_configuration(field, value, message):
+    from freetoken.moe.host_banks import HostBankPolicy
+
+    policy = HostBankPolicy(strategy="pinned", max_pinned_bytes=8192)
+    policy.prepare(_specs(), num_layers=1)
+    setattr(policy, field, value)
+
+    with pytest.raises(ValueError, match=message):
+        policy.prepare(_specs(), num_layers=1)
+    with pytest.raises(RuntimeError, match="must be prepared"):
+        _ = policy.plan
+    assert policy.accounting.source_bytes == 0
+    assert policy.accounting.pinned_bytes == 0
+    assert policy.accounting.applied_pinned_bytes == 0

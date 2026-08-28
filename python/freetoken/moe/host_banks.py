@@ -186,6 +186,15 @@ class HostBankPolicy:
     _plan: HostBankPlan | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self._validate_configuration()
+        self.accounting = HostBankAccounting(
+            strategy=self.strategy,
+            numa_policy=self.numa_policy,
+            numa_node=self.numa_node,
+        )
+
+    def _validate_configuration(self) -> None:
+        """Normalize and validate mutable configuration before every preflight."""
         self.strategy = _normalize_strategy(self.strategy)
         try:
             self.numa_policy = (
@@ -228,11 +237,6 @@ class HostBankPolicy:
                 for layer in self.selected_layers
             ):
                 raise ValueError("selected_layers must contain non-negative integer IDs")
-        self.accounting = HostBankAccounting(
-            strategy=self.strategy,
-            numa_policy=self.numa_policy,
-            numa_node=self.numa_node,
-        )
 
     def prepare(
         self,
@@ -241,6 +245,14 @@ class HostBankPolicy:
     ) -> HostBankPlan:
         """Validate all limits and produce the per-layer decision before allocation."""
         self._plan = None
+        # Invalidate prior telemetry before any operation that can fail.  An
+        # invalid mutated policy must not continue exposing a successful old
+        # reservation as though it were still active.
+        self.accounting = HostBankAccounting(strategy=HostBankStrategy.PAGEABLE)
+        # Policy fields remain public for compatibility, so callers may mutate
+        # them after construction.  Revalidate before deriving any allocation
+        # decision to keep that mutation fail-closed.
+        self._validate_configuration()
         self.accounting = HostBankAccounting(
             strategy=self.strategy,
             numa_policy=self.numa_policy,
@@ -381,13 +393,14 @@ class HostStagingRing:
         if allocator is None:
             allocator = self._default_allocator
         allocated: list[object] = []
+        current: object | None = None
         try:
             for _ in range(slots):
-                slot = allocator(self.slot_bytes)
-                actual = getattr(slot, "nbytes", None)
+                current = allocator(self.slot_bytes)
+                actual = getattr(current, "nbytes", None)
                 if actual is None:
                     try:
-                        actual = len(slot)
+                        actual = len(current)
                     except TypeError:
                         actual = self.slot_bytes
                 if actual != self.slot_bytes:
@@ -395,9 +408,11 @@ class HostStagingRing:
                         f"staging allocator returned {actual} bytes, require exactly "
                         f"{self.slot_bytes}"
                     )
-                allocated.append(slot)
+                allocated.append(current)
+                current = None
         except BaseException:
-            for slot in allocated:
+            slots_to_close = ([] if current is None else [current]) + allocated
+            for slot in slots_to_close:
                 close = getattr(slot, "close", None)
                 if close is not None:
                     try:
@@ -829,10 +844,11 @@ def pin_banks(
                     plan.record(layer_id, layer_bank.residency.value)
                 by_layer.setdefault(layer_id, []).append(layer_bank)
         else:
+            # Scalar banks predate per-layer residency plans and were always
+            # pinned.  Preserve that legacy contract unless an explicit policy
+            # supplies the new strategy decision.
             residency = (
-                HostResidency.PINNED.value
-                if plan is None and residency_for is None
-                else (residency_for[0] if residency_for is not None else plan.residency_for(0))
+                residency_for[0] if residency_for is not None else HostResidency.PINNED.value
             )
             _settle(bank, residency)
             by_layer.setdefault(0, []).append(bank)
