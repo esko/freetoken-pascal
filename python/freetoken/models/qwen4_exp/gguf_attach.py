@@ -125,7 +125,8 @@ def validate_gguf_cpu_attachment(model: Any, bundle: QwenGGUFCpuExpertBundle) ->
     )
     if router_weight is not False:
         raise ValueError(
-            "Qwen GGUF CPU model attachment requires apply_router_weight_on_input=False"
+            "Qwen GGUF CPU model attachment router-weight policy requires "
+            "apply_router_weight_on_input=False"
         )
     return layers
 
@@ -174,7 +175,7 @@ def attach_gguf_cpu_expert_bundle(model: Any, bundle: QwenGGUFCpuExpertBundle) -
 
 def detach_gguf_cpu_expert_bundle(model: Any) -> None:
     """Restore exact pre-attachment objects; never close the borrowed bundle."""
-    attachment = model._gguf_cpu_attachment
+    attachment = getattr(model, "_gguf_cpu_attachment", None)
     if attachment is None:
         return
 
