@@ -28,7 +28,7 @@ jobs:
       FREETOKEN_PASCAL_TEST_LEVEL: ${{ inputs.test_level }}
       FREETOKEN_PASCAL_MODEL_PATH: ${{ inputs.model_path }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Record hardware inventory
