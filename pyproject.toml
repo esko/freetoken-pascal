@@ -51,9 +51,9 @@ dependencies = [
     "pydantic>=2.9,<3",
     "pyzmq>=27,<28",
     "safetensors>=0.6,<1",
-    # floor+ceiling: sglang-kernel 0.4.5 links libtorch symbols only 2.11 has.
-    # PyPI's torch 2.11.0 wheel is itself the cu130 build, so plain pip resolves
-    # correctly from PyPI alone; uv additionally pins the index below.
+    # floor+ceiling: CUDA 12.6 is the last supported downstream toolchain for Pascal.
+    # The uv source below selects the explicit +cu126 wheel; reproducible environments
+    # install requirements/cuda126.lock rather than resolving this range afresh.
     "torch>=2.11,<2.12",
     "tqdm>=4.66,<5",
     "transformers>=5.5,<6",
@@ -85,18 +85,17 @@ accel = ["freetoken-pascal[fi,sgl]"]
 # out of the default resolution — install it separately (`pip install 'vllm>=0.14,<0.15'`)
 # in a dedicated environment when you specifically need the Marlin path.
 
-# uv-only provenance pins — pip ignores this section and resolves from PyPI, which
-# works: PyPI's torch 2.11.0 and sglang-kernel 0.4.5 are the same cu130 builds these
-# indexes serve. `explicit = true` scopes each index to the one package that needs it
-# (the torch index also mirrors stale copies of common deps, e.g. packaging<=24.1,
-# which would otherwise shadow PyPI under uv's first-index strategy).
+# uv-only CUDA selection. `explicit = true` prevents this vendor index from shadowing
+# packages on PyPI. CUDA 13 wheels remain available only through explicitly requested
+# upstream acceleration extras; they are unsupported by the Pascal runtime and are not
+# present in either downstream lockfile or container.
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
+torch = { index = "pytorch-cu126" }
 sglang-kernel = { index = "sglang-cu130" }
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [[tool.uv.index]]

@@ -1,0 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+cmake==4.1.0
+ninja==1.13.0
+torch==2.11.0+cu126
