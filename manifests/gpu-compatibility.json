@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "minimum_cuda_capability": "6.0",
+  "target": "sm_61",
+  "features": [
+    {
+      "id": "grid-constant-parameters",
+      "minimum_capability": "7.0",
+      "fallback": "plain const by-value kernel parameters",
+      "selector": "FT_GRID_CONSTANT",
+      "sources": ["python/freetoken/kernel/csrc/include/freetoken/utils.cuh"],
+      "validation": ["tests/project/test_cuda_source_manifest.py", "H1 CUDA source census"]
+    },
+    {
+      "id": "streaming-global-load-hint",
+      "minimum_capability": "7.0",
+      "fallback": "plain ld.global load",
+      "selector": "FT_LD_STREAM",
+      "sources": ["python/freetoken/kernel/csrc/jit/fast_index_copy.cuh"],
+      "validation": ["H1 CUDA source census", "H2 fast-index-copy parity deferred"]
+    },
+    {
+      "id": "approximate-tanh",
+      "minimum_capability": "7.5",
+      "fallback": "libdevice tanh",
+      "selector": "_fast_tanh_cx",
+      "sources": ["python/freetoken/kernel/triton/activation.py"],
+      "validation": ["tests/kernels/test_activation.py"]
+    },
+    {
+      "id": "moe-align-atomics",
+      "minimum_capability": "7.0",
+      "fallback": "atomic-free staged Triton alignment",
+      "selector": "is_sm70_supported",
+      "sources": ["python/freetoken/moe/fused.py"],
+      "validation": ["tests/project/test_pascal_compatibility.py", "H2 MoE parity deferred"]
+    },
+    {
+      "id": "sampling-atomics",
+      "minimum_capability": "7.0",
+      "fallback": "Torch sort and inverse-CDF sampling",
+      "selector": "is_sm70_supported",
+      "sources": ["python/freetoken/engine/sample.py", "python/freetoken/kernel/torch_sampling.py"],
+      "validation": ["tests/kernels/test_torch_sampling.py"]
+    },
+    {
+      "id": "attention-shared-memory",
+      "minimum_capability": "device-budgeted",
+      "fallback": "descending decode and prefill tile ladder",
+      "selector": "_select_decode_tile and _select_extend_tiles",
+      "sources": ["python/freetoken/kernel/triton/attention.py"],
+      "validation": ["tests/kernels/test_triton_attention.py"]
+    }
+  ],
+  "optional_packages": [
+    {
+      "name": "flashinfer",
+      "minimum_capability": "7.5",
+      "fallback": "in-tree Triton kernels",
+      "selector": "is_flashinfer_usable"
+    },
+    {
+      "name": "sgl_kernel",
+      "minimum_capability": "7.5",
+      "fallback": "in-tree Triton kernels",
+      "selector": "is_sgl_kernel_usable"
+    },
+    {
+      "name": "triton_kernels",
+      "minimum_capability": "7.0",
+      "fallback": "pure-Torch top-k router",
+      "selector": "is_triton_kernels_usable"
+    },
+    {
+      "name": "vllm-marlin",
+      "minimum_capability": "8.0",
+      "fallback": "in-tree Triton NVFP4 backend",
+      "selector": "select_nvfp4_backend"
+    },
+    {
+      "name": "flashinfer-b12x",
+      "minimum_capability": "12.0",
+      "fallback": "in-tree Triton NVFP4 backend",
+      "selector": "select_nvfp4_backend"
+    },
+    {
+      "name": "flashinfer-trtllm-attention",
+      "minimum_capability": "10.0",
+      "fallback": "in-tree Triton attention backend",
+      "selector": "_resolve_auto_attention_backend"
+    }
+  ]
+}

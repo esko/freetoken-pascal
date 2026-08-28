@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, NamedTuple, Tuple
 
 import torch
 from freetoken.attention import AttnType, attention_backend_info, create_attention_backend
+from freetoken.compatibility import format_compatibility_profile, runtime_compatibility_profile
 from freetoken.core import Batch, Context, Req, set_global_ctx
 from freetoken.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
 from freetoken.gpu_select import gpu_identity
@@ -45,12 +46,16 @@ def _require_offload_cache_size(cache_size: int, num_experts: int) -> None:
 
 
 def _flashinfer_available() -> bool:
-    from freetoken.kernel.backend import is_flashinfer_installed
+    from freetoken.kernel.backend import is_flashinfer_usable
 
-    return is_flashinfer_installed()
+    return is_flashinfer_usable()
 
 
 def _sgl_flash_attn_available() -> bool:
+    from freetoken.kernel.backend import is_sgl_kernel_usable
+
+    if not is_sgl_kernel_usable():
+        return False
     try:
         from sgl_kernel.flash_attn import flash_attn_with_kvcache  # noqa: F401
     except Exception as exc:
@@ -205,14 +210,16 @@ def _validate_attention_backend_choice(config, override, required: frozenset[Att
         info = attention_backend_info(part)
         if info.requires_flashinfer and not _flashinfer_available():
             raise RuntimeError(
-                f"Attention backend {config.attention_backend!r} requires flashinfer, which is "
-                "not installed. Install it with `pip install 'freetoken[fi]'` (or "
+                f"Attention backend {config.attention_backend!r} requires a compatible "
+                "flashinfer build, which is not installed or cannot run on this GPU. "
+                "Install it with `pip install 'freetoken[fi]'` (or "
                 "'freetoken[accel]'), or use --attention-backend triton."
             )
         if info.requires_sgl_kernel and not _sgl_flash_attn_available():
             raise RuntimeError(
-                f"Attention backend {config.attention_backend!r} requires sgl_kernel, which is "
-                "not installed. Install it with `pip install 'freetoken[sgl]'` (or "
+                f"Attention backend {config.attention_backend!r} requires a compatible "
+                "sgl_kernel build, which is not installed or cannot run on this GPU. "
+                "Install it with `pip install 'freetoken[sgl]'` (or "
                 "'freetoken[accel]'), or use --attention-backend triton."
             )
         if info.requires_sm100 and not is_sm100_family():
@@ -299,6 +306,9 @@ class Engine:
         from freetoken.gpu_select import bind_assigned_gpu
 
         self.device = bind_assigned_gpu(config.tp_info.rank)
+        logger.info_rank0(
+            format_compatibility_profile(runtime_compatibility_profile(self.device.index))
+        )
         _adjust_config(config)
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()

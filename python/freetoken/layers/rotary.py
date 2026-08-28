@@ -59,9 +59,9 @@ class RotaryEmbedding(StateLessOP):
         self._cos_sin_cache = torch.cat((cos, sin), dim=-1)
         assert self.head_size in [64, 128, 256, 512]
 
-        from freetoken.kernel.backend import is_flashinfer_installed
+        from freetoken.kernel.backend import is_flashinfer_usable
 
-        if is_flashinfer_installed():
+        if is_flashinfer_usable():
             from flashinfer import apply_rope_with_cos_sin_cache_inplace
         else:
             from freetoken.kernel.triton.rope import apply_rope_with_cos_sin_cache_inplace
@@ -184,7 +184,8 @@ def _get_rope(
             def post_process(inv_freq: torch.Tensor) -> torch.Tensor:
                 ramp = torch.clamp(
                     (torch.arange(rotary_dim // 2, dtype=torch.float32) - low) / (high - low),
-                    0, 1,
+                    0,
+                    1,
                 )
                 return (inv_freq / factor) * ramp + inv_freq * (1 - ramp)
 

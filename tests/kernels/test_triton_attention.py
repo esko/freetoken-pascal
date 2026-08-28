@@ -650,6 +650,27 @@ def test_select_extend_tiles_descends_to_the_dot_floor():
     assert tiles == sorted(tiles, reverse=True), "candidates must descend"
 
 
+@pytest.mark.parametrize(
+    ("block_d", "block_dv", "smem_optin", "expected"),
+    [
+        (128, 128, 0, (32, 2)),
+        (128, 128, 49152, (32, 1)),
+        (256, 256, 49152, (16, 1)),
+        (512, 512, 49152, (16, 1)),
+        (512, 512, 232448, (32, 2)),
+    ],
+)
+def test_select_decode_tile_is_shared_memory_aware(
+    block_d: int,
+    block_dv: int,
+    smem_optin: int,
+    expected: tuple[int, int],
+) -> None:
+    from freetoken.kernel.triton.attention import _select_decode_tile
+
+    assert _select_decode_tile(block_d, block_dv, smem_optin) == expected
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
 def test_triton_backend_stores_kv_and_matches_reference(monkeypatch):
     from freetoken.attention import AttentionSpec

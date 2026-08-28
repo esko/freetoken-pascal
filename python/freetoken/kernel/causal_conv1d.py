@@ -25,9 +25,9 @@ def causal_conv1d_varlen(
 ) -> torch.Tensor:
     """Varlen (prefill) depthwise causal conv with silu; writes silu(conv) into ``x``
     in place and refreshes ``conv_states[cache_indices]`` with each request's tail."""
-    from freetoken.kernel.backend import is_sgl_kernel_installed
+    from freetoken.kernel.backend import is_sgl_kernel_usable
 
-    if not is_sgl_kernel_installed():
+    if not is_sgl_kernel_usable():
         from freetoken.kernel.triton.causal_conv1d_triton import (
             causal_conv1d_varlen as triton_causal_conv1d_varlen,
         )
@@ -56,9 +56,9 @@ def causal_conv1d_decode(
 ) -> torch.Tensor:
     """Single-token (decode) causal conv update with silu; shifts+appends the new
     token into ``conv_state[conv_state_indices]`` in place and returns silu(conv)."""
-    from freetoken.kernel.backend import is_sgl_kernel_installed
+    from freetoken.kernel.backend import is_sgl_kernel_usable
 
-    if not is_sgl_kernel_installed():
+    if not is_sgl_kernel_usable():
         from freetoken.kernel.triton.causal_conv1d_triton import (
             causal_conv1d_decode as triton_causal_conv1d_decode,
         )

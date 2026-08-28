@@ -47,6 +47,12 @@ if not available.intersection(allowed):
     raise SystemExit(f"Torch wheel has no Pascal cubins: {sorted(available)}")
 PY
 
+# These selectors are pure host policy. Running them in the pinned CUDA/Triton
+# environment proves the Pascal tile choices before any kernel launch or GPU access.
+PYTHONPATH=python python -m pytest -q \
+    tests/kernels/test_triton_attention.py \
+    -k 'select_extend or select_decode'
+
 nvcc \
     --cubin \
     --generate-code arch=compute_61,code=sm_61 \

@@ -44,11 +44,11 @@ def fused_topk(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
-    from freetoken.kernel.backend import is_triton_kernels_installed
+    from freetoken.kernel.backend import is_triton_kernels_usable
 
     # triton_kernels ships no Windows wheel, and unlike flashinfer/sgl_kernel it is not one
     # of the six ops the in-repo triton kernels cover -- so this router needs its own fallback.
-    if not is_triton_kernels_installed():
+    if not is_triton_kernels_usable():
         global _warned_torch_topk
         if not _warned_torch_topk:
             _warned_torch_topk = True
@@ -56,7 +56,8 @@ def fused_topk(
             # triton_kernels used to fail fast with ImportError; keep the misconfiguration
             # visible without giving up the fallback that Windows needs.
             logger.warning_rank0(
-                "fused_topk: triton_kernels is not installed -> pure-torch router fallback "
+                "fused_topk: triton_kernels is not installed or is incompatible with this GPU "
+                "-> pure-torch router fallback "
                 "(numerically equivalent, slower). Expected on Windows (no wheel); on Linux "
                 "install triton_kernels to restore the fused router."
             )
@@ -125,9 +126,9 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
-    from freetoken.kernel.backend import is_sgl_kernel_installed
+    from freetoken.kernel.backend import is_sgl_kernel_usable
 
-    if not is_sgl_kernel_installed():
+    if not is_sgl_kernel_usable():
         from freetoken.utils.arch import is_sm70_supported
 
         if not is_sm70_supported():
