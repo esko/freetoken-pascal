@@ -21,6 +21,9 @@ class Qwen4ExpArgs:
     indexer_budget: int
     indexer_compress_ratio: int
     output_gate_type: str
+    ple_layer_multipliers: tuple[int, ...] | None = None
+    ple_head_vocab_sizes: tuple[int, ...] | None = None
+    ple_head_offsets: tuple[int, ...] | None = None
 
 
 __all__ = ["Qwen4ExpArgs"]

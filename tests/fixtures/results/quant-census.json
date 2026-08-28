@@ -1,86 +1,151 @@
 {
-  "schema_name": "quant-census.schema.json",
-  "schema_version": 2,
-  "evidence_status": "measured",
   "architecture": "qwen4",
-  "model_sha256": "6758491ef14294390bc79952eab2a7989b5066ed33d018296e6aa750d8783874",
-  "shard_count": 1,
-  "shards": [
-    {
-      "name": "valid-heterogeneous.gguf",
-      "size": 896,
-      "sha256": "6758491ef14294390bc79952eab2a7989b5066ed33d018296e6aa750d8783874",
-      "sha256_status": "verified"
-    }
-  ],
-  "tensor_count": 3,
-  "total_bytes": 488,
   "by_quant_type": {
-    "F32": {"tensors": 1, "bytes": 32},
-    "Q4_0": {"tensors": 1, "bytes": 36},
-    "Q6_K": {"tensors": 1, "bytes": 420}
+    "F32": {
+      "bytes": 32,
+      "tensors": 1
+    },
+    "Q4_0": {
+      "bytes": 36,
+      "tensors": 1
+    },
+    "Q6_K": {
+      "bytes": 420,
+      "tensors": 1
+    }
   },
+  "evidence_status": "measured",
   "expert_layers": [
     {
-      "layer": 0,
       "experts": 2,
-      "projections": ["down", "gate"],
-      "quant_types": ["Q4_0", "Q6_K"]
+      "layer": 0,
+      "projections": [
+        "down",
+        "gate"
+      ],
+      "quant_types": [
+        "Q4_0",
+        "Q6_K"
+      ]
     }
   ],
   "expert_pools": [
     {
+      "bytes": 420,
+      "experts": 2,
       "layer": 0,
       "projection": "down",
-      "tensor": "blk.0.ffn_down_exps.weight",
-      "experts": 2,
-      "shape": [2, 256],
       "quant_type": "Q6_K",
-      "bytes": 420
+      "shape": [
+        2,
+        256
+      ],
+      "tensor": "blk.0.ffn_down_exps.weight"
     },
     {
+      "bytes": 36,
+      "experts": 2,
       "layer": 0,
       "projection": "gate",
-      "tensor": "blk.0.ffn_gate_exps.weight",
-      "experts": 2,
-      "shape": [2, 32],
       "quant_type": "Q4_0",
-      "bytes": 36
+      "shape": [
+        2,
+        32
+      ],
+      "tensor": "blk.0.ffn_gate_exps.weight"
     }
   ],
+  "expert_slot_pools": [
+    {
+      "bytes_per_slot": 210,
+      "layers": [
+        0
+      ],
+      "packed_row_bytes": 210,
+      "pool_id": 0,
+      "projection": "down",
+      "quant_type": "Q6_K",
+      "shape_per_expert": [
+        256
+      ]
+    },
+    {
+      "bytes_per_slot": 18,
+      "layers": [
+        0
+      ],
+      "packed_row_bytes": 18,
+      "pool_id": 1,
+      "projection": "gate",
+      "quant_type": "Q4_0",
+      "shape_per_expert": [
+        32
+      ]
+    }
+  ],
+  "host_memory": {
+    "anonymous_host_source_bytes": 0,
+    "expert_mapped_bytes": 456,
+    "ordinary_tensor_bytes": 32,
+    "pinned_host_source_bytes": 0,
+    "ple_mapped_bytes": 0,
+    "total_file_backed_tensor_bytes": 488
+  },
+  "model_sha256": "6758491ef14294390bc79952eab2a7989b5066ed33d018296e6aa750d8783874",
+  "schema_name": "quant-census.schema.json",
+  "schema_version": 3,
+  "shard_count": 1,
+  "shards": [
+    {
+      "name": "valid-heterogeneous.gguf",
+      "sha256": "6758491ef14294390bc79952eab2a7989b5066ed33d018296e6aa750d8783874",
+      "sha256_status": "verified",
+      "size": 896
+    }
+  ],
+  "tensor_count": 3,
   "tensors": [
     {
       "name": "blk.0.ffn_gate_exps.weight",
-      "shape": [2, 32],
-      "quant_type": 2,
-      "quant_name": "Q4_0",
-      "shard_index": 0,
-      "offset": 352,
       "nbytes": 36,
+      "offset": 352,
+      "quant_name": "Q4_0",
+      "quant_type": 2,
+      "row_bytes": 18,
       "rows": 2,
-      "row_bytes": 18
+      "shape": [
+        2,
+        32
+      ],
+      "shard_index": 0
     },
     {
       "name": "blk.0.ffn_down_exps.weight",
-      "shape": [2, 256],
-      "quant_type": 14,
-      "quant_name": "Q6_K",
-      "shard_index": 0,
-      "offset": 416,
       "nbytes": 420,
+      "offset": 416,
+      "quant_name": "Q6_K",
+      "quant_type": 14,
+      "row_bytes": 210,
       "rows": 2,
-      "row_bytes": 210
+      "shape": [
+        2,
+        256
+      ],
+      "shard_index": 0
     },
     {
       "name": "output_norm.weight",
-      "shape": [8],
-      "quant_type": 0,
-      "quant_name": "F32",
-      "shard_index": 0,
-      "offset": 864,
       "nbytes": 32,
+      "offset": 864,
+      "quant_name": "F32",
+      "quant_type": 0,
+      "row_bytes": 32,
       "rows": 1,
-      "row_bytes": 32
+      "shape": [
+        8
+      ],
+      "shard_index": 0
     }
-  ]
+  ],
+  "total_bytes": 488
 }

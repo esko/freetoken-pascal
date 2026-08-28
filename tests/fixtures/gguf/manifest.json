@@ -7,6 +7,12 @@
       "size": 896
     },
     {
+      "expectation": "valid qwen heterogeneous host layout",
+      "name": "qwen-host-layout.gguf",
+      "sha256": "a40529c2615f143a4a01a9d73003aff8db28985ddb504054890809a054a1e7c2",
+      "size": 215712
+    },
+    {
       "expectation": "unsupported quant type",
       "name": "unsupported-known-quant.gguf",
       "sha256": "2e95a99adc5fb52a600188b98eb65980cef3c32c48520e75eb2ae3d7e8c58b1e",

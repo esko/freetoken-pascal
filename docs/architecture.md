@@ -54,6 +54,11 @@ projections may share one packed buffer; mixed types keep independent buffers. T
 contract, selected artifact identities and census commands are in
 [`gguf-qwen38.md`](gguf-qwen38.md).
 
+Host expert descriptors group only identical `(projection, quant type, shape, row stride)`
+geometries into a slot pool. Source and slot offsets are bounds-checked independently.
+The backing mappings are private and exposed read-only, remain unpinned, and retain the
+original artifact as their source of truth.
+
 ## MoE decode operation
 
 For each layer and decode step:
@@ -132,6 +137,10 @@ TP and layer ownership must not require an expert to bounce between P4s. Graph/l
 - Normal decode, speculative-style batched lookup, warm cache and cold cache are separate benchmarks.
 - The implementation must not pin the full PLE table.
 - Page-cache state is reported where practical.
+- Selected IQ4_NL rows dequantize on the host and only the bounded result transfers to the
+  execution device.
+- Cold, OS-readahead, targeted-row and explicit full-model warm modes are distinct and
+  observable.
 
 ## State and serving
 

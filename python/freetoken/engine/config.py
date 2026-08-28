@@ -28,6 +28,9 @@ class EngineConfig:
     # parallel reader's extra (non-reclaimable) whole-shard buffer; "serial" forces the
     # low-memory reclaimable read; "parallel" forces the fast read.
     expert_load: str = "auto"
+    # Qwen3.8 GGUF PLE page-cache policy.  Full warming is explicit because the
+    # shipping table is 28.8 GB and must never be touched wholesale by default.
+    ple_warm_mode: str = "cold"
     moe_cache_size: int = 0
     moe_cache_rate: float | None = None
     moe_cache_auto: bool = False

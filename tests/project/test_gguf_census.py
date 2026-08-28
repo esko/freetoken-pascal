@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,30 @@ def test_census_matches_schema_fixture() -> None:
     expected = json.loads((FIXTURES / "results/quant-census.json").read_text(encoding="utf-8"))
 
     assert actual == expected
+
+
+def test_census_upgrade_cli_runs_without_ambient_pythonpath(tmp_path: Path) -> None:
+    source = FIXTURES / "results/quant-census.json"
+    target = tmp_path / source.name
+    document = json.loads(source.read_text(encoding="utf-8"))
+    document["schema_version"] = 2
+    document.pop("expert_slot_pools")
+    document.pop("host_memory")
+    target.write_text(json.dumps(document), encoding="utf-8")
+
+    subprocess.run(
+        [sys.executable, "scripts/upgrade_quant_census.py", str(target)],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"PATH": str(Path(sys.executable).parent)},
+    )
+
+    upgraded = json.loads(target.read_text(encoding="utf-8"))
+    assert upgraded["schema_version"] == 3
+    assert "expert_slot_pools" in upgraded
+    assert "host_memory" in upgraded
 
 
 def test_declared_identity_is_never_reported_as_measured() -> None:

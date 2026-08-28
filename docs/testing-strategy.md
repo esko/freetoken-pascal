@@ -44,6 +44,8 @@ Runs in a CUDA 12.6 build container, GPU optional:
 - tiny model end-to-end generation;
 - one-P4 Qwen3.8 short-context correctness;
 - PLE warm/cold behavior;
+- file-backed PLE first/middle/last row parity, invalid index/range/hash failures and
+  page-fault/storage-read telemetry;
 - cache size zero and static-cache behavior;
 - power, clock and thermal stability;
 - invalid type/shape/bounds tests where safe.

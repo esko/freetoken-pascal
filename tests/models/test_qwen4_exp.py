@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from freetoken.models.qwen4_exp.gguf import (
 )
 from freetoken.models.qwen4_exp.model import (
     Qwen4ExpForCausalLM,
+    _HostNGramEmbedding,
     _ple_request_tokens,
     _PLELayer,
     build_ngram_ids,
@@ -184,6 +186,16 @@ def test_qwen4_exports_nvfp4_loader_hooks():
     assert callable(qwen4_exp.load_nvfp4_expert_sources_parallel)
 
 
+def test_qwen4_gguf_expert_setup_never_falls_through_to_nvfp4():
+    fixture = ROOT / "tests/fixtures/gguf/qwen-host-layout.gguf"
+
+    with pytest.raises(NotImplementedError, match="refusing to reinterpret them as NVFP4"):
+        qwen4_exp.setup_offload_expert_banks(
+            str(fixture),
+            SimpleNamespace(expert_quant="gguf"),
+        )
+
+
 def test_qwen4_registry_entry():
     spec = get_model_spec("Qwen4ExpForConditionalGeneration")
     assert spec.module == "freetoken.models.qwen4_exp"
@@ -191,6 +203,29 @@ def test_qwen4_registry_entry():
 
 
 def _gguf_shim():
+    head_vocab_sizes = [
+        20_000_003,
+        20_000_023,
+        20_000_033,
+        20_000_047,
+        20_000_059,
+        20_000_063,
+        20_000_069,
+        20_000_077,
+        20_000_081,
+        20_000_093,
+        20_000_107,
+        20_000_147,
+        20_000_153,
+        20_000_159,
+        20_000_161,
+        20_000_171,
+    ]
+    head_offsets = []
+    offset = 0
+    for size in head_vocab_sizes:
+        head_offsets.append(offset)
+        offset += size
     metadata = {
         "qwen4exp.block_count": 4,
         "qwen4exp.context_length": 262_144,
@@ -220,11 +255,12 @@ def _gguf_shim():
         "qwen4exp.ple.layers": [1],
         "qwen4exp.ple.ngram_size": 3,
         "qwen4exp.ple.heads_per_ngram": 8,
+        "qwen4exp.ple.layer_multipliers": [23703573157769, 20109073645365, 8052911324071],
         "qwen4exp.ple.conv_kernel": 4,
         "qwen4exp.ple.eos_token_id": 248044,
         "qwen4exp.embedding_length_per_layer_input": 160,
-        "qwen4exp.ple.head_vocab_sizes": [20_000_003 + i for i in range(16)],
-        "qwen4exp.ple.head_offsets": [i * 20_000_003 for i in range(16)],
+        "qwen4exp.ple.head_vocab_sizes": head_vocab_sizes,
+        "qwen4exp.ple.head_offsets": head_offsets,
         "qwen4exp.ple.image_token_id": 248056,
     }
     return SimpleNamespace(
@@ -244,9 +280,40 @@ def test_qwen4_gguf_config_uses_exact_artifact_geometry():
     assert config.qwen4_args.ple_layer_ids == (1,)
     assert config.qwen4_args.ple_embed_dim == 2560
     assert config.qwen4_args.split_ngram_parts == 1
+    assert config.qwen4_args.ple_layer_multipliers == (
+        23703573157769,
+        20109073645365,
+        8052911324071,
+    )
+    assert config.qwen4_args.ple_head_vocab_sizes is not None
+    assert config.qwen4_args.ple_head_offsets is not None
     assert config.is_linear_layer(2)
     assert not config.is_linear_layer(3)
     assert config.attention_group_for_layer(3).index_compress_ratio == 4
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("qwen4exp.ple.layer_multipliers", [3, 5], "multiplier metadata"),
+        (
+            "qwen4exp.ple.head_offsets",
+            [0] * 16,
+            "offsets are not contiguous",
+        ),
+        (
+            "qwen4exp.ple.head_vocab_sizes",
+            [0] + [20_000_003] * 15,
+            "vocabulary sizes must be positive",
+        ),
+    ],
+)
+def test_qwen4_gguf_rejects_invalid_ple_address_metadata(key, value, message):
+    shim = _gguf_shim()
+    shim.metadata[key] = value
+
+    with pytest.raises(ValueError, match=message):
+        parse_gguf_config(shim)
 
 
 def test_qwen4_gguf_registry_entry():
@@ -349,6 +416,36 @@ def test_metadata_export_accepts_a_zero_tensor_first_shard(tmp_path: Path):
 
     assert not metadata.tensors
     assert metadata.fields[OUTPUT_WEIGHT_PRESENT_KV].contents() is True
+
+
+def test_qwen4_gguf_ple_maps_and_dequantizes_selected_rows(monkeypatch):
+    config = parse_gguf_config(_gguf_shim())
+    args = replace(
+        config.qwen4_args,
+        ple_embed_dim=320,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=8,
+        ple_layer_multipliers=(3, 5, 7),
+        ple_head_vocab_sizes=(8, 8),
+        ple_head_offsets=(0, 8),
+    )
+    embedding = _HostNGramEmbedding(SimpleNamespace(qwen4_args=args), layer_id=1)
+    fixture = ROOT / "tests/fixtures/gguf/qwen-host-layout.gguf"
+    embedding.load_host_weights(str(fixture), ple_warm_mode="targeted")
+    monkeypatch.setattr(
+        embedding,
+        "_current_ngram_ids",
+        lambda: torch.tensor([[0, 15], [16, 31]], dtype=torch.long),
+    )
+
+    output = embedding.forward(torch.device("cpu"), torch.float32)
+
+    assert output.shape == (2, 320)
+    assert embedding._gguf_ple.telemetry()["lookup_rows"] == 4
+    assert embedding._gguf_ple.telemetry()["mode"] == "targeted"
+    assert embedding.telemetry()["source"] == "gguf-mmap"
+    assert embedding.telemetry()["packed_bytes_read"] == 4 * 90
+    embedding._gguf_ple.close()
 
 
 def test_qwen4_weight_names():

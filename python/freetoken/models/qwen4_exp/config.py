@@ -211,11 +211,25 @@ def parse_gguf_config(shim: Any) -> ModelConfig:
         raise ValueError(f"qwen4exp.ple.layers out of range: {ple_layers}")
     heads_per_ngram = int(required("ple.heads_per_ngram"))
     ngram_size = int(required("ple.ngram_size"))
+    if ngram_size < 2 or heads_per_ngram < 1:
+        raise ValueError(
+            "Qwen4-Exp PLE ngram_size must be >= 2 and heads_per_ngram must be positive"
+        )
     head_vocab_sizes = [int(value) for value in required("ple.head_vocab_sizes")]
     head_offsets = [int(value) for value in required("ple.head_offsets")]
+    layer_multipliers = [int(value) for value in required("ple.layer_multipliers")]
     expected_ngram_heads = (ngram_size - 1) * heads_per_ngram
     if len(head_vocab_sizes) != expected_ngram_heads or len(head_offsets) != expected_ngram_heads:
         raise ValueError("Qwen4-Exp PLE head metadata has the wrong length")
+    if len(layer_multipliers) != ngram_size:
+        raise ValueError("Qwen4-Exp PLE layer multiplier metadata has the wrong length")
+    if any(size <= 0 for size in head_vocab_sizes):
+        raise ValueError("Qwen4-Exp PLE head vocabulary sizes must be positive")
+    if head_offsets[0] != 0 or any(
+        head_offsets[index + 1] != head_offsets[index] + head_vocab_sizes[index]
+        for index in range(expected_ngram_heads - 1)
+    ):
+        raise ValueError("Qwen4-Exp PLE head offsets are not contiguous")
     ple_head_dim = int(required("embedding_length_per_layer_input"))
 
     qwen4_args = Qwen4ExpArgs(
@@ -237,6 +251,9 @@ def parse_gguf_config(shim: Any) -> ModelConfig:
         indexer_budget=int(required("attention.indexer.top_k")),
         indexer_compress_ratio=index_compress_ratio,
         output_gate_type="sigmoid",
+        ple_layer_multipliers=tuple(layer_multipliers),
+        ple_head_vocab_sizes=tuple(head_vocab_sizes),
+        ple_head_offsets=tuple(head_offsets),
     )
     groups = (
         LinearGatedDeltaGroupConfig(
