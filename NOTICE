@@ -2,18 +2,17 @@ FreeToken-Pascal
 
 Copyright 2026 contributors to FreeToken-Pascal.
 
-This product includes or adapts work from the following Apache-2.0 projects:
+This product currently includes source from the following upstream distribution:
 
-- FlashML-org/FreeToken, initially imported from commit
+- freetoken: FlashML-org/FreeToken (Apache-2.0), commit
   9ef3651309fe4058672f2cc92069238dea06be1b
-- vllm-project/vllm
-- ggml-org/llama.cpp
-- poisonxa16/pxq_llama.cpp
-- FlashML-org/flashlib
-- Colibri-AI/colibri
 
-Additional sources may be added during implementation. Exact repository URLs, commit
-SHAs, imported files, and local modifications must be recorded in
-`manifests/upstreams.yaml` and preserved in source-file headers.
+The complete FreeToken history was merged into this repository. Its original source files,
+copyright notices, and Apache-2.0 license remain reachable through that history. Root files changed
+by the downstream integration are recorded in `manifests/upstreams.yaml`.
 
-No endorsement by upstream projects is implied.
+Other projects listed in the provenance manifest with `usage: planned` or `usage: reference` are
+not currently copied into the downstream tree and therefore are not included in this NOTICE. Add
+them here only when an issue imports or adapts their source.
+
+No endorsement by FlashML or any other upstream project is implied.

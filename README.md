@@ -42,6 +42,13 @@ The imported upstream currently targets its own CUDA environment. The pinned CUD
 
 See [the upstream installation guide](docs/install.md) for the imported runtime's prerequisites and [the downstream integration map](docs/upstream-map.md) for the exact sync procedure.
 
+Validate or inspect pinned source provenance with:
+
+```bash
+python scripts/check_upstream_manifest.py
+python scripts/report_upstream_changes.py
+```
+
 ## Documentation
 
 - [Documentation index](docs/README.md)

@@ -1,82 +1,128 @@
-schema_version: 1
-updated: 2026-08-28
+schema_version: 2
+updated: "2026-08-28"
 policy:
   require_commit_sha: true
   require_license: true
+  require_responsible_issue: true
   moving_refs_are_prohibited_in_release: true
 sources:
   - id: freetoken
     repository: https://github.com/FlashML-org/FreeToken
+    upstream_ref: refs/heads/main
     ref: 9ef3651309fe4058672f2cc92069238dea06be1b
     license: Apache-2.0
     role: primary downstream base
+    usage: imported
+    responsible_issue: 5
+    notice_required: true
     imports:
       - source_path: .
         destination_path: .
+        source_ref: 9ef3651309fe4058672f2cc92069238dea06be1b
         method: unrelated-history merge
         local_modifications:
           - preserve downstream README, CONTRIBUTING, CI, governance, and project docs
           - publish downstream distribution metadata while retaining the freetoken import package
           - combine upstream and downstream ignore rules and Apache attribution
+        license: Apache-2.0
+        header_policy: preserved by history
+        responsible_issue: 5
+        responsible_pull_request: 30
   - id: freetoken-pascal-pr19
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 19
+    upstream_ref: refs/pull/19/head
     ref: c8e4c08e6548eb185b8d278efee5a03e26522655
     license: Apache-2.0
     role: sm61 compile and runtime fallbacks
+    usage: planned
+    responsible_issue: 10
+    notice_required: false
     imports: []
   - id: freetoken-cu126-pr26
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 26
+    upstream_ref: refs/pull/26/head
     ref: fb2f80d9c52fed6417038965713d27eff3fad01b
     license: Apache-2.0
     role: CUDA 12.6 dependency resolution
+    usage: planned
+    responsible_issue: 7
+    notice_required: false
     imports: []
   - id: freetoken-qwen4-pr232
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 232
-    ref: 856d91f049fa607111da596ba45ca78ff56c6caa
+    upstream_ref: refs/pull/232/head
+    ref: ad752c9970e0dc3f1b09aeec38235332149336ed
     license: Apache-2.0
     role: Qwen3.8 Qwen4 QSA PLE and vision source; v1 imports text only
+    usage: planned
+    responsible_issue: 11
+    notice_required: false
     imports: []
   - id: freetoken-gguf-pr131
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 131
+    upstream_ref: refs/pull/131/head
     ref: bb432e8c473c557cdef6517abccf0c129bd8c544
     license: Apache-2.0
     role: generic GGUF K/I quant and qwen MoE loader
+    usage: planned
+    responsible_issue: 12
+    notice_required: false
     imports: []
   - id: freetoken-tp-pr104
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 104
+    upstream_ref: refs/pull/104/head
     ref: 3c8b28116b027649c8394714fa70a03f862c20e4
     license: Apache-2.0
     role: Qwen MoE tensor-parallel patterns
+    usage: planned
+    responsible_issue: 20
+    notice_required: false
     imports: []
   - id: llama-qwen4-pr27742
     repository: https://github.com/ggml-org/llama.cpp
     pull_request: 27742
-    ref: TO_BE_PINNED
+    upstream_ref: refs/pull/27742/head
+    ref: eaf93765572e794b8e3754fe45adbe12d381e997
     license: MIT
     role: GGUF and model correctness oracle
+    usage: reference
+    responsible_issue: 11
+    notice_required: false
     imports: []
   - id: pxq-llama
     repository: https://github.com/poisonxa16/pxq_llama.cpp
-    ref: TO_BE_PINNED
+    upstream_ref: refs/heads/main
+    ref: 066a37e9540a1ca21375fdeb377836fe69ecb729
     license: MIT
     role: Pascal GPU and AVX2 low-bit kernel donor/reference
+    usage: planned
+    responsible_issue: 19
+    notice_required: false
     imports: []
   - id: vllm-qwen38-pr53896
     repository: https://github.com/vllm-project/vllm
     pull_request: 53896
+    upstream_ref: refs/pull/53896/head
     ref: 2a4cd640ff1a61b66124ddbaaf02a73781f7295a
     license: Apache-2.0
     role: Qwen3.8 model and TP oracle
+    usage: reference
+    responsible_issue: 11
+    notice_required: false
     imports: []
   - id: vllm-ple-pr53899
     repository: https://github.com/vllm-project/vllm
     pull_request: 53899
+    upstream_ref: refs/pull/53899/head
     ref: 95dc96d1d012a25ff5c3823a1e77197c8dae4654
     license: Apache-2.0
     role: PLE offload oracle
+    usage: reference
+    responsible_issue: 13
+    notice_required: false
     imports: []

@@ -2,6 +2,20 @@
 
 This project is a downstream integration, not an independent reimplementation. Every imported change must use a pinned commit SHA.
 
+The machine-readable contract is `manifests/upstreams.schema.json`. Validate the ledger, imported destination paths, and NOTICE membership with:
+
+```bash
+python scripts/check_upstream_manifest.py
+```
+
+Each source has one usage state:
+
+- `imported`: source is present in this tree, has at least one path ledger entry, and is listed in NOTICE when required;
+- `planned`: pinned donor code intended for a named implementation issue but not copied yet;
+- `reference`: a pinned correctness oracle whose code is not copied.
+
+Only `imported` sources declare destination paths. Changing a source to `imported` requires the responsible issue/PR, exact source and destination paths, import method, local differences, license, and header policy in the same commit.
+
 ## Primary upstreams
 
 | Capability | Primary source | Secondary oracle |
@@ -128,3 +142,20 @@ When sources disagree:
 - rerun hosted correctness after every sync;
 - rerun H2/H3 gates for changes touching kernels, model graphs, cache maps, quant loaders or TP;
 - do not mix a broad upstream sync with a downstream optimization.
+
+## Upstream change report
+
+Inspect all pins without network access:
+
+```bash
+python scripts/report_upstream_changes.py --offline --json
+```
+
+Compare every recorded moving locator (`upstream_ref`) with its immutable pin:
+
+```bash
+python scripts/report_upstream_changes.py
+python scripts/report_upstream_changes.py --json > results/upstream-changes.json
+```
+
+The report labels an unchanged locator `current`, a different remote head `changed`, and a failed lookup `unavailable`. Changed rows include a GitHub compare URL. A changed PR head does not update the manifest automatically: inspect the diff, verify the exact commit, and update the pin only in the issue that consumes it or in a focused provenance/sync PR.

@@ -6,6 +6,7 @@
 - [System architecture](architecture.md)
 - [Hardware target](hardware-target.md)
 - [Upstream integration map](upstream-map.md)
+- [Provenance and license review](provenance-review.md)
 
 ## Execution
 
