@@ -21,6 +21,9 @@ Runs on GitHub-hosted Linux without a GPU:
 - quant block-size/row-stride tests;
 - pinned Qwen3.8 Q4/Q3 byte-range row references, with declared artifact hashes kept
   distinct from payload-verified evidence;
+- bounded real-artifact expert probes that verify HTTP ranges and descriptor geometry,
+  then retain raw scalar/forced-AVX2 A/B timings and kernel telemetry as H0
+  `range_evidence: measured/artifact-byte` (never P4 evidence);
 - host simulators for CUDA kernel arithmetic where feasible;
 - cache policy and q-star scheduler simulation;
 - source-provenance checks;

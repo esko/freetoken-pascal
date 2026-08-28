@@ -101,3 +101,25 @@ from both pinned Q4 and Q3 artifacts. Hosted PLE tests compare IQ4_NL selected r
 gguf-py and exercise invalid IDs, short ranges, hash mismatches and every warm mode. H1
 compiles the same GGUF CUDA translation unit for `sm_61`. CUDA expert parity and short
 generation remain H2 and require a real Tesla P4; they are not waived by host references.
+
+## Real expert byte probe (H0)
+
+The bounded Issue #16 probe downloads one selected expert's gate, up and down packed ranges
+from the immutable Hugging Face revision, using HTTP `Range` and the pinned manifest/census
+metadata. It verifies the response `Content-Range`, body length, shard bounds, quant type and
+packed row stride before constructing a one-expert `CpuExpertLayout`.
+
+```bash
+PYTHONPATH=python python scripts/probe_qwen38_expert.py \
+  --layer 0 --expert 0 \
+  --cache-dir .cache/freetoken/qwen38-range \
+  --output results/qwen38-expert-layer0.json
+```
+
+Use `--layer 2` to probe the promoted Q5_K/Q8_0 projection family, and `--offline` to require
+the selected ranges to already exist in the cache. Cache files contain only the three selected
+ranges; no complete shard is downloaded or committed. The JSON report keeps raw timing samples
+and kernel telemetry for an internal forced-scalar versus forced-AVX2 executor A/B comparison,
+labels the partial payload as `range_evidence: measured/artifact-byte`, and remains H0/no-P4
+evidence. It is not an independent dense oracle and makes no cache, hybrid-split or full-engine
+performance claim.
