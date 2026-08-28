@@ -89,6 +89,11 @@ Report maximum absolute error, relative RMS and cosine similarity. Use adversari
 The Issue #16 mixed direct GEMV tests exercise Q5_1 and Q8_0 down rows at input width 640 and Q5_K gate/up rows at input width 2560.
 
 The CPU-only Qwen GGUF bridge tests cover host lifetime and idempotent close, exact mixed-layout and kernel-census preservation, explicit Torch/NumPy decode conversion, unsupported runtime modes, cache-size zero, and the engine's fail-closed homogeneous-cache guard. The standalone routed-layer adapter tests compare direct bundle execution with an independent full-softmax route reference across route widths, duplicate IDs, padded rows and mixed Qwen geometries, and cover shape, dtype, ID, TP and lifecycle failures. These tests remain CPU-only and do not imply full Engine or model-graph support.
+The Qwen model attachment tests use fake layers and a borrowed bundle to prove complete
+prevalidation, all-layer adapter construction, middle-layer rollback, duplicate and
+closed/TP2 rejection, detach identity restoration, state-dict invariance, and
+caller-owned bundle lifetime. They do not claim full-model CPU execution or serving
+support.
 
 ### MoE operation
 
