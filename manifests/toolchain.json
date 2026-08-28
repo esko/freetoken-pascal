@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "platform": "linux/amd64",
+  "python": "3.12.11",
+  "uv": "0.12.3",
+  "cuda": "12.6.3",
+  "torch": "2.11.0+cu126",
+  "triton": "3.6.0",
+  "cmake": "4.1.0",
+  "ninja": "1.13.0",
+  "target_architectures": ["sm_61"],
+  "torch_pascal_architectures": ["sm_60", "sm_61"],
+  "maximum_host_gcc_major": 13,
+  "images": {
+    "python": {
+      "reference": "python:3.12.11-slim-bookworm",
+      "digest": "sha256:c00fc7b44d844b6da22861ec24af43968a5200eac4ec607b4725d585165d6b49"
+    },
+    "cuda": {
+      "reference": "nvidia/cuda:12.6.3-devel-ubuntu24.04",
+      "digest": "sha256:badf6c452e8b1efea49d0bb956bef78adcf60e7f87ac77333208205f00ac9ade"
+    }
+  }
+}

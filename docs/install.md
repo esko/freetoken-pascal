@@ -1,5 +1,10 @@
 # Install
 
+> **Downstream status:** the imported instructions below describe the upstream CUDA 13 runtime.
+> CUDA 13 is not compatible with Tesla P4 and is not a supported FreeToken-Pascal environment.
+> Use the pinned CUDA 12.6 instructions in
+> [development-environments.md](development-environments.md) while the downstream runtime is built.
+
 ## Requirements
 
 - Linux x86_64, NVIDIA GPU, driver r580+ (CUDA 13)

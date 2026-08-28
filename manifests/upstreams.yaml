@@ -46,10 +46,21 @@ sources:
     ref: fb2f80d9c52fed6417038965713d27eff3fad01b
     license: Apache-2.0
     role: CUDA 12.6 dependency resolution
-    usage: planned
+    usage: imported
     responsible_issue: 7
-    notice_required: false
-    imports: []
+    notice_required: true
+    imports:
+      - source_path: pyproject.toml
+        destination_path: pyproject.toml
+        source_ref: fb2f80d9c52fed6417038965713d27eff3fad01b
+        method: adapted
+        local_modifications:
+          - make the CUDA 12.6 Torch index the downstream default
+          - pin resolved dependencies and container images in downstream manifests
+          - add an explicit CUDA 12.6 and sm_61 compile gate
+        license: Apache-2.0
+        header_policy: not applicable
+        responsible_issue: 7
   - id: freetoken-qwen4-pr232
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 232
