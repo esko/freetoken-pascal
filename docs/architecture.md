@@ -45,6 +45,15 @@ P4 #0 VRAM                            P4 #1 VRAM
 
 The exact ordinary-tensor placement is measured. The architecture requires the routed expert bank to remain complete on the host even when a subset is cached.
 
+## GGUF ingestion
+
+The GGUF reader resolves a complete immutable shard set before exposing a tensor. It
+keeps the native per-tensor type and row stride, including heterogeneous expert
+projections, and records the source shard and absolute payload offset. Uniform fused
+projections may share one packed buffer; mixed types keep independent buffers. The full
+contract, selected artifact identities and census commands are in
+[`gguf-qwen38.md`](gguf-qwen38.md).
+
 ## MoE decode operation
 
 For each layer and decode step:

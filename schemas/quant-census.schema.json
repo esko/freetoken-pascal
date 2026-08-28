@@ -4,20 +4,37 @@
   "title": "FreeToken-Pascal quantization census",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_name", "schema_version", "evidence_status", "model_sha256", "tensor_count", "total_bytes", "by_quant_type", "expert_layers"],
+  "required": [
+    "schema_name", "schema_version", "evidence_status", "architecture",
+    "model_sha256", "shard_count", "shards", "tensor_count", "total_bytes",
+    "by_quant_type", "expert_layers", "expert_pools", "tensors"
+  ],
   "properties": {
     "schema_name": {"const": "quant-census.schema.json"},
-    "schema_version": {"const": 1},
-    "evidence_status": {"enum": ["synthetic", "measured"]},
-    "model_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "schema_version": {"const": 2},
+    "evidence_status": {"enum": ["synthetic", "artifact-metadata", "measured"]},
+    "architecture": {"type": "string", "minLength": 1},
+    "model_sha256": {"$ref": "#/$defs/sha256"},
+    "shard_count": {"type": "integer", "minimum": 1},
+    "shards": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "size", "sha256", "sha256_status"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "size": {"type": "integer", "minimum": 1},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "sha256_status": {"enum": ["declared", "verified"]}
+        }
+      }
+    },
     "tensor_count": {"type": "integer", "minimum": 0},
     "total_bytes": {"type": "integer", "minimum": 0},
     "by_quant_type": {
-      "type": "object",
-      "minProperties": 1,
+      "type": "object", "minProperties": 1,
       "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
+        "type": "object", "additionalProperties": false,
         "required": ["tensors", "bytes"],
         "properties": {
           "tensors": {"type": "integer", "minimum": 0},
@@ -28,15 +45,53 @@
     "expert_layers": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["layer", "experts", "quant_types"],
+        "type": "object", "additionalProperties": false,
+        "required": ["layer", "experts", "projections", "quant_types"],
         "properties": {
           "layer": {"type": "integer", "minimum": 0},
           "experts": {"type": "integer", "minimum": 1},
+          "projections": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
           "quant_types": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}
         }
       }
+    },
+    "expert_pools": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["layer", "projection", "tensor", "experts", "shape", "quant_type", "bytes"],
+        "properties": {
+          "layer": {"type": "integer", "minimum": 0},
+          "projection": {"type": "string", "minLength": 1},
+          "tensor": {"type": "string", "minLength": 1},
+          "experts": {"type": "integer", "minimum": 1},
+          "shape": {"$ref": "#/$defs/shape"},
+          "quant_type": {"type": "string", "minLength": 1},
+          "bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "tensors": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "shape", "quant_type", "quant_name", "shard_index", "offset", "nbytes", "rows", "row_bytes"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "shape": {"$ref": "#/$defs/shape"},
+          "quant_type": {"type": "integer", "minimum": 0},
+          "quant_name": {"type": "string", "minLength": 1},
+          "shard_index": {"type": "integer", "minimum": 0},
+          "offset": {"type": "integer", "minimum": 0},
+          "nbytes": {"type": "integer", "minimum": 0},
+          "rows": {"type": "integer", "minimum": 1},
+          "row_bytes": {"type": "integer", "minimum": 1}
+        }
+      }
     }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "shape": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}}
   }
 }

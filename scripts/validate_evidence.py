@@ -49,6 +49,16 @@ def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
             != document["total_bytes"]
         ):
             errors.append("total_bytes must equal the by_quant_type byte sum")
+        if document["shard_count"] != len(document["shards"]):
+            errors.append("shard_count must equal the number of shard identities")
+        if document["tensor_count"] != len(document["tensors"]):
+            errors.append("tensor_count must equal the number of tensor records")
+        if sum(entry["nbytes"] for entry in document["tensors"]) != document["total_bytes"]:
+            errors.append("total_bytes must equal the tensor-record byte sum")
+        measured = document["evidence_status"] == "measured"
+        verified = all(shard["sha256_status"] == "verified" for shard in document["shards"])
+        if measured != verified:
+            errors.append("measured census status must exactly match verified shard hashes")
     elif schema_name == "correctness-evidence.schema.json":
         comparison_passed = all(comparison["passed"] for comparison in document["comparisons"])
         if document["passed"] != comparison_passed:

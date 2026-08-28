@@ -18,45 +18,39 @@ from __future__ import annotations
 
 import torch
 
-# ggml_type enum values (subset present in these checkpoints).
-GGML_F32 = 0
-GGML_F16 = 1
-GGML_Q4_0 = 2
-GGML_Q8_0 = 8
-GGML_Q6_K = 14
-GGML_BF16 = 30
-
-# (block numel, bytes per block) per ggml type.
-BLOCK_SHAPE: dict[int, tuple[int, int]] = {
-    GGML_F32: (1, 4),
-    GGML_F16: (1, 2),
-    GGML_BF16: (1, 2),
-    GGML_Q4_0: (32, 18),
-    GGML_Q8_0: (32, 34),
-    GGML_Q6_K: (256, 210),
-}
-
-GGML_NAME = {
-    GGML_F32: "F32",
-    GGML_F16: "F16",
-    GGML_BF16: "BF16",
-    GGML_Q4_0: "Q4_0",
-    GGML_Q8_0: "Q8_0",
-    GGML_Q6_K: "Q6_K",
-}
-
-
-def row_bytes(numel: int, ggml_type: int) -> int:
-    """Packed byte length of one row of ``numel`` elements in ``ggml_type`` blocks.
-
-    Single source of truth for the ``numel // block * type_size`` math shared by the
-    packed-weight ops (``GGUFLinear``/``GGUFEmbedding``) and the expert bank loaders.
-    """
-    block, type_size = BLOCK_SHAPE[ggml_type]
-    assert numel % block == 0, (
-        f"{numel} not a multiple of block {block} for {GGML_NAME.get(ggml_type, ggml_type)}"
-    )
-    return numel // block * type_size
+from freetoken.gguf_types import (
+    BLOCK_SHAPE,
+    DEQUANT_TYPES,
+    GGML_BF16,
+    GGML_F16,
+    GGML_F32,
+    GGML_IQ1_M,
+    GGML_IQ1_S,
+    GGML_IQ2_S,
+    GGML_IQ2_XS,
+    GGML_IQ2_XXS,
+    GGML_IQ3_S,
+    GGML_IQ3_XXS,
+    GGML_IQ4_NL,
+    GGML_IQ4_XS,
+    GGML_NAME,
+    GGML_Q2_K,
+    GGML_Q3_K,
+    GGML_Q4_0,
+    GGML_Q4_1,
+    GGML_Q4_K,
+    GGML_Q5_0,
+    GGML_Q5_1,
+    GGML_Q5_K,
+    GGML_Q6_K,
+    GGML_Q8_0,
+    GGML_UNQUANTIZED,
+    MMQ_TYPES,
+    MMVQ_TYPES,
+    MOE_MMQ_TYPES,
+    MOE_VEC_TYPES,
+    row_bytes,
+)
 
 
 def _f16_scales(raw: torch.Tensor, lo: int, hi: int) -> torch.Tensor:
@@ -137,17 +131,67 @@ def dequantize(raw: torch.Tensor, ggml_type: int, out_dtype: torch.dtype) -> tor
     return fn(raw, out_dtype)
 
 
+def dequantize_reference(
+    raw: torch.Tensor,
+    ggml_type: int,
+    out_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Independent gguf-py CPU oracle for every declared GGML block type.
+
+    This is intentionally not a serving fallback: it materializes dense FP32 NumPy
+    rows and exists for row-level correctness tests and converter validation.
+    """
+    import gguf
+
+    if ggml_type not in BLOCK_SHAPE:
+        raise ValueError(f"unknown GGML type {ggml_type}")
+    if raw.dtype != torch.uint8:
+        raise ValueError(f"reference dequant expects uint8 packed bytes, got {raw.dtype}")
+    packed = raw.detach().to(device="cpu").contiguous().numpy()
+    try:
+        quant_type = gguf.GGMLQuantizationType(ggml_type)
+        values = gguf.dequantize(packed, quant_type)
+    except Exception as error:
+        raise ValueError(
+            f"reference dequant failed for {GGML_NAME.get(ggml_type, ggml_type)}: {error}"
+        ) from error
+    return torch.from_numpy(values.copy()).reshape(-1).to(out_dtype)
+
+
 __all__ = [
-    "GGML_F32",
-    "GGML_F16",
-    "GGML_BF16",
-    "GGML_Q4_0",
-    "GGML_Q8_0",
-    "GGML_Q6_K",
-    "GGML_NAME",
     "BLOCK_SHAPE",
-    "row_bytes",
+    "DEQUANT_TYPES",
+    "GGML_BF16",
+    "GGML_F16",
+    "GGML_F32",
+    "GGML_IQ1_M",
+    "GGML_IQ1_S",
+    "GGML_IQ2_S",
+    "GGML_IQ2_XS",
+    "GGML_IQ2_XXS",
+    "GGML_IQ3_S",
+    "GGML_IQ3_XXS",
+    "GGML_IQ4_NL",
+    "GGML_IQ4_XS",
+    "GGML_NAME",
+    "GGML_Q2_K",
+    "GGML_Q3_K",
+    "GGML_Q4_0",
+    "GGML_Q4_1",
+    "GGML_Q4_K",
+    "GGML_Q5_0",
+    "GGML_Q5_1",
+    "GGML_Q5_K",
+    "GGML_Q6_K",
+    "GGML_Q8_0",
+    "GGML_UNQUANTIZED",
+    "MMQ_TYPES",
+    "MMVQ_TYPES",
+    "MOE_MMQ_TYPES",
+    "MOE_VEC_TYPES",
     "dequant_q4_0",
     "dequant_q6_k",
     "dequantize",
+    "dequantize_reference",
+    "row_bytes",
 ]

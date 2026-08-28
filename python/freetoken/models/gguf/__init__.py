@@ -12,10 +12,10 @@ from .reader import (
 )
 
 __all__ = [
-    "GGML_NAME",
-    "dequantize",
     "FTW_METADATA_GGUF",
+    "GGML_NAME",
     "GgufTensor",
+    "dequantize",
     "gguf_architecture",
     "gguf_config_source",
     "gguf_tensor_names",

@@ -19,7 +19,7 @@ def _write_valid(path: Path) -> None:
     writer.add_name("freetoken-pascal-synthetic-tiny")
     writer.add_uint32("general.alignment", 32)
     q4 = np.arange(36, dtype=np.uint8).reshape(2, 18)
-    q6 = np.arange(210, dtype=np.uint8).reshape(1, 210)
+    q6 = np.arange(420, dtype=np.uint16).astype(np.uint8).reshape(2, 210)
     writer.add_tensor("blk.0.ffn_gate_exps.weight", q4, raw_dtype=gguf.GGMLQuantizationType.Q4_0)
     writer.add_tensor("blk.0.ffn_down_exps.weight", q6, raw_dtype=gguf.GGMLQuantizationType.Q6_K)
     writer.add_tensor("output_norm.weight", np.arange(8, dtype=np.float32))

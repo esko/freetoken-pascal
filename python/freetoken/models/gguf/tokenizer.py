@@ -13,7 +13,12 @@ from typing import Any
 from .reader import gguf_architecture, load_gguf_metadata
 
 # GGUF architecture -> transformers GGUF tokenizer-converter key.
-_TOKENIZER_ARCH = {"gemma4": "gemma4_text"}
+_TOKENIZER_ARCH = {
+    "gemma4": "gemma4_text",
+    # qwen4exp advertises tokenizer.ggml.pre=qwen35, but the embedded format is
+    # the Qwen GPT-2 BPE handled by transformers' qwen2 converter.
+    "qwen4exp": "qwen2",
+}
 
 
 def load_gguf_tokenizer(model_path: str):
@@ -36,13 +41,14 @@ def load_gguf_tokenizer(model_path: str):
         tid = meta.get(f"tokenizer.ggml.{id_key}")
         return tokens[int(tid)] if tid is not None and int(tid) < len(tokens) else default
 
-    # gemma4 chat turns end with <turn|>; prefer it as eos so chat generation halts
-    # (the formal <eos> is also a stop id, see gguf_eos_token_ids).
-    turn_end = "<turn|>" if "<turn|>" in tokens else None
+    preferred_eos = next(
+        (token for token in ("<turn|>", "<|im_end|>") if token in tokens),
+        None,
+    )
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=fast,
         bos_token=tok_for("bos_token_id", "<bos>"),
-        eos_token=turn_end or tok_for("eos_token_id", "<eos>"),
+        eos_token=preferred_eos or tok_for("eos_token_id", "<eos>"),
         unk_token=tok_for("unknown_token_id", "<unk>"),
         pad_token=tok_for("padding_token_id", "<pad>"),
     )
@@ -64,7 +70,7 @@ def gguf_eos_token_ids(model_path: str, tokenizer) -> set[int]:
         ids.add(int(eid))
     # Look the stop tokens up in the vocab directly (convert_tokens_to_ids would map an
     # absent name to <unk>, wrongly adding it as a stop id).
-    for name in ("<eos>", "<turn|>"):
+    for name in ("<eos>", "<turn|>", "<|endoftext|>", "<|im_end|>"):
         try:
             ids.add(tokens.index(name))
         except ValueError:
@@ -72,4 +78,4 @@ def gguf_eos_token_ids(model_path: str, tokenizer) -> set[int]:
     return ids
 
 
-__all__ = ["load_gguf_tokenizer", "gguf_eos_token_ids"]
+__all__ = ["gguf_eos_token_ids", "load_gguf_tokenizer"]

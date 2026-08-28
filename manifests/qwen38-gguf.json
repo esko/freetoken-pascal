@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+  "revision": "c8b5954a88c2775c546b92593eda40ea041d3176",
+  "source": "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/c8b5954a88c2775c546b92593eda40ea041d3176",
+  "identity_note": "Sizes and SHA-256 values are pinned Hugging Face LFS metadata. A census using these without reading every payload byte must use artifact-metadata evidence_status.",
+  "variants": {
+    "UD-Q4_K_XL": {
+      "file_type": 15,
+      "tensor_count": 1224,
+      "quant_type_counts": {
+        "BF16": 24,
+        "F32": 557,
+        "IQ4_NL": 1,
+        "Q4_K": 94,
+        "Q5_1": 43,
+        "Q5_K": 2,
+        "Q8_0": 503
+      },
+      "shards": [
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+          "size": 10946624,
+          "sha256": "4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082"
+        },
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+          "size": 49859583136,
+          "sha256": "3f342f1c1580473f1ee94ddd5b28206e8c07a70fa1a366f59d1d6c922919a6c9"
+        },
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+          "size": 49376141504,
+          "sha256": "56758f40269cad5cd9b0d3d6fbae0f40f6d5be6de49e4ab392dbe83157d9cbd3"
+        },
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+          "size": 12087983520,
+          "sha256": "753bda48b98ba4f1636134a90a967de1b2d3908a236c026e464777342e53510a"
+        }
+      ]
+    },
+    "UD-Q3_K_XL": {
+      "file_type": 12,
+      "tensor_count": 1224,
+      "quant_type_counts": {
+        "BF16": 24,
+        "F32": 557,
+        "IQ3_XXS": 94,
+        "IQ4_NL": 44,
+        "IQ4_XS": 2,
+        "Q6_K": 1,
+        "Q8_0": 502
+      },
+      "shards": [
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
+          "size": 10946624,
+          "sha256": "f2ef4328929d8b8c8930e2856eef52128dd4ce3425302f04bc3c657431cc4c49"
+        },
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q3_K_XL-00002-of-00003.gguf",
+          "size": 49983253824,
+          "sha256": "7d230e7c9421d868b89eebaf23033af0ea1a4e046956df00fb156814fb62346e"
+        },
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q3_K_XL-00003-of-00003.gguf",
+          "size": 39992153376,
+          "sha256": "21d4f90f9cd7b7c3a1582667c20cb22f7b03de895b88a23bb20aaeaa44f2c199"
+        }
+      ]
+    }
+  }
+}
