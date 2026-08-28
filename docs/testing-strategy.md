@@ -82,6 +82,7 @@ dequantize to float + torch/reference matmul
 ```
 
 Report maximum absolute error, relative RMS and cosine similarity. Use adversarial values as well as random tensors.
+The Issue #16 mixed direct GEMV tests exercise Q5_1 and Q8_0 down rows at input width 640 and Q5_K gate/up rows at input width 2560.
 
 ### MoE operation
 
