@@ -978,6 +978,11 @@ class _ThreadedMixedRunner:
         self._route_weights: np.ndarray | None = None
         self._outputs: np.ndarray | None = None
         self._merged: np.ndarray | None = None
+        # Results returned for omitted caller output are prepared up front.  Keep
+        # a small bounded ring so sequential and grouped callers do not alias the
+        # immediately preceding result while execute remains allocation-free.
+        self._results: tuple[np.ndarray, ...] | None = None
+        self._result_cursor = 0
         self._thread_workspace_bytes = 0
         self._worker_workspace_bytes = 0
         self._last_telemetry: CpuExecutionTelemetry | None = None
@@ -1040,6 +1045,11 @@ class _ThreadedMixedRunner:
                 (self.max_threads, plan.max_tokens, self.owner.hidden_size), dtype=np.float32
             )
             self._merged = np.empty((plan.max_tokens, self.owner.hidden_size), dtype=np.float32)
+            self._results = tuple(
+                np.empty((plan.max_tokens, self.owner.hidden_size), dtype=self._output_dtype)
+                for _ in range(max(2, self.max_threads))
+            )
+            self._result_cursor = 0
             self._plan = plan
             self._worker_workspace_bytes = sum(
                 worker._plan.workspace_bytes for worker in self._workers if worker._plan is not None
@@ -1049,6 +1059,7 @@ class _ThreadedMixedRunner:
                 + self._route_weights.nbytes
                 + self._outputs.nbytes
                 + self._merged.nbytes
+                + sum(result.nbytes for result in self._results)
             )
             return plan
         finally:
@@ -1190,7 +1201,13 @@ class _ThreadedMixedRunner:
             route_weights = self._route_weights
             outputs = self._outputs
             merged = self._merged
-            if route_ids is None or route_weights is None or outputs is None or merged is None:
+            if (
+                route_ids is None
+                or route_weights is None
+                or outputs is None
+                or merged is None
+                or self._results is None
+            ):
                 raise WorkspaceNotPrepared("call prepare before execute")
             ranges = partition_q4_k_routes(expert_ids.shape[1], selected_threads)
             actual_threads = len(ranges)
@@ -1302,7 +1319,8 @@ class _ThreadedMixedRunner:
             if any(result is None for result in results):
                 raise ExecutionFailed("threaded mixed GEMV completed without all partitions")
             if result_output is None:
-                result_output = np.empty((tokens, self.owner.hidden_size), dtype=self._output_dtype)
+                result_output = self._results[self._result_cursor % len(self._results)][:tokens]
+                self._result_cursor += 1
             if accumulate and output is not None:
                 np.copyto(merged[:tokens], result_output, casting="unsafe")
             else:

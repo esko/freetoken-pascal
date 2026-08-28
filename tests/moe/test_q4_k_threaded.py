@@ -87,12 +87,41 @@ class _FastFakeAvx2:
         return out
 
 
+class _FastFakeMixed:
+    isa = "avx2"
+    backend = "mixed_gemv_avx2"
+    fallback_reason = None
+
+    def backend_for(self, quant_name: str) -> str:
+        return f"{quant_name.lower()}_avx2"
+
+    def gemv(
+        self,
+        rows: np.ndarray,
+        input_dim: int,
+        vector: np.ndarray,
+        *,
+        quant_name: str,
+        out: np.ndarray,
+    ) -> np.ndarray:
+        del input_dim, quant_name
+        # Keep synthetic mixed benchmarks bounded without decoding a full matrix.
+        np.multiply(rows[:, 0].astype(np.float32), np.float32(vector.sum()), out=out)
+        return out
+
+
 def _fake_avx2(monkeypatch: pytest.MonkeyPatch) -> None:
     primitive = _FastFakeAvx2()
+    mixed = _FastFakeMixed()
     monkeypatch.setattr(
         q4_k,
         "select_q4_k_primitive",
         lambda mode: primitive,
+    )
+    monkeypatch.setattr(
+        q4_k,
+        "select_mixed_gemv_primitive",
+        lambda mode: mixed,
     )
 
 
@@ -307,6 +336,7 @@ def test_q4_k_benchmark_harness_records_serial_fallback_threads(
 ) -> None:
     primitive = _FastFakeAvx2("scalar")
     monkeypatch.setattr(q4_k, "select_q4_k_primitive", lambda mode: primitive)
+    monkeypatch.setattr(q4_k, "select_mixed_gemv_primitive", lambda mode: _FastFakeMixed())
     benchmark = _benchmark_module()
     args = benchmark._parser().parse_args(
         [
@@ -340,6 +370,7 @@ def test_q4_k_benchmark_harness_records_parallel_thread_sweep(
 ) -> None:
     primitive = _FastFakeAvx2("avx2")
     monkeypatch.setattr(q4_k, "select_q4_k_primitive", lambda mode: primitive)
+    monkeypatch.setattr(q4_k, "select_mixed_gemv_primitive", lambda mode: _FastFakeMixed())
     benchmark = _benchmark_module()
     args = benchmark._parser().parse_args(
         [
