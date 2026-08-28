@@ -339,8 +339,10 @@ def test_mapped_expert_banks_close_attempts_all_banks_and_retries() -> None:
     with pytest.raises(RuntimeError, match="first close failed"):
         banks.close()
     assert calls == ["first", "second"]
+    assert not banks._closed
     banks.close()
     assert calls == ["first", "second", "first", "second"]
+    assert banks._closed
 
 
 @pytest.mark.parametrize("promoted", [False, True])
