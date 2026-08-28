@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import io
 import json
 import subprocess
@@ -23,10 +24,14 @@ from freetoken.reference_correctness import (
     write_observation_bundle,
 )
 
-from scripts.validate_evidence import validate_document
-
 ROOT = Path(__file__).resolve().parents[2]
 CORPUS = ROOT / "tests/fixtures/qwen38-reference-corpus.json"
+VALIDATOR_SPEC = importlib.util.spec_from_file_location(
+    "validate_evidence", ROOT / "scripts/validate_evidence.py"
+)
+assert VALIDATOR_SPEC and VALIDATOR_SPEC.loader
+VALIDATE_EVIDENCE = importlib.util.module_from_spec(VALIDATOR_SPEC)
+VALIDATOR_SPEC.loader.exec_module(VALIDATE_EVIDENCE)
 
 
 def _identity(implementation: str, *, mode: str = "incremental") -> dict[str, object]:
@@ -375,7 +380,7 @@ def test_evidence_validator_rejects_nonfinite_json_numbers() -> None:
     )
     evidence["comparisons"][0]["observed"] = float("nan")
 
-    errors = validate_document(evidence, schema_dir=ROOT / "schemas")
+    errors = VALIDATE_EVIDENCE.validate_document(evidence, schema_dir=ROOT / "schemas")
 
     assert any("finite" in error.lower() or "nan" in error.lower() for error in errors)
 
@@ -387,7 +392,7 @@ def test_evidence_validator_binds_each_party_to_the_declared_workload(party: str
     )
     evidence[party]["prompt_id"] = "different-prompt"
 
-    errors = validate_document(evidence, schema_dir=ROOT / "schemas")
+    errors = VALIDATE_EVIDENCE.validate_document(evidence, schema_dir=ROOT / "schemas")
 
     assert any(f"{party}.prompt_id" in error for error in errors)
 
