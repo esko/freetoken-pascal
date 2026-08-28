@@ -1,54 +1,134 @@
 from __future__ import annotations
 
+import argparse
+import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import yaml
+from jsonschema import Draft202012Validator, FormatChecker
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / "manifests" / "upstreams.yaml"
-SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-ALLOWED_PLACEHOLDER = "TO_BE_PINNED"
-REQUIRED_PINNED = {"freetoken"}
+DEFAULT_MANIFEST = ROOT / "manifests" / "upstreams.yaml"
+DEFAULT_SCHEMA = ROOT / "manifests" / "upstreams.schema.json"
+DEFAULT_NOTICE = ROOT / "NOTICE"
+NOTICE_ID_RE = re.compile(r"^- ([a-z0-9][a-z0-9-]*):", re.MULTILINE)
 
 
-def main() -> int:
-    data = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
-    errors: list[str] = []
-    seen: set[str] = set()
+def load_document(path: Path) -> Any:
+    if path.suffix == ".json":
+        return json.loads(path.read_text(encoding="utf-8"))
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    if data.get("schema_version") != 1:
-        errors.append("schema_version must be 1")
 
-    for source in data.get("sources", []):
-        source_id = source.get("id")
-        if not source_id or source_id in seen:
-            errors.append(f"invalid or duplicate source id: {source_id!r}")
-        seen.add(source_id)
-        for key in ("repository", "ref", "license", "role", "imports"):
-            if key not in source:
-                errors.append(f"{source_id}: missing {key}")
-        ref = source.get("ref", "")
-        if ref != ALLOWED_PLACEHOLDER and not SHA_RE.fullmatch(ref):
-            errors.append(f"{source_id}: ref must be a 40-char SHA or {ALLOWED_PLACEHOLDER}")
-        if source_id in REQUIRED_PINNED and ref == ALLOWED_PLACEHOLDER:
-            errors.append(f"{source_id}: primary downstream base must be pinned")
-        if not str(source.get("repository", "")).startswith("https://github.com/"):
-            errors.append(f"{source_id}: repository must be a GitHub URL")
-        if not isinstance(source.get("imports"), list):
-            errors.append(f"{source_id}: imports must be a list")
+def _display_path(parts: list[Any]) -> str:
+    if not parts:
+        return "$"
+    return "$" + "".join(f"[{part}]" if isinstance(part, int) else f".{part}" for part in parts)
 
+
+def validate_manifest(
+    data: Any,
+    schema: dict[str, Any],
+    *,
+    root: Path,
+    notice_text: str,
+) -> list[str]:
+    errors = [
+        f"{_display_path(list(error.absolute_path))}: {error.message}"
+        for error in sorted(
+            Draft202012Validator(
+                schema,
+                format_checker=FormatChecker(),
+            ).iter_errors(data),
+            key=lambda item: (list(item.absolute_path), item.message),
+        )
+    ]
+    if not isinstance(data, dict) or not isinstance(data.get("sources"), list):
+        return errors
+
+    sources = data["sources"]
+    ids = [source.get("id") for source in sources if isinstance(source, dict)]
+    duplicates = sorted({source_id for source_id in ids if ids.count(source_id) > 1})
+    if duplicates:
+        errors.append(f"duplicate source ids: {', '.join(duplicates)}")
+
+    notice_ids = set(NOTICE_ID_RE.findall(notice_text))
+    expected_notice_ids: set[str] = set()
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        source_id = source.get("id", "<unknown>")
+        imports = source.get("imports")
+        if source.get("notice_required") is True and isinstance(source_id, str):
+            expected_notice_ids.add(source_id)
+        if source.get("usage") == "imported" and not imports:
+            errors.append(f"{source_id}: imported source must declare at least one import")
+        if source.get("usage") != "imported" and imports:
+            errors.append(f"{source_id}: only imported sources may declare destination paths")
+        if not isinstance(imports, list):
+            continue
+        for index, imported in enumerate(imports):
+            if not isinstance(imported, dict):
+                continue
+            if imported.get("source_ref") != source.get("ref"):
+                errors.append(f"{source_id}.imports[{index}]: source_ref must equal source ref")
+            if imported.get("license") != source.get("license"):
+                errors.append(
+                    f"{source_id}.imports[{index}]: import license must equal source license"
+                )
+            destination = imported.get("destination_path")
+            if not isinstance(destination, str):
+                continue
+            destination_path = (root / destination).resolve()
+            try:
+                destination_path.relative_to(root.resolve())
+            except ValueError:
+                errors.append(f"{source_id}.imports[{index}]: destination escapes repository root")
+                continue
+            if not destination_path.exists():
+                errors.append(
+                    f"{source_id}.imports[{index}]: destination does not exist: {destination}"
+                )
+
+    missing_notice = sorted(expected_notice_ids - notice_ids)
+    unexpected_notice = sorted(notice_ids - expected_notice_ids)
+    if missing_notice:
+        errors.append(f"NOTICE missing required source ids: {', '.join(missing_notice)}")
+    if unexpected_notice:
+        errors.append(f"NOTICE lists non-imported source ids: {', '.join(unexpected_notice)}")
+    return errors
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Validate the upstream provenance ledger")
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
+    parser.add_argument("--notice", type=Path, default=DEFAULT_NOTICE)
+    parser.add_argument("--root", type=Path, default=ROOT)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    try:
+        data = load_document(args.manifest)
+        schema = load_document(args.schema)
+        notice_text = args.notice.read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError, yaml.YAMLError) as error:
+        print(f"ERROR: unable to read provenance inputs: {error}", file=sys.stderr)
+        return 1
+
+    errors = validate_manifest(data, schema, root=args.root, notice_text=notice_text)
     if errors:
         print("\n".join(f"ERROR: {error}" for error in errors), file=sys.stderr)
         return 1
 
-    placeholders = [
-        source["id"] for source in data["sources"] if source["ref"] == ALLOWED_PLACEHOLDER
-    ]
-    if placeholders:
-        print("unresolved upstream pins:", ", ".join(placeholders))
-    print(f"validated {len(data['sources'])} upstream sources")
+    imported = sum(source["usage"] == "imported" for source in data["sources"])
+    print(f"validated {len(data['sources'])} pinned upstream sources ({imported} imported)")
     return 0
 
 

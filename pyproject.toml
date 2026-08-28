@@ -71,7 +71,7 @@ Upstream = "https://github.com/FlashML-org/FreeToken"
 ft = "freetoken.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=6.0"]
+dev = ["jsonschema>=4.23,<5", "pytest>=6.0", "pyyaml>=6,<7"]
 # Native fused-kernel packages. Without them the runtime falls back to the pure-Triton
 # kernels in freetoken.kernel.triton (and the 'triton' attention backend). Install
 # `freetoken-pascal[accel]` for the full native fast path.

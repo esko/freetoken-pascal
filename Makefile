@@ -13,4 +13,4 @@ python-check:
 	ruff format --check scripts
 
 hosted-tests:
-	PYTHONPATH=python pytest -q tests/daemon
+	PYTHONPATH=python pytest -q tests/project tests/daemon

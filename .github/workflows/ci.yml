@@ -28,6 +28,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install \
             fastapi \
+            jsonschema \
             msgpack \
             pre-commit \
             pydantic \
@@ -51,4 +52,4 @@ jobs:
       - name: Run viable CPU-safe upstream tests
         env:
           PYTHONPATH: python
-        run: pytest -q tests/daemon
+        run: pytest -q tests/project tests/daemon
