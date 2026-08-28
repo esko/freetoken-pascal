@@ -471,6 +471,9 @@ class MappedFileRange:
         self._prefix = prefix
         self._length = length
         self._page_size = page_size
+        self._mapping_closed = False
+        self._fd_closed = False
+        self._closed = False
         self._address = ctypes.addressof(ctypes.c_char.from_buffer(self._mapping))
         self.rows = np.frombuffer(
             self._mapping,
@@ -506,11 +509,29 @@ class MappedFileRange:
             return None
 
     def close(self) -> None:
+        if self._closed:
+            return
         rows = self.rows
         self.rows = np.empty((0, 0), dtype=np.uint8)
         del rows
-        self._mapping.close()
-        os.close(self._fd)
+        failure: BaseException | None = None
+        if not self._mapping_closed:
+            try:
+                self._mapping.close()
+            except BaseException as error:
+                failure = error
+            else:
+                self._mapping_closed = True
+        if not self._fd_closed:
+            try:
+                os.close(self._fd)
+            except BaseException as error:
+                failure = failure or error
+            else:
+                self._fd_closed = True
+        if failure is not None:
+            raise failure
+        self._closed = True
 
     def __enter__(self) -> MappedFileRange:
         return self
@@ -529,6 +550,7 @@ class MappedExpertBank:
             rows=descriptor.experts * descriptor.output_dim,
             row_bytes=descriptor.row_bytes,
         )
+        self._closed = False
 
     def expert_packed(self, expert: int) -> np.ndarray:
         self.descriptor.source_offset(expert)
@@ -538,13 +560,17 @@ class MappedExpertBank:
         return result
 
     def close(self) -> None:
+        if self._closed:
+            return
         self.mapping.close()
+        self._closed = True
 
 
 class MappedExpertBanks:
     def __init__(self, layout: GGUFExpertLayout) -> None:
         self.layout = layout
         self._banks: dict[tuple[int, str], MappedExpertBank] = {}
+        self._closed = False
         try:
             for descriptor in layout.descriptors:
                 self._banks[(descriptor.layer, descriptor.projection)] = MappedExpertBank(
@@ -563,8 +589,17 @@ class MappedExpertBanks:
             ) from error
 
     def close(self) -> None:
+        if self._closed:
+            return
+        failure: BaseException | None = None
         for bank in self._banks.values():
-            bank.close()
+            try:
+                bank.close()
+            except BaseException as error:
+                failure = failure or error
+        if failure is not None:
+            raise failure
+        self._closed = True
 
 
 def dequantize_iq4_nl(packed: np.ndarray) -> np.ndarray:
@@ -597,6 +632,7 @@ class MappedPLETable:
     ) -> None:
         self.descriptor = descriptor
         self.mapping = mapping
+        self._closed = False
         self._model_shard_paths = model_shard_paths
         self.mode = "cold"
         self._lookup_calls = 0
@@ -714,7 +750,10 @@ class MappedPLETable:
         }
 
     def close(self) -> None:
+        if self._closed:
+            return
         self.mapping.close()
+        self._closed = True
 
     def __enter__(self) -> MappedPLETable:
         return self
@@ -735,12 +774,14 @@ class QwenGGUFHostWeights:
         self.ple = ple
         self._closed = False
         self._cpu_bridge_claimed = False
+        self._cpu_bridge_owner_token: object | None = None
         self._cpu_bridge_lock = threading.Lock()
 
     @property
     def closed(self) -> bool:
         """Whether the owned expert and PLE mappings have been released."""
-        return self._closed
+        with self._cpu_bridge_lock:
+            return self._closed
 
     @property
     def cpu_bridge_claimed(self) -> bool:
@@ -748,14 +789,17 @@ class QwenGGUFHostWeights:
         with self._cpu_bridge_lock:
             return self._cpu_bridge_claimed
 
-    def claim_cpu_bridge(self) -> None:
+    def claim_cpu_bridge(self) -> object:
         """Permanently transfer this host's ownership to one CPU GGUF bundle."""
         with self._cpu_bridge_lock:
             if self._cpu_bridge_claimed:
                 raise RuntimeError("Qwen GGUF host is already claimed by a CPU expert bundle")
             if self._closed:
                 raise RuntimeError("Qwen GGUF host mappings are closed")
+            token = object()
             self._cpu_bridge_claimed = True
+            self._cpu_bridge_owner_token = token
+            return token
 
     def memory_report(self) -> dict[str, int]:
         report = host_memory_report(self.layout)
@@ -768,10 +812,36 @@ class QwenGGUFHostWeights:
     def close(self) -> None:
         with self._cpu_bridge_lock:
             if self._closed:
+                if self._cpu_bridge_claimed:
+                    raise RuntimeError(
+                        "Qwen GGUF host is owned by a CPU expert bundle; use its close method"
+                    )
                 return
-            self._closed = True
-            self.ple.close()
-            self.experts.close()
+            if self._cpu_bridge_claimed:
+                raise RuntimeError(
+                    "Qwen GGUF host is owned by a CPU expert bundle; use its close method"
+                )
+            self._close_resources_locked()
+
+    def close_cpu_bridge(self, owner_token: object) -> None:
+        """Close host mappings using the token issued by :meth:`claim_cpu_bridge`."""
+        with self._cpu_bridge_lock:
+            if not self._cpu_bridge_claimed or owner_token is not self._cpu_bridge_owner_token:
+                raise RuntimeError("invalid CPU expert bundle owner token")
+            self._close_resources_locked()
+
+    def _close_resources_locked(self) -> None:
+        if self._closed:
+            return
+        failure: BaseException | None = None
+        for owned_resource in (self.ple, self.experts):
+            try:
+                owned_resource.close()
+            except BaseException as error:
+                failure = failure or error
+        if failure is not None:
+            raise failure
+        self._closed = True
 
     def __enter__(self) -> QwenGGUFHostWeights:
         return self

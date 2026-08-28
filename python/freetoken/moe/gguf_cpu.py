@@ -152,6 +152,7 @@ class QwenGGUFCpuExpertBundle:
         self.executor = executor
         self.output_dtype = output_dtype
         self._closed = False
+        self._host_owner_token: object | None = None
 
     @classmethod
     def from_host(
@@ -181,6 +182,8 @@ class QwenGGUFCpuExpertBundle:
         )
         if host is None or not hasattr(host, "layout") or not hasattr(host, "experts"):
             raise TypeError("Qwen GGUF CPU bridge requires a QwenGGUFHostWeights-like host")
+        if not callable(getattr(host, "claim_cpu_bridge", None)):
+            raise TypeError("Qwen GGUF CPU bridge requires an ownership-capable host")
         if bool(getattr(host, "cpu_bridge_claimed", False)):
             raise RuntimeError("Qwen GGUF host is already claimed by a CPU expert bundle")
         if bool(getattr(host, "closed", getattr(host, "_closed", False))):
@@ -232,7 +235,7 @@ class QwenGGUFCpuExpertBundle:
             raise
         try:
             bundle = cls(host, layout, executor, output_dtype=np.float32)
-            host.claim_cpu_bridge()
+            bundle._host_owner_token = host.claim_cpu_bridge()
             return bundle
         except BaseException:
             try:
@@ -371,11 +374,14 @@ class QwenGGUFCpuExpertBundle:
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
+        if self._host_owner_token is None:
+            raise RuntimeError("Qwen GGUF CPU bridge has no host ownership token")
         try:
             self.executor.close()
-        finally:
-            self.host.close()
+            self.host.close_cpu_bridge(self._host_owner_token)
+        except BaseException:
+            raise
+        self._closed = True
 
     def __enter__(self) -> QwenGGUFCpuExpertBundle:
         self._require_open()
