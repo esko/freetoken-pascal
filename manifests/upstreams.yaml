@@ -49,6 +49,7 @@ sources:
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 10
+        responsible_pull_request: 34
       - source_path: python/freetoken/kernel/triton/activation.py
         destination_path: python/freetoken/kernel/triton/activation.py
         source_ref: c8e4c08e6548eb185b8d278efee5a03e26522655
@@ -58,6 +59,7 @@ sources:
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 10
+        responsible_pull_request: 34
       - source_path: python/freetoken/moe/fused.py
         destination_path: python/freetoken/moe/fused.py
         source_ref: c8e4c08e6548eb185b8d278efee5a03e26522655
@@ -68,6 +70,7 @@ sources:
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 10
+        responsible_pull_request: 34
       - source_path: python/freetoken/kernel/triton/attention.py
         destination_path: python/freetoken/kernel/triton/attention.py
         source_ref: c8e4c08e6548eb185b8d278efee5a03e26522655
@@ -77,6 +80,7 @@ sources:
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 10
+        responsible_pull_request: 34
       - source_path: python/freetoken/engine/sample.py
         destination_path: python/freetoken/engine/sample.py
         source_ref: c8e4c08e6548eb185b8d278efee5a03e26522655
@@ -87,6 +91,7 @@ sources:
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 10
+        responsible_pull_request: 34
   - id: freetoken-cu126-pr26
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 26
