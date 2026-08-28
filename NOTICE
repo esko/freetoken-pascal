@@ -6,6 +6,8 @@ This product currently includes source from the following upstream distribution:
 
 - freetoken: FlashML-org/FreeToken (Apache-2.0), commit
   9ef3651309fe4058672f2cc92069238dea06be1b
+- freetoken-cu126-pr26: FlashML-org/FreeToken pull request 26 (Apache-2.0), commit
+  fb2f80d9c52fed6417038965713d27eff3fad01b; CUDA 12.6 dependency metadata adapted
 
 The complete FreeToken history was merged into this repository. Its original source files,
 copyright notices, and Apache-2.0 license remain reachable through that history. Root files changed

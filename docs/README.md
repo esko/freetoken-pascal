@@ -16,6 +16,7 @@
 - [Testing strategy](testing-strategy.md)
 - [Benchmarking](benchmarking.md)
 - [Operations](operations.md)
+- [Reproducible development environments](development-environments.md)
 - [Release criteria](release-criteria.md)
 
 ## Decisions
