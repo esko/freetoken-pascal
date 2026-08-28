@@ -12,6 +12,8 @@ import gguf
 import numpy as np
 import pytest
 import torch
+from freetoken.layers.moe import MoELayer
+from freetoken.moe.fused import FusedMoe
 from freetoken.models.qwen4_exp.config import parse_config, parse_gguf_config
 from freetoken.models.qwen4_exp.gguf import (
     _centered_norm,
@@ -110,6 +112,30 @@ def test_qwen4_tiny_fixture_parses_as_text_only() -> None:
     assert config.num_experts == 4
     assert config.attn_type_for_layer(1).value == "qsa"
     assert not config.is_multimodal
+
+
+def test_ple_debug_state_is_active_request_order_without_allocator_slots():
+    ple = object.__new__(_PLELayer)
+    ple.layer_id = 7
+    ple.state_len = 2
+    ple.conv1d = SimpleNamespace(weight=torch.empty(4, 1, 3))
+    ple._conv_states = {
+        11: torch.ones(1, 4, 2),
+        13: torch.full((1, 4, 2), 2.0),
+        99: torch.full((1, 4, 2), 9.0),  # stale allocator state, not active
+    }
+    active = [
+        SimpleNamespace(uid=101, table_idx=13, cached_len=4, device_len=8),
+        SimpleNamespace(uid=202, table_idx=11, cached_len=0, device_len=3),
+    ]
+    padded = [*active, SimpleNamespace(uid=-1, table_idx=99, cached_len=0, device_len=0)]
+    state = ple.semantic_debug_state(SimpleNamespace(reqs=active, padded_reqs=padded))
+
+    assert torch.equal(state["request_uids"], torch.tensor([101, 202]))
+    assert torch.equal(state["cached_lengths"], torch.tensor([4, 0]))
+    assert torch.equal(state["device_lengths"], torch.tensor([8, 3]))
+    assert torch.equal(state["state"][:, 0, 0, 0], torch.tensor([2.0, 1.0]))
+    assert "state_slots" not in state
 
 
 def test_qwen4_config_uses_exact_qsa_prefix():
@@ -672,3 +698,135 @@ def test_qwen4_debug_hook_is_opt_in_and_captures_logits_and_state(monkeypatch) -
     assert len(captured) == 1
     torch.testing.assert_close(captured[0]["logits"], logits)
     assert captured[0]["ple_state"][1][7].item() == 3.0
+
+
+def test_qwen4_debug_hook_collects_opt_in_semantic_events(monkeypatch) -> None:
+    class FakeModel:
+        def __init__(self):
+            self.observer = None
+
+        def set_debug_observer(self, observer):
+            self.observer = observer
+
+        def forward(self, input_ids):
+            if self.observer is not None:
+                self.observer(
+                    "router",
+                    {
+                        "layer_id": 3,
+                        "ids": torch.tensor([[7, 2]], dtype=torch.int32),
+                        "weights": torch.tensor([[0.6, 0.2]], dtype=torch.float32),
+                    },
+                )
+            return input_ids.float().unsqueeze(-1)
+
+        def debug_state(self):
+            return {}
+
+    model = object.__new__(Qwen4ExpForCausalLM)
+    model.model = FakeModel()
+    model.lm_head = SimpleNamespace(forward=lambda hidden: torch.cat((hidden, -hidden), dim=-1))
+    model._debug_hook = None
+    model._debug_events = {}
+    monkeypatch.setattr(
+        "freetoken.models.qwen4_exp.model.get_global_ctx",
+        lambda: SimpleNamespace(batch=SimpleNamespace(input_ids=torch.tensor([2]))),
+    )
+
+    captured = []
+    model.set_debug_hook(captured.append)
+    model.forward()
+
+    assert captured[0]["observations"]["router"][0]["layer_id"] == 3
+    torch.testing.assert_close(
+        captured[0]["observations"]["router"][0]["ids"],
+        torch.tensor([[7, 2]], dtype=torch.int32),
+    )
+    model.set_debug_hook(None)
+    assert model.model.observer is None
+
+
+def test_moe_route_observer_snapshots_semantic_ids_and_weights(monkeypatch) -> None:
+    layer = object.__new__(MoELayer)
+    layer.top_k = 2
+    layer.renormalize = False
+    ids = torch.tensor([[4, 1]], dtype=torch.int32)
+    weights = torch.tensor([[0.7, 0.2]], dtype=torch.float32)
+    monkeypatch.setattr(
+        "freetoken.layers.moe.fused_topk",
+        lambda **kwargs: (weights, ids),
+    )
+
+    events = []
+    _observed_weights, observed_ids = layer._route_and_observe(
+        torch.zeros(1, 3), torch.zeros(1, 5), lambda name, payload: events.append(payload)
+    )
+    ids.fill_(-1)
+    weights.zero_()
+
+    assert observed_ids.tolist() == [[-1, -1]]
+    assert events[0]["ids"].tolist() == [[4, 1]]
+    torch.testing.assert_close(events[0]["weights"], torch.tensor([[0.7, 0.2]]))
+
+
+def test_moe_route_observer_excludes_padded_rows(monkeypatch) -> None:
+    layer = object.__new__(MoELayer)
+    layer.top_k = 2
+    layer.renormalize = False
+    ids = torch.tensor([[4, 1], [3, 2], [9, 8]], dtype=torch.int32)
+    weights = torch.tensor([[0.7, 0.2], [0.6, 0.3], [0.9, 0.1]])
+    active = SimpleNamespace(uid=101, extend_len=2, cached_len=4, device_len=6)
+    padded = SimpleNamespace(uid=-1, extend_len=1, cached_len=0, device_len=1)
+    batch = SimpleNamespace(
+        reqs=[active],
+        padded_reqs=[active, padded],
+        phase="decode",
+    )
+    monkeypatch.setattr("freetoken.layers.moe.get_global_ctx", lambda: SimpleNamespace(batch=batch))
+    monkeypatch.setattr(
+        "freetoken.layers.moe.fused_topk",
+        lambda **kwargs: (weights, ids),
+    )
+
+    events = []
+    returned_weights, returned_ids = layer._route_and_observe(
+        torch.zeros(3, 3), torch.zeros(3, 10), lambda name, payload: events.append(payload)
+    )
+
+    assert returned_ids.shape == (3, 2)
+    assert returned_weights.shape == (3, 2)
+    assert events[0]["ids"].tolist() == [[4, 1], [3, 2]]
+    assert events[0]["valid_token_count"] == 2
+    assert events[0]["padded_token_count"] == 3
+    assert events[0]["request_uids"].tolist() == [101]
+
+
+def test_fused_backend_observer_reports_the_executed_route(monkeypatch) -> None:
+    ids = torch.tensor([[8, 3]], dtype=torch.int32)
+    weights = torch.tensor([[0.55, 0.35]], dtype=torch.float32)
+    expected_output = torch.tensor([[1.0, 2.0]])
+    monkeypatch.setattr(
+        "freetoken.moe.fused.fused_topk",
+        lambda **kwargs: (weights, ids),
+    )
+
+    def fake_experts(hidden_states, w1, w2, actual_weights, actual_ids, *args, **kwargs):
+        assert actual_weights is weights
+        assert actual_ids is ids
+        return expected_output
+
+    monkeypatch.setattr("freetoken.moe.fused.fused_experts_impl", fake_experts)
+    events = []
+
+    output = FusedMoe().forward(
+        hidden_states=torch.zeros(1, 2),
+        w1=torch.empty(0),
+        w2=torch.empty(0),
+        gating_output=torch.zeros(1, 10),
+        topk=2,
+        renormalize=False,
+        debug_observer=lambda name, payload: events.append((name, payload)),
+    )
+
+    assert output is expected_output
+    assert events == [("router", {"ids": ids, "weights": weights})]

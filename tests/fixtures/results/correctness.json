@@ -1,10 +1,52 @@
 {
   "schema_name": "correctness-evidence.schema.json",
-  "schema_version": 1,
+  "schema_version": 2,
   "evidence_status": "synthetic",
   "commit": "0000000000000000000000000000000000000000",
-  "subject": {"mode": "scalar-q4-reference", "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
-  "reference": {"implementation": "independent-hand-calculation", "revision": "fixture-v1", "artifact_sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
-  "comparisons": [{"name": "q4_0-block", "metric": "max_abs", "observed": 0.0, "limit": 0.0, "passed": true}],
+  "subject": {
+    "implementation": "freetoken-pascal-scalar",
+    "revision": "fixture-subject-v2",
+    "commit": "0000000000000000000000000000000000000000",
+    "tokenizer_repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "tokenizer_revision": "c8b5954a88c2775c546b92593eda40ea041d3176",
+    "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "quant_census_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "quantization": "synthetic-q4-0",
+    "dtype": "float32",
+    "cache_mode": "disabled",
+    "execution_mode": "scalar",
+    "corpus_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "prompt_id": "q4-0-block",
+    "prompt_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "context_tokens": 32
+  },
+  "reference": {
+    "implementation": "independent-hand-calculation",
+    "revision": "fixture-reference-v2",
+    "commit": "0000000000000000000000000000000000000000",
+    "tokenizer_repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "tokenizer_revision": "c8b5954a88c2775c546b92593eda40ea041d3176",
+    "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "quant_census_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "quantization": "synthetic-q4-0",
+    "dtype": "float32",
+    "cache_mode": "disabled",
+    "execution_mode": "hand-calculation",
+    "corpus_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "prompt_id": "q4-0-block",
+    "prompt_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "context_tokens": 32
+  },
+  "workload": {
+    "tokenizer_repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "tokenizer_revision": "c8b5954a88c2775c546b92593eda40ea041d3176",
+    "corpus_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "prompt_id": "q4-0-block",
+    "prompt_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "context_tokens": 32
+  },
+  "comparisons": [
+    {"observation": "q4_0_block", "metric": "max_abs", "observed": 0.0, "limit": 0.0, "passed": true}
+  ],
   "passed": true
 }

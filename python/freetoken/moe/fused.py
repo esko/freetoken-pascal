@@ -1,16 +1,19 @@
 import functools
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Dict, Tuple
 
 import torch
+
 from freetoken.moe import BaseMoeBackend
 from freetoken.utils import div_ceil, init_logger
 
 logger = init_logger(__name__)
 
 _warned_torch_topk = False
+DebugObserver = Callable[[str, dict[str, object]], None]
 
 
 def _torch_fused_topk(
@@ -453,6 +456,7 @@ class FusedMoe(BaseMoeBackend):
         renormalize: bool,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
+        debug_observer: DebugObserver | None = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids = fused_topk(
             hidden_states=hidden_states,
@@ -460,6 +464,11 @@ class FusedMoe(BaseMoeBackend):
             topk=topk,
             renormalize=renormalize,
         )
+        if debug_observer is not None:
+            debug_observer(
+                "router",
+                {"ids": topk_ids, "weights": topk_weights},
+            )
         return fused_experts_impl(
             hidden_states,
             w1,

@@ -8,7 +8,7 @@ the compressed row for a complete token group is ``full_row // ratio``.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import torch
 
@@ -100,6 +100,90 @@ class QSAKVCache(MHAKVCache):
     ) -> None:
         self.compressed_k_cache(layer_id)[compressed_rows.long()] = keys
 
+    def debug_state(
+        self,
+        layer_id: int,
+        request_rows: list[int],
+        compressed_rows: tuple[torch.Tensor, ...],
+        compressed_positions: tuple[torch.Tensor, ...],
+    ) -> dict[str, torch.Tensor]:
+        """Return semantic QSA state for an opt-in correctness snapshot.
+
+        Physical allocator rows are used only for the internal gather.  The returned
+        compressed keys remain in request/logical-position order and carry their
+        logical coordinates explicitly; no page-table identity leaks into evidence.
+        The normal path never calls this method, so it adds no cache-wide clone or
+        allocation to serving.
+        """
+        rows = torch.as_tensor(request_rows, dtype=torch.long, device=self.device)
+        dense = self._dense(layer_id)
+        physical_groups = [
+            row.to(device=self.device, dtype=torch.long) for row in compressed_rows
+        ]
+        position_groups = [
+            position.to(device=self.device, dtype=torch.int64)
+            for position in compressed_positions
+        ]
+        if len(physical_groups) != len(position_groups):
+            raise ValueError("QSA debug state rows and positions must have equal request count")
+        if any(
+            physical.shape != position.shape
+            for physical, position in zip(physical_groups, position_groups, strict=True)
+        ):
+            raise ValueError("QSA debug state rows and positions must have equal shapes")
+        if physical_groups:
+            physical = torch.cat(physical_groups, dim=0)
+            logical_positions = torch.cat(position_groups, dim=0)
+        else:
+            physical = torch.empty(0, dtype=torch.long, device=self.device)
+            logical_positions = torch.empty(0, dtype=torch.int64, device=self.device)
+        compressed_cu = [0]
+        for positions in position_groups:
+            compressed_cu.append(compressed_cu[-1] + int(positions.numel()))
+        compressed_cu_seqlens = torch.tensor(
+            compressed_cu, dtype=torch.int32, device=self.device
+        )
+        if self._pending_k is None:
+            pending_k = torch.zeros(
+                (
+                    rows.numel(),
+                    self._compress_ratio,
+                    self._index_num_kv_heads,
+                    self._index_head_dim,
+                ),
+                dtype=self.dtype,
+                device=self.device,
+            )
+            pending_pos = torch.full(
+                (rows.numel(), self._compress_ratio), -1, dtype=torch.int64, device=self.device
+            )
+            pending_rope = torch.full(
+                (rows.numel(), self._compress_ratio, 3),
+                -1,
+                dtype=torch.int64,
+                device=self.device,
+            )
+        else:
+            pending_k = self._pending_k[dense].index_select(0, rows)
+            pending_pos = self._pending_pos[dense].index_select(0, rows)
+            pending_rope = self._pending_rope[dense].index_select(0, rows)
+            # ``clear_pending`` invalidates positions but intentionally does not
+            # overwrite the raw-key ring.  Mask those stale values before exposing
+            # them to a semantic observer.
+            pending_k = torch.where(
+                pending_pos.ge(0).unsqueeze(-1).unsqueeze(-1),
+                pending_k,
+                torch.zeros_like(pending_k),
+            )
+        return {
+            "compressed_positions": logical_positions,
+            "compressed_cu_seqlens": compressed_cu_seqlens,
+            "compressed_k": self.compressed_k_cache(layer_id).index_select(0, physical),
+            "pending_k": pending_k,
+            "pending_pos": pending_pos,
+            "pending_rope": pending_rope,
+        }
+
     def ensure_pending_capacity(self, request_rows: int) -> None:
         """Allocate or grow the per-request incomplete-group ring.
 
@@ -173,7 +257,11 @@ class QSAKVCache(MHAKVCache):
             0, slots, positions.to(device=self.device, dtype=torch.int64)
         )
         if rope_positions is None:
-            rope_positions = positions.to(device=self.device, dtype=torch.int64).view(-1, 1).expand(-1, 3)
+            rope_positions = (
+                positions.to(device=self.device, dtype=torch.int64)
+                .view(-1, 1)
+                .expand(-1, 3)
+            )
         if rope_positions.shape != (positions.numel(), 3):
             raise ValueError(
                 "QSA pending RoPE positions must have shape [tokens, 3], got "

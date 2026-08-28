@@ -114,6 +114,20 @@ Compare logits and selected internal state at:
 - sparse QSA region;
 - context boundary transitions.
 
+The comparison artifact is a deterministic ZIP containing a strict JSON identity manifest and
+non-pickle NumPy arrays. Both subject and independent reference identities must bind to the same
+model artifact hash, quant census, corpus hash, prompt hash, context-token count, quantization, and
+cache mode, including the pinned tokenizer repository and revision. The prompt hash covers the exact
+rendered chat-template bytes sent to the model. A different implementation label does not establish
+independence when revision and commit identities are identical. Non-finite JSON values, forged
+metric predicates, undeclared archive members, empty arrays, mutable workload substitutions, and
+malformed expectation contracts fail closed.
+
+The H0 fixture suite validates this evidence protocol and the prompt materializer. It does not claim
+Qwen3.8 model parity. Issue #14 remains open until real-P4 H2 runs attach independent router, GDN,
+QSA, PLE, continuation-token, and selected-logit evidence for short, incremental, chunked,
+reset, checkpoint/restore, 32K, 128K, and 262K qualification cases.
+
 ## Test artifacts
 
 Every hardware run uploads:

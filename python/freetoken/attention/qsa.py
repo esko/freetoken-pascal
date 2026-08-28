@@ -8,6 +8,7 @@ therefore uses the model's original K/V values without approximation.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,43 @@ if TYPE_CHECKING:
 
 _SCORE_WORKSPACE_BYTES = 128 << 20
 logger = init_logger(__name__)
+ObservationHook = Callable[[str, dict[str, object]], None]
+
+
+def _debug_batch_metadata(
+    batch: Batch, device: torch.device, token_count: int
+) -> dict[str, object]:
+    """Describe request order and valid/padded rows for semantic snapshots."""
+    reqs = batch.reqs
+    padded_reqs = batch.padded_reqs if hasattr(batch, "padded_reqs") else reqs
+    lengths = [int(req.extend_len) for req in reqs]
+    padded_lengths = [int(req.extend_len) for req in padded_reqs]
+    cu = [0]
+    for length in lengths:
+        cu.append(cu[-1] + length)
+    return {
+        "request_uids": torch.tensor(
+            [int(req.uid) for req in reqs], dtype=torch.int64, device=device
+        ),
+        "cu_seqlens": torch.tensor(cu, dtype=torch.int32, device=device),
+        "cached_lengths": torch.tensor(
+            [int(req.cached_len) for req in reqs], dtype=torch.int64, device=device
+        ),
+        "device_lengths": torch.tensor(
+            [int(req.device_len) for req in reqs], dtype=torch.int64, device=device
+        ),
+        "boundary_positions": torch.tensor(
+            [max(int(req.device_len) - 1, -1) for req in reqs],
+            dtype=torch.int64,
+            device=device,
+        ),
+        "phase": batch.phase,
+        "valid_request_count": len(reqs),
+        "valid_token_count": sum(lengths),
+        "padded_request_count": len(padded_reqs),
+        "padded_token_count": sum(padded_lengths),
+        "token_count": int(token_count),
+    }
 
 
 @dataclass
@@ -311,7 +349,11 @@ class QSAAttnBackend(BaseAttnBackend):
             self.kvcache.store_compressed_k(normalized, rows, layer_id)
 
     def _select_physical_rows(
-        self, index_q: torch.Tensor, layer_id: int, batch: Batch
+        self,
+        index_q: torch.Tensor,
+        layer_id: int,
+        batch: Batch,
+        debug_observer: ObservationHook | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         md = batch.attn_metadata
         assert isinstance(md, QSAMetadata)
@@ -320,6 +362,7 @@ class QSAAttnBackend(BaseAttnBackend):
         cu = md.cu_seqlens_q_host
         selections: list[torch.Tensor] = []
         counts: list[torch.Tensor] = []
+        logical_selections = [] if debug_observer is not None else None
         ratio = self.compress_ratio
         compressed_pool = self.kvcache.compressed_k_cache(layer_id)
 
@@ -347,13 +390,81 @@ class QSAAttnBackend(BaseAttnBackend):
             physical = torch.where(logical >= 0, physical, torch.full_like(physical, -1))
             selections.append(physical.to(torch.int32))
             counts.append(live)
+            if logical_selections is not None:
+                logical_selections.append(logical.to(torch.int32))
         if not selections:
+            if debug_observer is not None:
+                reqs = batch.padded_reqs if hasattr(batch, "padded_reqs") else batch.reqs
+                debug_observer(
+                    "qsa",
+                    {
+                        "layer_id": layer_id,
+                        **_debug_batch_metadata(batch, self.device, int(index_q.shape[0])),
+                        "logical_rows": torch.empty(
+                            (0, self.token_budget + ratio - 1),
+                            dtype=torch.int32,
+                            device=self.device,
+                        ),
+                        "live_counts": torch.empty(0, dtype=torch.int32, device=self.device),
+                    },
+                )
             width = self.token_budget + ratio - 1
             return (
                 torch.empty((0, width), dtype=torch.int32, device=self.device),
                 torch.empty(0, dtype=torch.int32, device=self.device),
             )
+        if debug_observer is not None:
+            metadata = _debug_batch_metadata(batch, self.device, int(index_q.shape[0]))
+            valid_tokens = int(metadata["valid_token_count"])
+            debug_observer(
+                "qsa",
+                {
+                    "layer_id": layer_id,
+                    **metadata,
+                    # Logical rows are the portable QSA contract. Physical page-table
+                    # rows below are an implementation detail and are not captured.
+                    "logical_rows": torch.cat(logical_selections, dim=0)[:valid_tokens]
+                    .detach()
+                    .clone(),
+                    "live_counts": torch.cat(counts, dim=0)[:valid_tokens]
+                    .detach()
+                    .clone(),
+                },
+            )
         return torch.cat(selections, dim=0), torch.cat(counts, dim=0)
+
+    def _capture_state(
+        self, layer_id: int, batch: Batch, observer: ObservationHook
+    ) -> None:
+        reqs = batch.reqs
+        request_rows = [int(req.table_idx) for req in reqs]
+        md = batch.attn_metadata
+        assert isinstance(md, QSAMetadata)
+        compressed_positions = tuple(
+            torch.arange(
+                int(req.device_len) // self.compress_ratio,
+                device=self.device,
+                dtype=torch.int64,
+            ).mul_(self.compress_ratio)
+            for req in reqs
+        )
+        state = self.kvcache.debug_state(
+            layer_id,
+            request_rows,
+            md.compressed_rows[: len(reqs)],
+            compressed_positions,
+        )
+        observer(
+            "qsa_state",
+            {
+                "layer_id": layer_id,
+                **_debug_batch_metadata(batch, self.device, int(batch.input_ids.numel())),
+                **{
+                    name: value.detach().clone()
+                    for name, value in state.items()
+                },
+            },
+        )
 
     def qsa_forward(
         self,
@@ -365,12 +476,17 @@ class QSAAttnBackend(BaseAttnBackend):
         indexer,
         layer_id: int,
         batch: Batch,
+        debug_observer: ObservationHook | None = None,
     ) -> torch.Tensor:
         from freetoken.kernel.triton.qsa import qsa_sparse_gqa
 
         self.kvcache.store_kv(k, v, batch.out_loc, layer_id)
         self._compress_current_keys(indexer, index_k, layer_id, batch)
-        selected, counts = self._select_physical_rows(index_q, layer_id, batch)
+        selected, counts = self._select_physical_rows(
+            index_q, layer_id, batch, debug_observer
+        )
+        if debug_observer is not None:
+            self._capture_state(layer_id, batch, debug_observer)
         # k is flattened [N, kv_heads * head_dim], so take the pool geometry
         # directly instead of inferring a head count from the flattened input.
         k_raw = self.kvcache.k_cache(layer_id)

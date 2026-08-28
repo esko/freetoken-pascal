@@ -4,29 +4,25 @@
   "title": "FreeToken-Pascal correctness evidence",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_name", "schema_version", "evidence_status", "commit", "subject", "reference", "comparisons", "passed"],
+  "required": ["schema_name", "schema_version", "evidence_status", "commit", "subject", "reference", "workload", "comparisons", "passed"],
   "properties": {
     "schema_name": {"const": "correctness-evidence.schema.json"},
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "evidence_status": {"enum": ["synthetic", "measured"]},
-    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-    "subject": {
+    "commit": {"$ref": "#/$defs/commit"},
+    "subject": {"$ref": "#/$defs/implementation"},
+    "reference": {"$ref": "#/$defs/implementation"},
+    "workload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "artifact_sha256"],
+      "required": ["tokenizer_repository", "tokenizer_revision", "corpus_sha256", "prompt_id", "prompt_sha256", "context_tokens"],
       "properties": {
-        "mode": {"type": "string", "minLength": 1},
-        "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-      }
-    },
-    "reference": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["implementation", "revision", "artifact_sha256"],
-      "properties": {
-        "implementation": {"type": "string", "minLength": 1},
-        "revision": {"type": "string", "minLength": 1},
-        "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "tokenizer_repository": {"type": "string", "minLength": 1},
+        "tokenizer_revision": {"$ref": "#/$defs/commit"},
+        "corpus_sha256": {"$ref": "#/$defs/sha256"},
+        "prompt_id": {"type": "string", "minLength": 1},
+        "prompt_sha256": {"$ref": "#/$defs/sha256"},
+        "context_tokens": {"type": "integer", "minimum": 0}
       }
     },
     "comparisons": {
@@ -35,16 +31,98 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "metric", "observed", "limit", "passed"],
+        "required": ["observation", "metric", "observed", "limit", "passed"],
         "properties": {
-          "name": {"type": "string", "minLength": 1},
-          "metric": {"enum": ["max_abs", "max_rel", "token_exact", "state_hash"]},
+          "observation": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+          "metric": {"enum": ["max_abs", "relative_rms", "cosine", "array_exact", "json_syntax", "state_hash"]},
           "observed": {"type": ["number", "string", "boolean"]},
           "limit": {"type": ["number", "string", "boolean"]},
           "passed": {"type": "boolean"}
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "metric": {"const": "max_abs"},
+              "observed": {"type": "number", "minimum": 0},
+              "limit": {"type": "number", "minimum": 0}
+            },
+            "required": ["observed", "limit"]
+          },
+          {
+            "properties": {
+              "metric": {"const": "relative_rms"},
+              "observed": {"type": "number", "minimum": 0},
+              "limit": {"type": "number", "minimum": 0}
+            },
+            "required": ["observed", "limit"]
+          },
+          {
+            "properties": {
+              "metric": {"const": "cosine"},
+              "observed": {"type": "number", "minimum": -1, "maximum": 1},
+              "limit": {"type": "number", "minimum": -1, "maximum": 1}
+            },
+            "required": ["observed", "limit"]
+          },
+          {
+            "properties": {
+              "metric": {"const": "array_exact"},
+              "observed": {"type": "boolean"},
+              "limit": {"const": true}
+            },
+            "required": ["observed", "limit"]
+          },
+          {
+            "properties": {
+              "metric": {"const": "json_syntax"},
+              "observed": {"type": "string"},
+              "limit": {"type": "string"}
+            },
+            "required": ["observed", "limit"]
+          },
+          {
+            "properties": {
+              "metric": {"const": "state_hash"},
+              "observed": {"type": "string"},
+              "limit": {"type": "string"}
+            },
+            "required": ["observed", "limit"]
+          }
+        ]
       }
     },
     "passed": {"type": "boolean"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "revision": {
+      "anyOf": [
+        {"$ref": "#/$defs/commit"},
+        {"type": "string", "pattern": "^fixture-[a-z0-9-]+$"}
+      ]
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implementation", "revision", "commit", "tokenizer_repository", "tokenizer_revision", "artifact_sha256", "quant_census_sha256", "quantization", "dtype", "cache_mode", "execution_mode", "corpus_sha256", "prompt_id", "prompt_sha256", "context_tokens"],
+      "properties": {
+        "implementation": {"type": "string", "minLength": 1},
+        "revision": {"$ref": "#/$defs/revision"},
+        "commit": {"$ref": "#/$defs/commit"},
+        "tokenizer_repository": {"type": "string", "minLength": 1},
+        "tokenizer_revision": {"$ref": "#/$defs/commit"},
+        "artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "quant_census_sha256": {"$ref": "#/$defs/sha256"},
+        "quantization": {"type": "string", "minLength": 1},
+        "dtype": {"type": "string", "minLength": 1},
+        "cache_mode": {"type": "string", "minLength": 1},
+        "execution_mode": {"type": "string", "minLength": 1},
+        "corpus_sha256": {"$ref": "#/$defs/sha256"},
+        "prompt_id": {"type": "string", "minLength": 1},
+        "prompt_sha256": {"$ref": "#/$defs/sha256"},
+        "context_tokens": {"type": "integer", "minimum": 0}
+      }
+    }
   }
 }

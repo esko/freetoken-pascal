@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "require_independent": true,
+  "exact_observations": ["continuation_tokens", "qsa_blocks", "router_ids"],
+  "tolerances": {
+    "gdn_state": {"max_abs": 0.00002, "relative_rms": 0.00005, "min_cosine": 0.99999},
+    "logits": {"max_abs": 0.00002, "relative_rms": 0.00005, "min_cosine": 0.99999},
+    "ple_contribution": {"max_abs": 0.00002, "relative_rms": 0.00005, "min_cosine": 0.99999},
+    "qsa_state": {"max_abs": 0.00002, "relative_rms": 0.00005, "min_cosine": 0.99999},
+    "router_weights": {"max_abs": 0.00002, "relative_rms": 0.00005, "min_cosine": 0.99999}
+  }
+}

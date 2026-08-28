@@ -63,3 +63,30 @@ def test_qsa_pending_ring_rejects_missing_state(monkeypatch):
 
     with pytest.raises(RuntimeError, match="pending-key state is missing"):
         pool.pending_group(1, 0, torch.tensor([3]))
+
+
+def test_qsa_debug_state_is_logical_order_and_masks_stale_pending(monkeypatch):
+    pool = _pool(monkeypatch)
+    compressed = torch.tensor([[[1.0] * 8], [[2.0] * 8]], dtype=torch.bfloat16)
+    pool.store_compressed_k(compressed, torch.tensor([17, 2]), layer_id=5)
+
+    pool.ensure_pending_capacity(2)
+    pending_positions = torch.tensor([5, 6, 7])
+    pending_keys = torch.full((3, 1, 8), 3.0, dtype=torch.bfloat16)
+    pool.store_pending(5, 0, pending_positions, pending_keys)
+    pool.clear_pending(5, 0)
+
+    state = pool.debug_state(
+        5,
+        request_rows=[0, 1],
+        compressed_rows=(torch.tensor([17, 2]), torch.empty(0, dtype=torch.int64)),
+        compressed_positions=(torch.tensor([0, 4]), torch.empty(0, dtype=torch.int64)),
+    )
+
+    assert "state_slots" not in state
+    assert "compressed_rows" not in state
+    assert torch.equal(state["compressed_positions"], torch.tensor([0, 4]))
+    assert torch.equal(state["compressed_cu_seqlens"], torch.tensor([0, 2, 2]))
+    assert torch.equal(state["compressed_k"], compressed)
+    assert torch.equal(state["pending_pos"], torch.full((2, 4), -1))
+    assert torch.count_nonzero(state["pending_k"]) == 0

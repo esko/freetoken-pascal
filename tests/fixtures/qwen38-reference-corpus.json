@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "corpus_id": "qwen38-v1-reference",
+  "tokenizer": {
+    "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "revision": "c8b5954a88c2775c546b92593eda40ea041d3176"
+  },
+  "sampling": {"temperature": 0.0, "top_p": 1.0, "seed": 1401},
+  "cases": [
+    {
+      "id": "factual-short",
+      "category": "factual",
+      "messages": [{"role": "user", "content": "Answer with only the capital of France."}],
+      "expectation": {"kind": "contains", "value": "Paris"}
+    },
+    {
+      "id": "code-short",
+      "category": "code",
+      "messages": [{"role": "user", "content": "Write a Python function named clamp(x, low, high). Return only code."}],
+      "expectation": {"kind": "contains", "value": "def clamp"}
+    },
+    {
+      "id": "tool-json-short",
+      "category": "tool-json",
+      "messages": [{"role": "user", "content": "Return one JSON object with string key path and integer key line. No markdown."}],
+      "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+    },
+    {
+      "id": "repetitive-edit",
+      "category": "repetitive-edit",
+      "messages": [{"role": "user", "content": "Change only the final ACTIVE=false below to ACTIVE=true.\nACTIVE=false\nACTIVE=false\nACTIVE=false"}],
+      "expectation": {"kind": "contains", "value": "ACTIVE=true"}
+    },
+    {
+      "id": "retrieval-32k",
+      "category": "long-retrieval",
+      "messages": [{"role": "user", "content": "{{CONTEXT}}\nReturn only the value of the marked record."}],
+      "context": {"generator": "numbered-records-v1", "target_tokens": 32768, "needle_fraction": 0.5, "needle": "FT-PASCAL-32K"},
+      "expectation": {"kind": "contains", "value": "FT-PASCAL-32K"}
+    },
+    {
+      "id": "retrieval-128k",
+      "category": "long-retrieval",
+      "messages": [{"role": "user", "content": "{{CONTEXT}}\nReturn only the value of the marked record."}],
+      "context": {"generator": "numbered-records-v1", "target_tokens": 128000, "needle_fraction": 0.75, "needle": "FT-PASCAL-128K"},
+      "expectation": {"kind": "contains", "value": "FT-PASCAL-128K"}
+    },
+    {
+      "id": "retrieval-262k-qualification",
+      "category": "long-retrieval",
+      "messages": [{"role": "user", "content": "{{CONTEXT}}\nReturn only the value of the marked record."}],
+      "context": {"generator": "numbered-records-v1", "target_tokens": 262000, "needle_fraction": 0.9, "needle": "FT-PASCAL-262K"},
+      "expectation": {"kind": "contains", "value": "FT-PASCAL-262K"}
+    }
+  ]
+}
