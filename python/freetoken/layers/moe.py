@@ -1,6 +1,6 @@
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -20,13 +20,60 @@ if TYPE_CHECKING:
 # is computed outside the MoE layer. Such models call ``routed_forward`` (offload) or
 # ``_run_experts`` (dense) with a precomputed routing instead of going through the
 # generic softmax+top-k path.
-TopK = Tuple[torch.Tensor, torch.Tensor]
+TopK = tuple[torch.Tensor, torch.Tensor]
 DebugObserver = Callable[[str, dict[str, object]], None]
 
 # Hybrid decode overlaps the CPU overflow GEMV behind the GPU PCIe fetch + GEMM by
 # default. Set FREETOKEN_HYBRID_OVERLAP=0 to force the serial path (CPU sync before the
 # GPU work) -- a measurement-only escape hatch to A/B the overlap benefit.
 _HYBRID_OVERLAP = os.getenv("FREETOKEN_HYBRID_OVERLAP", "1") != "0"
+
+
+def _debug_batch_metadata(hidden_states: torch.Tensor) -> dict[str, object]:
+    """Return request/token identity for an opt-in semantic observation.
+
+    Decode graph padding is represented explicitly instead of being mistaken for a
+    real request. This helper is called only after a debug observer is installed.
+    """
+    try:
+        batch = get_global_ctx().batch
+    except AssertionError:
+        # Direct unit probes can exercise routing without constructing a Context.
+        return {}
+    reqs = batch.reqs
+    padded_reqs = batch.padded_reqs if hasattr(batch, "padded_reqs") else reqs
+    lengths = [int(req.extend_len) for req in reqs]
+    padded_lengths = [int(req.extend_len) for req in padded_reqs]
+    cu = [0]
+    for length in lengths:
+        cu.append(cu[-1] + length)
+    return {
+        "request_uids": torch.tensor(
+            [int(req.uid) for req in reqs], dtype=torch.int64, device=hidden_states.device
+        ),
+        "cu_seqlens": torch.tensor(cu, dtype=torch.int32, device=hidden_states.device),
+        "cached_lengths": torch.tensor(
+            [int(req.cached_len) for req in reqs],
+            dtype=torch.int64,
+            device=hidden_states.device,
+        ),
+        "device_lengths": torch.tensor(
+            [int(req.device_len) for req in reqs],
+            dtype=torch.int64,
+            device=hidden_states.device,
+        ),
+        "boundary_positions": torch.tensor(
+            [max(int(req.device_len) - 1, -1) for req in reqs],
+            dtype=torch.int64,
+            device=hidden_states.device,
+        ),
+        "phase": batch.phase,
+        "valid_request_count": len(reqs),
+        "valid_token_count": sum(lengths),
+        "padded_request_count": len(padded_reqs),
+        "padded_token_count": sum(padded_lengths),
+        "token_count": int(hidden_states.shape[0]),
+    }
 
 
 class MoELayer(BaseOP):
@@ -73,17 +120,46 @@ class MoELayer(BaseOP):
             renormalize=self.renormalize,
         )
         if observer is not None:
+            metadata = _debug_batch_metadata(hidden_states)
+            valid_tokens = int(metadata.get("valid_token_count", topk_ids.shape[0]))
             # Offload decode rewrites ids into cache-slot ids in place. Snapshot the
             # semantic global ids before handing the route to any expert movement code.
             observer(
                 "router",
                 {
                     "layer_id": getattr(self, "layer_id", None),
-                    "ids": topk_ids.detach().clone(),
-                    "weights": topk_weights.detach().clone(),
+                    "ids": topk_ids[:valid_tokens].detach().clone(),
+                    "weights": topk_weights[:valid_tokens].detach().clone(),
+                    **metadata,
                 },
             )
         return topk_weights, topk_ids
+
+    def _backend_debug_observer(
+        self,
+        hidden_states: torch.Tensor,
+        observer: DebugObserver,
+    ) -> DebugObserver:
+        """Decorate an actual backend route with layer and request identity."""
+        def observe(name: str, payload: dict[str, object]) -> None:
+            if name != "router":
+                observer(name, payload)
+                return
+            metadata = _debug_batch_metadata(hidden_states)
+            ids = payload["ids"]
+            weights = payload["weights"]
+            valid_tokens = int(metadata.get("valid_token_count", ids.shape[0]))
+            observer(
+                "router",
+                {
+                    "layer_id": getattr(self, "layer_id", None),
+                    "ids": ids[:valid_tokens].detach().clone(),
+                    "weights": weights[:valid_tokens].detach().clone(),
+                    **metadata,
+                },
+            )
+
+        return observe
 
     def _alloc_resident_experts(self, intermediate_size_per_partition: int) -> None:
         """Allocate the resident (in-GPU) expert weights for ``self.weight_format``.
@@ -206,12 +282,29 @@ class MoELayer(BaseOP):
             return self._maybe_all_reduce(
                 self._resident_gemm(hidden_states, topk_weights, topk_ids)
             )
-        if debug_observer is not None:
-            # Keep the selected backend as the producer of the actual expert output.
-            # The extra route is a debug-only snapshot; it avoids changing backend
-            # dispatch or introducing an observer argument into third-party backends.
-            self._route_and_observe(hidden_states, router_logits, debug_observer)
         ctx = get_global_ctx()
+        if debug_observer is not None:
+            # Capture the route from the actual backend. Other backend implementations
+            # have no observer contract and must fail closed rather than emit evidence
+            # that may not describe the route used for the output.
+            from freetoken.moe.fused import FusedMoe
+
+            if not isinstance(ctx.moe_backend, FusedMoe):
+                raise RuntimeError(
+                    "semantic router capture requires the fused MoE backend for resident bf16"
+                )
+            final_hidden_states = ctx.moe_backend.forward(
+                hidden_states=hidden_states,
+                w1=self.gate_up_proj,
+                w2=self.down_proj,
+                gating_output=router_logits,
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                activation=self.activation,
+                apply_router_weight_on_input=self.apply_router_weight_on_input,
+                debug_observer=self._backend_debug_observer(hidden_states, debug_observer),
+            )
+            return self._maybe_all_reduce(final_hidden_states)
         final_hidden_states = ctx.moe_backend.forward(
             hidden_states=hidden_states,
             w1=self.gate_up_proj,

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import torch
-import torch.nn.functional as F
-from freetoken.core import get_global_ctx
-from freetoken.kernel.causal_conv1d import causal_conv1d_decode, causal_conv1d_varlen
-from freetoken.layers import BaseOP, LinearColParallelMerged
-
 from collections.abc import Callable
 
+import torch
+import torch.nn.functional as F
+
+from freetoken.core import get_global_ctx
+from freetoken.kernel.causal_conv1d import causal_conv1d_decode, causal_conv1d_varlen
 from freetoken.kernel.triton.fp8_block_linear import Fp8BlockColMerged
 from freetoken.kernel.triton.fp8_pertensor_linear import Fp8PerTensorColMerged
+from freetoken.layers import BaseOP, LinearColParallelMerged
 
 from .gdn_kernels import gdn_decode_fla, gdn_prefill_chunk_fla
 from .quant_linear import make_replicated_quant
@@ -230,17 +230,46 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         out = self.norm.forward(core_out, z).reshape(total, -1)
         result = self.out_proj.forward(out)
         if debug_observer is not None:
-            slots = fla.cache_indices.to(dtype=torch.long)
-            reqs = batch.padded_reqs if hasattr(batch, "padded_reqs") else batch.reqs
-            request_uids = torch.tensor(
-                [int(req.uid) for req in reqs], dtype=torch.int64, device=slots.device
-            )
+            all_slots = fla.cache_indices.to(dtype=torch.long)
+            reqs = batch.reqs
+            padded_reqs = batch.padded_reqs if hasattr(batch, "padded_reqs") else reqs
+            slots = all_slots[: len(reqs)]
+            lengths = [int(req.extend_len) for req in reqs]
+            padded_lengths = [int(req.extend_len) for req in padded_reqs]
+            cu = [0]
+            for length in lengths:
+                cu.append(cu[-1] + length)
             debug_observer(
                 "gdn",
                 {
                     "layer_id": self.layer_id,
-                    "request_uids": request_uids,
-                    "state_slots": slots.detach().clone(),
+                    "request_uids": torch.tensor(
+                        [int(req.uid) for req in reqs],
+                        dtype=torch.int64,
+                        device=slots.device,
+                    ),
+                    "cu_seqlens": torch.tensor(cu, dtype=torch.int32, device=slots.device),
+                    "cached_lengths": torch.tensor(
+                        [int(req.cached_len) for req in reqs],
+                        dtype=torch.int64,
+                        device=slots.device,
+                    ),
+                    "device_lengths": torch.tensor(
+                        [int(req.device_len) for req in reqs],
+                        dtype=torch.int64,
+                        device=slots.device,
+                    ),
+                    "boundary_positions": torch.tensor(
+                        [max(int(req.device_len) - 1, -1) for req in reqs],
+                        dtype=torch.int64,
+                        device=slots.device,
+                    ),
+                    "phase": batch.phase,
+                    "valid_request_count": len(reqs),
+                    "valid_token_count": sum(lengths),
+                    "padded_request_count": len(padded_reqs),
+                    "padded_token_count": sum(padded_lengths),
+                    "token_count": int(hidden_states.shape[0]),
                     "conv_state": pool.conv_states[li]
                     .index_select(0, slots)
                     .detach()

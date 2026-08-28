@@ -38,6 +38,42 @@ if TYPE_CHECKING:
 ObservationHook = Callable[[str, dict[str, object]], None]
 
 
+def _debug_batch_metadata(
+    batch, device: torch.device, token_count: int
+) -> dict[str, object]:
+    """Return explicit request/token identity for semantic correctness snapshots."""
+    reqs = batch.reqs
+    padded_reqs = batch.padded_reqs if hasattr(batch, "padded_reqs") else reqs
+    lengths = [int(req.extend_len) for req in reqs]
+    padded_lengths = [int(req.extend_len) for req in padded_reqs]
+    cu = [0]
+    for length in lengths:
+        cu.append(cu[-1] + length)
+    return {
+        "request_uids": torch.tensor(
+            [int(req.uid) for req in reqs], dtype=torch.int64, device=device
+        ),
+        "cu_seqlens": torch.tensor(cu, dtype=torch.int32, device=device),
+        "cached_lengths": torch.tensor(
+            [int(req.cached_len) for req in reqs], dtype=torch.int64, device=device
+        ),
+        "device_lengths": torch.tensor(
+            [int(req.device_len) for req in reqs], dtype=torch.int64, device=device
+        ),
+        "boundary_positions": torch.tensor(
+            [max(int(req.device_len) - 1, -1) for req in reqs],
+            dtype=torch.int64,
+            device=device,
+        ),
+        "phase": batch.phase,
+        "valid_request_count": len(reqs),
+        "valid_token_count": sum(lengths),
+        "padded_request_count": len(padded_reqs),
+        "padded_token_count": sum(padded_lengths),
+        "token_count": int(token_count),
+    }
+
+
 class _GroupedRMSNorm(BaseOP):
     def __init__(self, size: int, group_size: int, eps: float):
         if size % group_size:
@@ -457,9 +493,46 @@ class _PLELayer(BaseOP):
             ple_warm_mode=ple_warm_mode,
         )
 
-    def debug_state(self) -> dict[int, torch.Tensor]:
-        """Return detached PLE convolution state for opt-in correctness probes."""
-        return {slot: state.detach().clone() for slot, state in self._conv_states.items()}
+    def semantic_debug_state(self, batch) -> dict[str, object]:
+        """Return active-request PLE state without exposing allocator slot identity."""
+        reqs = batch.reqs
+        states = []
+        for req in reqs:
+            state = self._conv_states.get(req.table_idx)
+            if state is None:
+                raise RuntimeError(
+                    f"PLE state missing for active request {req.uid} at layer {self.layer_id}"
+                )
+            states.append(state.detach().clone())
+        if states:
+            state_tensor = torch.stack(states, dim=0)
+        else:
+            state_tensor = torch.empty(
+                (0, 1, self.conv1d.weight.shape[0], self.state_len),
+                dtype=self.conv1d.weight.dtype,
+                device=self.conv1d.weight.device,
+            )
+        return {
+            "request_uids": torch.tensor(
+                [int(req.uid) for req in reqs], dtype=torch.int64, device=state_tensor.device
+            ),
+            "cached_lengths": torch.tensor(
+                [int(req.cached_len) for req in reqs],
+                dtype=torch.int64,
+                device=state_tensor.device,
+            ),
+            "device_lengths": torch.tensor(
+                [int(req.device_len) for req in reqs],
+                dtype=torch.int64,
+                device=state_tensor.device,
+            ),
+            "boundary_positions": torch.tensor(
+                [max(int(req.device_len) - 1, -1) for req in reqs],
+                dtype=torch.int64,
+                device=state_tensor.device,
+            ),
+            "state": state_tensor,
+        }
 
     def host_weight_telemetry(self) -> dict[str, object]:
         return self.ple_embedding.telemetry()
@@ -652,11 +725,18 @@ class Qwen4ExpDecoderLayer(BaseOP):
         if self.ple is not None:
             ple_contribution = self.ple.forward(hidden)
             if debug_observer is not None:
+                metadata = _debug_batch_metadata(
+                    get_global_ctx().batch,
+                    ple_contribution.device,
+                    ple_contribution.shape[0],
+                )
+                valid_tokens = int(metadata["valid_token_count"])
                 debug_observer(
                     "ple",
                     {
                         "layer_id": self._layer_id,
-                        "contribution": ple_contribution.detach().clone(),
+                        "contribution": ple_contribution[:valid_tokens].detach().clone(),
+                        **metadata,
                     },
                 )
             hidden = hidden + ple_contribution
@@ -702,9 +782,10 @@ class Qwen4ExpModel(BaseOP):
                     ple_warm_mode=ple_warm_mode,
                 )
 
-    def debug_state(self) -> dict[int, dict[int, torch.Tensor]]:
+    def debug_state(self) -> dict[int, dict[str, object]]:
+        batch = get_global_ctx().batch
         return {
-            layer._layer_id: layer.ple.debug_state()
+            layer._layer_id: layer.ple.semantic_debug_state(batch)
             for layer in self.layers.op_list
             if layer.ple is not None
         }
