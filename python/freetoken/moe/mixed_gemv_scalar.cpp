@@ -1,15 +1,20 @@
 // Scalar GGML companion-format arithmetic for Issue #16.
 // The layout follows llama.cpp commit eaf93765572e794b8e3754fe45adbe12d381e997.
-// This translation unit is compiled without AVX flags and is the native oracle.
+// This translation unit uses a per-function baseline fence and is the native oracle.
 
 #include "mixed_gemv_native.h"
 
 #include <cstdint>
-#include <cstring>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define FREETOKEN_BASELINE_TARGET __attribute__((target("no-avx,no-avx2,no-fma")))
+#else
+#define FREETOKEN_BASELINE_TARGET
+#endif
 
 namespace {
 
-float half_to_float(uint16_t bits) {
+FREETOKEN_BASELINE_TARGET float half_to_float(uint16_t bits) {
   const uint32_t sign = static_cast<uint32_t>(bits & 0x8000u) << 16;
   uint32_t exponent = (bits >> 10) & 0x1Fu;
   uint32_t mantissa = bits & 0x3FFu;
@@ -31,24 +36,26 @@ float half_to_float(uint16_t bits) {
   } else {
     value = sign | ((exponent + (127 - 15)) << 23) | (mantissa << 13);
   }
-  float result;
-  std::memcpy(&result, &value, sizeof(result));
-  return result;
+  union {
+    uint32_t bits;
+    float value;
+  } result = {value};
+  return result.value;
 }
 
-uint16_t load_u16(const uint8_t* address) {
-  uint16_t value;
-  std::memcpy(&value, address, sizeof(value));
-  return value;
+FREETOKEN_BASELINE_TARGET uint16_t load_u16(const uint8_t* address) {
+  return static_cast<uint16_t>(address[0]) |
+         static_cast<uint16_t>(static_cast<uint16_t>(address[1]) << 8);
 }
 
-uint32_t load_u32(const uint8_t* address) {
-  uint32_t value;
-  std::memcpy(&value, address, sizeof(value));
-  return value;
+FREETOKEN_BASELINE_TARGET uint32_t load_u32(const uint8_t* address) {
+  return static_cast<uint32_t>(address[0]) |
+         (static_cast<uint32_t>(address[1]) << 8) |
+         (static_cast<uint32_t>(address[2]) << 16) |
+         (static_cast<uint32_t>(address[3]) << 24);
 }
 
-float q5_1_value(const uint8_t* block, int index) {
+FREETOKEN_BASELINE_TARGET float q5_1_value(const uint8_t* block, int index) {
   const float d = half_to_float(load_u16(block));
   const float minimum = half_to_float(load_u16(block + 2));
   const uint32_t qh = load_u32(block + 4);
@@ -60,13 +67,14 @@ float q5_1_value(const uint8_t* block, int index) {
   return static_cast<float>(code) * d + minimum;
 }
 
-float q8_0_value(const uint8_t* block, int index) {
+FREETOKEN_BASELINE_TARGET float q8_0_value(const uint8_t* block, int index) {
   const float d = half_to_float(load_u16(block));
   const int8_t code = static_cast<int8_t>(block[2 + index]);
   return static_cast<float>(code) * d;
 }
 
-void scale_min(const uint8_t* scales, int index, int* scale, int* minimum) {
+FREETOKEN_BASELINE_TARGET void scale_min(const uint8_t* scales, int index, int* scale,
+                                          int* minimum) {
   if (index < 4) {
     *scale = scales[index] & 0x3F;
     *minimum = scales[index + 4] & 0x3F;
@@ -76,7 +84,7 @@ void scale_min(const uint8_t* scales, int index, int* scale, int* minimum) {
   *minimum = (scales[index + 4] >> 4) | ((scales[index] >> 6) << 4);
 }
 
-float q5_k_value(const uint8_t* block, int index) {
+FREETOKEN_BASELINE_TARGET float q5_k_value(const uint8_t* block, int index) {
   const float d = half_to_float(load_u16(block));
   const float dmin = half_to_float(load_u16(block + 2));
   const uint8_t* scales = block + 4;
@@ -96,7 +104,7 @@ float q5_k_value(const uint8_t* block, int index) {
 
 }  // namespace
 
-extern "C" __attribute__((visibility("default"))) float
+extern "C" FREETOKEN_BASELINE_TARGET __attribute__((visibility("default"))) float
 freetoken_mixed_q5_1_dot_scalar(const uint8_t* block, const float* input) {
   float result = 0.0f;
   for (int index = 0; index < 32; ++index) {
@@ -105,14 +113,14 @@ freetoken_mixed_q5_1_dot_scalar(const uint8_t* block, const float* input) {
   return result;
 }
 
-extern "C" __attribute__((visibility("default"))) void
+extern "C" FREETOKEN_BASELINE_TARGET __attribute__((visibility("default"))) void
 freetoken_mixed_q5_1_decode_scalar(const uint8_t* block, float* output) {
   for (int index = 0; index < 32; ++index) {
     output[index] = q5_1_value(block, index);
   }
 }
 
-extern "C" __attribute__((visibility("default"))) float
+extern "C" FREETOKEN_BASELINE_TARGET __attribute__((visibility("default"))) float
 freetoken_mixed_q8_0_dot_scalar(const uint8_t* block, const float* input) {
   float result = 0.0f;
   for (int index = 0; index < 32; ++index) {
@@ -121,14 +129,14 @@ freetoken_mixed_q8_0_dot_scalar(const uint8_t* block, const float* input) {
   return result;
 }
 
-extern "C" __attribute__((visibility("default"))) void
+extern "C" FREETOKEN_BASELINE_TARGET __attribute__((visibility("default"))) void
 freetoken_mixed_q8_0_decode_scalar(const uint8_t* block, float* output) {
   for (int index = 0; index < 32; ++index) {
     output[index] = q8_0_value(block, index);
   }
 }
 
-extern "C" __attribute__((visibility("default"))) float
+extern "C" FREETOKEN_BASELINE_TARGET __attribute__((visibility("default"))) float
 freetoken_mixed_q5_k_dot_scalar(const uint8_t* block, const float* input) {
   float result = 0.0f;
   for (int index = 0; index < 256; ++index) {
@@ -137,7 +145,7 @@ freetoken_mixed_q5_k_dot_scalar(const uint8_t* block, const float* input) {
   return result;
 }
 
-extern "C" __attribute__((visibility("default"))) void
+extern "C" FREETOKEN_BASELINE_TARGET __attribute__((visibility("default"))) void
 freetoken_mixed_q5_k_decode_scalar(const uint8_t* block, float* output) {
   for (int index = 0; index < 256; ++index) {
     output[index] = q5_k_value(block, index);

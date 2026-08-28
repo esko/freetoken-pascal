@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -86,6 +87,66 @@ def _reference_gemv(name: str, rows: np.ndarray, input_dim: int, vector: np.ndar
     return np.asarray(np.sum(decoded * vector[None, :], axis=1, dtype=np.float32), dtype=np.float32)
 
 
+def _independent_decode(name: str, block: np.ndarray) -> np.ndarray:
+    """Decode without calling the production reference decoder."""
+    elements, _ = _FORMATS[name]
+    raw = np.asarray(block, dtype=np.uint8)
+    d = np.float32(np.frombuffer(raw[:2].tobytes(), dtype="<f2")[0])
+    result = np.empty(elements, dtype=np.float32)
+    if name == "Q5_1":
+        minimum = np.float32(np.frombuffer(raw[2:4].tobytes(), dtype="<f2")[0])
+        qh = int.from_bytes(raw[4:8].tobytes(), "little")
+        for lane in range(16):
+            result[lane] = ((int(raw[8 + lane]) & 0x0F) | (((qh >> lane) & 1) << 4)) * d + minimum
+            result[lane + 16] = (
+                (int(raw[8 + lane]) >> 4) | (((qh >> (lane + 16)) & 1) << 4)
+            ) * d + minimum
+        return result
+    if name == "Q8_0":
+        for lane in range(32):
+            result[lane] = np.int8(raw[2 + lane]) * d
+        return result
+    dmin = np.float32(np.frombuffer(raw[2:4].tobytes(), dtype="<f2")[0])
+    scales = raw[4:16]
+    for subblock in range(8):
+        if subblock < 4:
+            scale = int(scales[subblock]) & 63
+            minimum = int(scales[subblock + 4]) & 63
+        else:
+            scale = (int(scales[subblock + 4]) & 15) | ((int(scales[subblock - 4]) >> 6) << 4)
+            minimum = (int(scales[subblock + 4]) >> 4) | ((int(scales[subblock]) >> 6) << 4)
+        for lane in range(32):
+            packed = int(raw[48 + (subblock // 2) * 32 + lane])
+            code = (packed & 15) if subblock % 2 == 0 else (packed >> 4)
+            code |= ((int(raw[16 + lane]) >> subblock) & 1) << 4
+            result[subblock * 32 + lane] = np.float32(
+                np.float32(code) * d * np.float32(scale) - dmin * np.float32(minimum)
+            )
+    return result
+
+
+def _independent_gemv(
+    name: str, rows: np.ndarray, input_dim: int, vector: np.ndarray
+) -> np.ndarray:
+    elements, block_bytes = _FORMATS[name]
+    result = np.zeros(rows.shape[0], dtype=np.float32)
+    for row in range(rows.shape[0]):
+        for block in range(input_dim // elements):
+            begin = block * block_bytes
+            values = _independent_decode(name, rows[row, begin : begin + block_bytes])
+            result[row] = np.float32(
+                result[row]
+                + np.asarray(
+                    np.sum(
+                        values * vector[block * elements : (block + 1) * elements],
+                        dtype=np.float32,
+                    ),
+                    dtype=np.float32,
+                )
+            )
+    return result
+
+
 @pytest.fixture(scope="session")
 def mixed_native_library(tmp_path_factory: pytest.TempPathFactory) -> Path | None:
     """Build the split baseline/AVX2 helper exactly as the package does."""
@@ -103,6 +164,10 @@ def mixed_native_library(tmp_path_factory: pytest.TempPathFactory) -> Path | Non
         ("scalar", scalar, baseline_flags),
         ("avx2", avx2, ["-mavx2", "-mfma"]),
         ("dispatch", source, baseline_flags),
+        # Package builds may inherit CXXFLAGS from a host toolchain.  Verify
+        # the source-level baseline fence also wins over -march=native.
+        ("scalar_native", scalar, ["-march=native"]),
+        ("dispatch_native", source, ["-march=native"]),
     ):
         subprocess.run(
             [
@@ -170,7 +235,7 @@ def test_native_mixed_gemv_matches_ggml_reference(
         return
     rows = _pack_rows(name, 4, input_dim, seed=53)
     vector = np.sin(np.arange(input_dim, dtype=np.float32) / 11.0)
-    expected = _reference_gemv(name, rows, input_dim, vector)
+    expected = _independent_gemv(name, rows, input_dim, vector)
     actual = np.empty(rows.shape[0], dtype=np.float32)
     primitive.gemv(rows, input_dim, vector, quant_name=name, out=actual)
     np.testing.assert_allclose(actual, expected, rtol=3e-5, atol=3e-4)
@@ -195,7 +260,7 @@ def test_native_mixed_block_decode_and_dot_match_reference(
     block = _pack_block(name, 127)
     elements, _ = _FORMATS[name]
     vector = np.cos(np.arange(elements, dtype=np.float32) / 7.0)
-    expected = _DECODERS[name](block)
+    expected = _independent_decode(name, block)
     decoded = np.empty(elements, dtype=np.float32)
     primitive.decode(block, quant_name=name, out=decoded)
     np.testing.assert_allclose(decoded, expected, rtol=2e-5, atol=2e-5)
@@ -205,6 +270,59 @@ def test_native_mixed_block_decode_and_dot_match_reference(
         rtol=3e-5,
         atol=3e-5,
     )
+
+
+@pytest.mark.parametrize("name", ["Q5_1", "Q8_0", "Q5_K"])
+def test_exported_scalar_symbols_match_independent_oracle(
+    name: str,
+    mixed_native_library: Path | None,
+) -> None:
+    if mixed_native_library is None:
+        pytest.skip("g++ unavailable")
+    library = ctypes.CDLL(str(mixed_native_library))
+    byte_pointer = ctypes.POINTER(ctypes.c_uint8)
+    float_pointer = ctypes.POINTER(ctypes.c_float)
+    stem = name.lower()
+    dot = getattr(library, f"freetoken_mixed_{stem}_dot_scalar")
+    dot.argtypes = [byte_pointer, float_pointer]
+    dot.restype = ctypes.c_float
+    decode = getattr(library, f"freetoken_mixed_{stem}_decode_scalar")
+    decode.argtypes = [byte_pointer, float_pointer]
+    decode.restype = None
+    elements, _ = _FORMATS[name]
+    block = _pack_block(name, 223)
+    vector = np.linspace(-1.0, 1.0, elements, dtype=np.float32)
+    expected = _independent_decode(name, block)
+    decoded = np.empty(elements, dtype=np.float32)
+    decode(block.ctypes.data_as(byte_pointer), decoded.ctypes.data_as(float_pointer))
+    np.testing.assert_allclose(decoded, expected, rtol=2e-5, atol=2e-5)
+    actual_dot = dot(block.ctypes.data_as(byte_pointer), vector.ctypes.data_as(float_pointer))
+    expected_dot = np.asarray(np.sum(expected * vector, dtype=np.float32), dtype=np.float32)
+    np.testing.assert_allclose(actual_dot, expected_dot, rtol=3e-5, atol=3e-5)
+
+
+@pytest.mark.parametrize("name", ["Q5_1", "Q8_0", "Q5_K"])
+def test_decode_rejects_input_output_overlap_for_scalar_and_native(
+    name: str,
+    mixed_native_library: Path | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primitives = [select_mixed_gemv_primitive("scalar")]
+    if mixed_native_library is not None:
+        monkeypatch.setenv("FREETOKEN_MIXED_GEMV_NATIVE_LIB", str(mixed_native_library))
+        native = select_mixed_gemv_primitive("forced_avx2")
+        if native.isa == "avx2":
+            primitives.append(native)
+    elements, block_bytes = _FORMATS[name]
+    for primitive in primitives:
+        storage = np.zeros(max(block_bytes, elements * 4), dtype=np.uint8)
+        block = storage[:block_bytes]
+        block[:] = _pack_block(name, 241)
+        output = storage[: elements * 4].view(np.float32)
+        before = storage.copy()
+        with pytest.raises(ValueError, match="must not overlap"):
+            primitive.decode(block, quant_name=name, out=output)
+        np.testing.assert_array_equal(storage, before)
 
 
 def test_native_gemv_rejects_null_and_bad_stride_without_writing(
@@ -307,12 +425,18 @@ def test_mixed_dispatch_baseline_contains_no_forbidden_isa(
 ) -> None:
     assert mixed_native_library is not None
     dispatch = mixed_native_library.parent / "dispatch.o"
+    scalar = mixed_native_library.parent / "scalar.o"
+    dispatch_native = mixed_native_library.parent / "dispatch_native.o"
+    scalar_native = mixed_native_library.parent / "scalar_native.o"
     avx2 = mixed_native_library.parent / "avx2.o"
-    baseline_disassembly = subprocess.run(
-        ["objdump", "-d", str(dispatch)], check=True, capture_output=True, text=True
-    ).stdout.lower()
-    assert "zmm" not in baseline_disassembly
-    assert "0x62" not in baseline_disassembly
+    for baseline_object in (dispatch, scalar, dispatch_native, scalar_native):
+        baseline_disassembly = subprocess.run(
+            ["objdump", "-d", str(baseline_object)], check=True, capture_output=True, text=True
+        ).stdout.lower()
+        assert "zmm" not in baseline_disassembly
+        assert "ymm" not in baseline_disassembly
+        assert "0x62" not in baseline_disassembly
+        assert re.search(r"\b(v[a-z][a-z0-9]*)\b", baseline_disassembly) is None
     avx_disassembly = subprocess.run(
         ["objdump", "-d", str(avx2)], check=True, capture_output=True, text=True
     ).stdout.lower()

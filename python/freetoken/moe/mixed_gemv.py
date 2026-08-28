@@ -273,6 +273,8 @@ class MixedGemvPrimitive:
         _, elements, block_bytes = _FORMATS[name]
         raw = _uint8_block(block, block_bytes, name)
         result = _decode_output(out, elements, name)
+        if np.shares_memory(raw, result):
+            raise ValueError(f"{name} decode input and output must not overlap")
         if self.native is None:
             _DECODERS[name](raw, out=result)
         else:

@@ -1,6 +1,6 @@
 // Baseline dispatch for the Issue #16 Q5_K/Q5_1/Q8_0 companion primitives.
-// Compile this translation unit without AVX flags and link it with the scalar
-// and AVX2 translation units.  The scalar path is always available.
+// Baseline functions use a per-function ISA fence so host -march settings cannot
+// add AVX instructions.  Link this translation unit with scalar and AVX2 sources.
 
 #include "mixed_gemv_native.h"
 
@@ -9,16 +9,19 @@
 
 #if defined(__GNUC__) || defined(__clang__)
 #define FREETOKEN_EXPORT __attribute__((visibility("default")))
+#define FREETOKEN_BASELINE_TARGET __attribute__((target("no-avx,no-avx2,no-fma")))
 #else
 #define FREETOKEN_EXPORT
+#define FREETOKEN_BASELINE_TARGET
 #endif
 
 namespace {
 
 template <typename Dot>
-int gemv_scalar(const uint8_t* rows, int row_count, int blocks_per_row, int row_stride_bytes,
-               int block_bytes, int block_elements, const float* input, float* output,
-               Dot dot) {
+FREETOKEN_BASELINE_TARGET int gemv_scalar(const uint8_t* rows, int row_count,
+                                          int blocks_per_row, int row_stride_bytes,
+                                          int block_bytes, int block_elements,
+                                          const float* input, float* output, Dot dot) {
   if (rows == nullptr || input == nullptr || output == nullptr || row_count <= 0 ||
       blocks_per_row <= 0 || blocks_per_row > 0x7FFFFFFF / block_bytes ||
       row_stride_bytes != blocks_per_row * block_bytes) {
@@ -36,13 +39,13 @@ int gemv_scalar(const uint8_t* rows, int row_count, int blocks_per_row, int row_
   return 0;
 }
 
-bool use_avx2() {
+FREETOKEN_BASELINE_TARGET bool use_avx2() {
   return freetoken_mixed_cpu_supports_avx2() != 0;
 }
 
 }  // namespace
 
-extern "C" FREETOKEN_EXPORT int freetoken_mixed_cpu_supports_avx2() {
+extern "C" FREETOKEN_BASELINE_TARGET FREETOKEN_EXPORT int freetoken_mixed_cpu_supports_avx2() {
 #if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
   __builtin_cpu_init();
   return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
@@ -51,14 +54,14 @@ extern "C" FREETOKEN_EXPORT int freetoken_mixed_cpu_supports_avx2() {
 #endif
 }
 
-extern "C" FREETOKEN_EXPORT float freetoken_mixed_q5_1_dot(const uint8_t* block,
-                                                              const float* input) {
+extern "C" FREETOKEN_BASELINE_TARGET FREETOKEN_EXPORT float
+freetoken_mixed_q5_1_dot(const uint8_t* block, const float* input) {
   return use_avx2() ? freetoken_mixed_q5_1_dot_avx2_impl(block, input)
                     : freetoken_mixed_q5_1_dot_scalar(block, input);
 }
 
-extern "C" FREETOKEN_EXPORT void freetoken_mixed_q5_1_decode(const uint8_t* block,
-                                                               float* output) {
+extern "C" FREETOKEN_BASELINE_TARGET FREETOKEN_EXPORT void
+freetoken_mixed_q5_1_decode(const uint8_t* block, float* output) {
   if (use_avx2()) {
     freetoken_mixed_q5_1_decode_avx2_impl(block, output);
   } else {
@@ -66,7 +69,7 @@ extern "C" FREETOKEN_EXPORT void freetoken_mixed_q5_1_decode(const uint8_t* bloc
   }
 }
 
-extern "C" FREETOKEN_EXPORT int freetoken_mixed_q5_1_gemv(
+extern "C" FREETOKEN_BASELINE_TARGET FREETOKEN_EXPORT int freetoken_mixed_q5_1_gemv(
     const uint8_t* rows, int row_count, int blocks_per_row, int row_stride_bytes,
     const float* input, float* output) {
   if (use_avx2()) {
@@ -77,14 +80,14 @@ extern "C" FREETOKEN_EXPORT int freetoken_mixed_q5_1_gemv(
                      freetoken_mixed_q5_1_dot_scalar);
 }
 
-extern "C" FREETOKEN_EXPORT float freetoken_mixed_q8_0_dot(const uint8_t* block,
-                                                              const float* input) {
+extern "C" FREETOKEN_BASELINE_TARGET FREETOKEN_EXPORT float
+freetoken_mixed_q8_0_dot(const uint8_t* block, const float* input) {
   return use_avx2() ? freetoken_mixed_q8_0_dot_avx2_impl(block, input)
                     : freetoken_mixed_q8_0_dot_scalar(block, input);
 }
 
-extern "C" FREETOKEN_EXPORT void freetoken_mixed_q8_0_decode(const uint8_t* block,
-                                                               float* output) {
+extern "C" FREETOKEN_BASELINE_TARGET FREETOKEN_EXPORT void
+freetoken_mixed_q8_0_decode(const uint8_t* block, float* output) {
   if (use_avx2()) {
     freetoken_mixed_q8_0_decode_avx2_impl(block, output);
   } else {
@@ -92,7 +95,7 @@ extern "C" FREETOKEN_EXPORT void freetoken_mixed_q8_0_decode(const uint8_t* bloc
   }
 }
 
-extern "C" FREETOKEN_EXPORT int freetoken_mixed_q8_0_gemv(
+extern "C" FREETOKEN_BASELINE_TARGET FREETOKEN_EXPORT int freetoken_mixed_q8_0_gemv(
     const uint8_t* rows, int row_count, int blocks_per_row, int row_stride_bytes,
     const float* input, float* output) {
   if (use_avx2()) {
@@ -103,14 +106,14 @@ extern "C" FREETOKEN_EXPORT int freetoken_mixed_q8_0_gemv(
                      freetoken_mixed_q8_0_dot_scalar);
 }
 
-extern "C" FREETOKEN_EXPORT float freetoken_mixed_q5_k_dot(const uint8_t* block,
-                                                              const float* input) {
+extern "C" FREETOKEN_BASELINE_TARGET FREETOKEN_EXPORT float
+freetoken_mixed_q5_k_dot(const uint8_t* block, const float* input) {
   return use_avx2() ? freetoken_mixed_q5_k_dot_avx2_impl(block, input)
                     : freetoken_mixed_q5_k_dot_scalar(block, input);
 }
 
-extern "C" FREETOKEN_EXPORT void freetoken_mixed_q5_k_decode(const uint8_t* block,
-                                                               float* output) {
+extern "C" FREETOKEN_BASELINE_TARGET FREETOKEN_EXPORT void
+freetoken_mixed_q5_k_decode(const uint8_t* block, float* output) {
   if (use_avx2()) {
     freetoken_mixed_q5_k_decode_avx2_impl(block, output);
   } else {
@@ -118,7 +121,7 @@ extern "C" FREETOKEN_EXPORT void freetoken_mixed_q5_k_decode(const uint8_t* bloc
   }
 }
 
-extern "C" FREETOKEN_EXPORT int freetoken_mixed_q5_k_gemv(
+extern "C" FREETOKEN_BASELINE_TARGET FREETOKEN_EXPORT int freetoken_mixed_q5_k_gemv(
     const uint8_t* rows, int row_count, int blocks_per_row, int row_stride_bytes,
     const float* input, float* output) {
   if (use_avx2()) {
