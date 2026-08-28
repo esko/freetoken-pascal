@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from freetoken.moe import real_artifact_probe
 from freetoken.moe.real_artifact_probe import (
     ArtifactProbeError,
     RangeFetcher,
@@ -268,3 +269,56 @@ def test_promoted_layer_selection_is_explicit(
         "Q5_K",
         "Q8_0",
     }
+
+
+def test_run_mode_executes_the_selected_nonzero_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+
+    class _Telemetry:
+        backend = "reference"
+        kernel_census = ("reference",)
+
+        def as_dict(self) -> dict[str, object]:
+            return {"backend": self.backend, "kernel_census": self.kernel_census}
+
+    class _Result:
+        output = np.zeros((1, 1), dtype=np.float32)
+        telemetry = _Telemetry()
+
+    class _Primitive:
+        isa = "scalar"
+        fallback_reason = "test"
+
+    class _Executor:
+        primitive = _Primitive()
+        mixed_primitive = _Primitive()
+        backend = "reference"
+
+        def __init__(self, layout, **kwargs):
+            del layout, kwargs
+
+        def prepare(self, tokens: int, routes: int) -> None:
+            del tokens, routes
+
+        def execute(self, layer_id: int, hidden, expert_ids, weights):
+            del hidden, expert_ids, weights
+            calls.append(layer_id)
+            return _Result()
+
+        def close(self) -> None:
+            pass
+
+    class _Layout:
+        layers = (2,)
+
+    monkeypatch.setattr(real_artifact_probe, "Q4KExecutor", _Executor)
+    real_artifact_probe._run_mode(
+        _Layout(),
+        np.zeros((1, 1), dtype=np.float32),
+        np.zeros((1, 1), dtype=np.int32),
+        np.ones((1, 1), dtype=np.float32),
+        mode="forced_scalar",
+        repeats=1,
+        warmup=1,
+    )
+    assert calls == [2, 2]

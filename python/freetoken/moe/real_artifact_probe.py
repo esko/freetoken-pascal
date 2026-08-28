@@ -580,17 +580,22 @@ def _run_mode(
     repeats: int,
     warmup: int,
 ) -> tuple[np.ndarray, dict[str, Any]]:
+    if len(layout.layers) != 1:
+        raise ArtifactProbeError(
+            f"real-artifact probe requires exactly one layer, got {layout.layers}"
+        )
+    layer_id = layout.layers[0]
     executor = Q4KExecutor(layout, mode=mode, required_alignment=32)
     try:
         executor.prepare(hidden.shape[0], expert_ids.shape[1])
         for _ in range(warmup):
-            executor.execute(0, hidden, expert_ids, weights)
+            executor.execute(layer_id, hidden, expert_ids, weights)
         elapsed: list[int] = []
         telemetry: list[dict[str, Any]] = []
         output: np.ndarray | None = None
         for _ in range(repeats):
             started = time.perf_counter_ns()
-            result = executor.execute(0, hidden, expert_ids, weights)
+            result = executor.execute(layer_id, hidden, expert_ids, weights)
             elapsed.append(time.perf_counter_ns() - started)
             telemetry.append(result.telemetry.as_dict())
             if output is None:
