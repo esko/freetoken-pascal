@@ -284,10 +284,12 @@ def _source_ranges(descriptor: CpuExpertDescriptor) -> tuple[tuple[int, int], ..
     if (descriptor_offset is None) != (descriptor_size is None):
         raise InvalidRequest("source descriptor exposes incomplete offset/size range metadata")
     if descriptor_offset is not None and descriptor_size is not None:
-        ranges.append((
-            _checked_int(descriptor_offset, "source descriptor offset"),
-            _checked_int(descriptor_size, "source descriptor size"),
-        ))
+        ranges.append(
+            (
+                _checked_int(descriptor_offset, "source descriptor offset"),
+                _checked_int(descriptor_size, "source descriptor size"),
+            )
+        )
     if mapping is not None:
         size = getattr(mapping, "length", None)
         if size is None:
@@ -296,10 +298,12 @@ def _source_ranges(descriptor: CpuExpertDescriptor) -> tuple[tuple[int, int], ..
         if size is not None and offset is None:
             raise InvalidRequest("source mapping exposes size without a descriptor offset")
         if size is not None and offset is not None:
-            ranges.append((
-                _checked_int(offset, "source descriptor data_offset"),
-                _checked_int(size, "source mapping length"),
-            ))
+            ranges.append(
+                (
+                    _checked_int(offset, "source descriptor data_offset"),
+                    _checked_int(size, "source mapping length"),
+                )
+            )
 
     size = getattr(source, "size", None)
     if size is not None and not callable(size):
@@ -346,8 +350,7 @@ def _validate_source_range(descriptor: CpuExpertDescriptor) -> None:
     ranges = _source_ranges(descriptor)
     if packed and not ranges:
         raise InvalidRequest(
-            f"packed source for {descriptor.projection} does not expose a bounded "
-            "mapped/range size"
+            f"packed source for {descriptor.projection} does not expose a bounded mapped/range size"
         )
     if not ranges:
         return
@@ -407,8 +410,10 @@ def cpu_layout_from_source_layout(
     elif hasattr(source_getter, "bank"):
         get_source = source_getter.bank
     else:
+
         def get_source(layer: int, projection: str) -> Any:
             return source_getter[(layer, projection)]
+
     descriptors = tuple(
         CpuExpertDescriptor.from_source_descriptor(
             descriptor, get_source(descriptor.layer, descriptor.projection)
@@ -604,8 +609,7 @@ class ReferenceCpuExpertExecutor:
             raise InvalidRequest(f"unsupported output dtype {self.output_dtype}")
         self.decoders = dict(decoders or {})
         self._decoder_workspace_capable = {
-            id(decoder): _decoder_accepts_workspace(decoder)
-            for decoder in self.decoders.values()
+            id(decoder): _decoder_accepts_workspace(decoder) for decoder in self.decoders.values()
         }
         required_alignment = _checked_int(required_alignment, "required_alignment")
         if required_alignment <= 0:
@@ -659,9 +663,7 @@ class ReferenceCpuExpertExecutor:
                 )
 
         self.hidden_size = self.layout.descriptor(self.layout.layers[0], "gate").input_dim
-        self.intermediate_size = self.layout.descriptor(
-            self.layout.layers[0], "gate"
-        ).output_dim
+        self.intermediate_size = self.layout.descriptor(self.layout.layers[0], "gate").output_dim
 
     def prepare(self, max_tokens: int, max_routes: int) -> WorkspacePlan:
         max_tokens = _checked_int(max_tokens, "max_tokens")
@@ -856,8 +858,7 @@ class ReferenceCpuExpertExecutor:
                 )
             if packed.dtype != np.dtype(np.uint8) or not packed.flags.c_contiguous:
                 raise InvalidRequest(
-                    f"packed {descriptor.projection} expert must be a contiguous uint8 "
-                    "byte view"
+                    f"packed {descriptor.projection} expert must be a contiguous uint8 byte view"
                 )
             decoder = self.decoders.get(descriptor.quant_type)
             if decoder is None:
@@ -866,9 +867,8 @@ class ReferenceCpuExpertExecutor:
                 raise UnsupportedQuantType(
                     f"no reference decoder registered for {descriptor.quant_name}"
                 )
-            if (
-                decoder_workspace is not None
-                and self._decoder_workspace_capable.get(id(decoder), False)
+            if decoder_workspace is not None and self._decoder_workspace_capable.get(
+                id(decoder), False
             ):
                 target = decoder_workspace[: descriptor.output_dim, : descriptor.input_dim]
                 dense = decoder(packed, descriptor, out=target)
@@ -982,12 +982,10 @@ class ReferenceCpuExpertExecutor:
                     down = self._dense_expert(
                         down_descriptor, expert, decoder_workspace=workspace["decoded_down"]
                     )
-                    bytes_read += (
-                        sum(
-                            item.expert_stride_bytes
-                            for item in route_descriptors
-                            if self._source_mode(item).startswith("packed")
-                        )
+                    bytes_read += sum(
+                        item.expert_stride_bytes
+                        for item in route_descriptors
+                        if self._source_mode(item).startswith("packed")
                     )
                     # Match the production fused-MoE contract exactly.  In input
                     # mode the route scale is applied to both gate and up outputs
@@ -1137,9 +1135,7 @@ class ReferenceCpuExpertExecutor:
         else:
             active_tokens = _checked_int(num_token_non_padded, "num_token_non_padded")
             if not 0 <= active_tokens <= tokens:
-                raise InvalidRequest(
-                    f"num_token_non_padded={active_tokens} outside [0, {tokens}]"
-                )
+                raise InvalidRequest(f"num_token_non_padded={active_tokens} outside [0, {tokens}]")
         max_width = min(self.layout.top_k, expert_ids.shape[1])
         if max_width <= 0:
             raise InvalidRequest("microbenchmark requires at least one supplied route")
@@ -1157,17 +1153,13 @@ class ReferenceCpuExpertExecutor:
                 raise InvalidRequest("route_counts must not be empty")
         for route_count in selected_widths:
             if not 1 <= route_count <= max_width:
-                raise InvalidRequest(
-                    f"route_count={route_count} outside [1, {max_width}]"
-                )
+                raise InvalidRequest(f"route_count={route_count} outside [1, {max_width}]")
 
         if miss_counts is None:
             expected_misses: tuple[int | None, ...] = (None,) * len(selected_widths)
         else:
             try:
-                expected_misses = tuple(
-                    _checked_int(value, "miss_count") for value in miss_counts
-                )
+                expected_misses = tuple(_checked_int(value, "miss_count") for value in miss_counts)
             except TypeError as error:
                 raise InvalidRequest("miss_counts must be an iterable of integers") from error
             if len(expected_misses) != len(selected_widths):

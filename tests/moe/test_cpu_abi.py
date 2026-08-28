@@ -91,16 +91,20 @@ def _independent_reference(executor, hidden, ids, weights, *, apply_input=False)
             if executor.activation == "silu":
                 activated = 1.0 / (1.0 + np.exp(-gate_up_gate)) * gate_up_gate
             elif executor.activation == "gelu":
-                activated = 0.5 * gate_up_gate * (
-                    1.0
-                    + np.vectorize(math.erf)(gate_up_gate / math.sqrt(2.0))
+                activated = (
+                    0.5
+                    * gate_up_gate
+                    * (1.0 + np.vectorize(math.erf)(gate_up_gate / math.sqrt(2.0)))
                 )
             else:
-                activated = 0.5 * gate_up_gate * (
-                    1.0
-                    + np.tanh(
-                        math.sqrt(2.0 / math.pi)
-                        * (gate_up_gate + 0.044715 * gate_up_gate**3)
+                activated = (
+                    0.5
+                    * gate_up_gate
+                    * (
+                        1.0
+                        + np.tanh(
+                            math.sqrt(2.0 / math.pi) * (gate_up_gate + 0.044715 * gate_up_gate**3)
+                        )
                     )
                 )
             activated *= gate_up_up
@@ -133,6 +137,40 @@ def test_reference_executor_matches_independent_dense_contract_and_accumulates()
 
 
 @pytest.mark.parametrize("apply_input", [False, True])
+def test_reference_executor_matches_randomized_pure_torch_reference(
+    apply_input: bool,
+) -> None:
+    torch = pytest.importorskip("torch")
+    executor = _executor(apply_router_weight_on_input=apply_input)
+    rng = np.random.default_rng(3815)
+    hidden = rng.normal(size=(8, 4)).astype(np.float32)
+    ids = rng.integers(0, 5, size=(8, 10), dtype=np.int32)
+    weights = rng.normal(size=(8, 10)).astype(np.float32)
+
+    actual = executor.execute(0, hidden, ids, weights).output
+    hidden_t = torch.from_numpy(hidden)
+    gate = torch.from_numpy(executor.layout.descriptor(0, "gate").source)
+    up = torch.from_numpy(executor.layout.descriptor(0, "up").source)
+    down = torch.from_numpy(executor.layout.descriptor(0, "down").source)
+    weights_t = torch.from_numpy(weights)
+    expected = torch.zeros_like(hidden_t)
+    for token in range(hidden.shape[0]):
+        for route in range(ids.shape[1]):
+            expert = int(ids[token, route])
+            gate_out = gate[expert] @ hidden_t[token]
+            up_out = up[expert] @ hidden_t[token]
+            if apply_input:
+                gate_out = gate_out * weights_t[token, route]
+                up_out = up_out * weights_t[token, route]
+            contribution = down[expert] @ (torch.nn.functional.silu(gate_out) * up_out)
+            if not apply_input:
+                contribution = contribution * weights_t[token, route]
+            expected[token] += contribution
+
+    np.testing.assert_allclose(actual, expected.numpy(), rtol=3e-6, atol=3e-6)
+
+
+@pytest.mark.parametrize("apply_input", [False, True])
 def test_apply_router_weight_contract_is_explicit(apply_input: bool) -> None:
     executor = _executor(apply_router_weight_on_input=apply_input)
     hidden = np.ones((2, 4), dtype=np.float32)
@@ -161,9 +199,7 @@ def test_apply_router_weight_contract_is_explicit(apply_input: bool) -> None:
         # The nonlinear input mode must not be replaced by the otherwise-linear
         # one-scale down-output form.  This catches a tempting but incorrect
         # optimization that silently changes production semantics.
-        one_scale = _independent_reference(
-            executor, hidden, ids, weights, apply_input=False
-        )
+        one_scale = _independent_reference(executor, hidden, ids, weights, apply_input=False)
         assert not np.allclose(actual, one_scale, rtol=2e-6, atol=2e-6)
 
 
@@ -215,8 +251,10 @@ def test_cancellation_is_transactional_and_workspace_is_reusable() -> None:
     ids = np.array([[0, 1], [2, 3]], dtype=np.int32)
     weights = np.ones((2, 2), dtype=np.float32)
     output = np.full((2, 4), 9, dtype=np.float32)
+
     def token():
         return True
+
     with pytest.raises(Cancelled) as raised:
         executor.execute(0, hidden, ids, weights, output=output, cancellation=token)
     assert np.all(output == 0)
@@ -408,6 +446,21 @@ def test_prepared_workspace_and_caller_output_are_reused() -> None:
     assert {name: id(value) for name, value in executor._workspace.items()} == workspace_ids
 
 
+def test_prepared_dense_execution_makes_no_executor_array_allocations(monkeypatch) -> None:
+    executor = _executor()
+    hidden = np.ones((2, 4), dtype=np.float32)
+    ids = np.array([[0, 1], [2, 3]], dtype=np.int32)
+    weights = np.ones((2, 2), dtype=np.float32)
+    output = np.empty((2, 4), dtype=np.float32)
+
+    def reject_empty(*_args, **_kwargs):
+        raise AssertionError("prepared execution must reuse its NumPy workspace")
+
+    monkeypatch.setattr("freetoken.moe.cpu_abi.np.empty", reject_empty)
+    result = executor.execute(0, hidden, ids, weights, output=output)
+    assert result.output is output
+
+
 def test_malformed_output_preserves_invalid_request_type() -> None:
     executor = _executor()
     with pytest.raises(InvalidRequest, match="NumPy ndarray"):
@@ -587,9 +640,7 @@ def test_qwen38_census_descriptors_cover_q4_and_three_bit_artifacts(
     filename: str, required_quant_names: set[str]
 ) -> None:
     root = Path(__file__).resolve().parents[2]
-    census = json.loads(
-        (root / "tests/fixtures/results" / filename).read_text(encoding="utf-8")
-    )
+    census = json.loads((root / "tests/fixtures/results" / filename).read_text(encoding="utf-8"))
     # Import the host-layout parser only for the real pinned census shape; no
     # model-specific type is imported by the ABI adapter itself.
     from freetoken.gguf_host import expert_layout_from_census
@@ -718,9 +769,7 @@ def test_workspace_aware_decoder_reuses_bounded_scratch() -> None:
     scratch_addresses: dict[str, list[int]] = {name: [] for name in dense}
 
     def decode(packed, descriptor, *, out):
-        scratch_addresses[descriptor.projection].append(
-            int(out.__array_interface__["data"][0])
-        )
+        scratch_addresses[descriptor.projection].append(int(out.__array_interface__["data"][0]))
         values = packed.view(np.float32).reshape(descriptor.output_dim, descriptor.input_dim)
         np.copyto(out, values)
         return out
@@ -869,8 +918,7 @@ def test_unsupported_packed_decoder_fails_explicitly() -> None:
         source=PackedSource(),
     )
     descriptors = tuple(
-        replacement if item.projection == "gate" else item
-        for item in executor.layout.descriptors
+        replacement if item.projection == "gate" else item for item in executor.layout.descriptors
     )
     failing = ReferenceCpuExpertExecutor(CpuExpertLayout(descriptors, top_k=10))
     failing.prepare(1, 1)

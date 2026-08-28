@@ -30,8 +30,8 @@ env-clean:
 
 python-check:
 	python -m compileall -q python tests scripts
-	ruff check scripts
-	ruff format --check scripts
+	ruff check scripts python/freetoken/moe/cpu_abi.py tests/moe/test_cpu_abi.py
+	ruff format --check scripts python/freetoken/moe/cpu_abi.py tests/moe/test_cpu_abi.py
 
 hosted-tests:
-	PYTHONPATH=python pytest -q tests/project tests/daemon
+	PYTHONPATH=python pytest -q tests/project tests/daemon tests/moe/test_cpu_abi.py
