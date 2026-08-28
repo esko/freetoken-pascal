@@ -137,6 +137,7 @@ sources:
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 11
+        responsible_pull_request: 35
       - source_path: python/freetoken/attention/qsa.py
         destination_path: python/freetoken/attention/qsa.py
         source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
@@ -147,6 +148,7 @@ sources:
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 11
+        responsible_pull_request: 35
       - source_path: python/freetoken/kernel/triton/qsa.py
         destination_path: python/freetoken/kernel/triton/qsa.py
         source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
@@ -156,6 +158,7 @@ sources:
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 11
+        responsible_pull_request: 35
       - source_path: python/freetoken/kvcache/qsa_pool.py
         destination_path: python/freetoken/kvcache/qsa_pool.py
         source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
@@ -164,6 +167,7 @@ sources:
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 11
+        responsible_pull_request: 35
   - id: freetoken-gguf-pr131
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 131
