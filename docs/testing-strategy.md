@@ -94,6 +94,14 @@ Compare:
 - current-step fetch disabled;
 - same routed IDs and weights.
 
+### Router operation
+
+Compare the fused Pascal router with the permanent FP32 Torch reference using the same
+512 logits. Expert IDs are exact on no-tie inputs. Selected probabilities use the
+softmax denominator across all experts, with separate tests for renormalized weights,
+padded rows, ties and NaN/Inf behavior. Performance evidence records router-only time
+separately from complete layer and token time.
+
 ### Model graph
 
 Compare logits and selected internal state at:

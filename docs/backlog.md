@@ -22,6 +22,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 | P2 | [#18](https://github.com/esko/freetoken-pascal/issues/18) | NUMA-aware host banks and bounded pinning | H0/H3 |
 | P3 | [#19](https://github.com/esko/freetoken-pascal/issues/19) | PXA/PXQ `sm_61` GPU expert backend | H1/H2 |
 | P3 | [#20](https://github.com/esko/freetoken-pascal/issues/20) | Qwen4 TP=2 and dual-P4 ownership | H0/H3 |
+| P3 | [#38](https://github.com/esko/freetoken-pascal/issues/38) | Fused Qwen3.8 `topk=10` Pascal router | H0-H2 |
 | P3 | [#21](https://github.com/esko/freetoken-pascal/issues/21) | Fixed cache and correct mixed partial merge | H0-H3 |
 | P3 | [#22](https://github.com/esko/freetoken-pascal/issues/22) | Async LFRU, persisted heat and telemetry | H0-H3 |
 | P4 | [#23](https://github.com/esko/freetoken-pascal/issues/23) | Concurrent current-step CPU/GPU misses | H0-H3 |
@@ -39,7 +40,9 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
                     └→ #15 → #16 → #18
                          #12 → #19
 #9 + #11 → #20
-#16 + #19 + #20 → #21 → #22 → #23 → #24 → #25
+#16 + #19 + #20 → #21
+#14 → #38
+#21 + #38 → #22 → #23 → #24 → #25
 #14 + #20 + #24 + #25 → #26 → #27 → #28 → #29
 ```
 
@@ -47,7 +50,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 
 ## Work possible before P4 arrival
 
-The orchestrator should prioritize H0/H1 portions of #5–#8 and #10–#19, plus the pure logic/tests in #20–#25. Issues #9 and #29 are explicitly blocked. Other issues remain open until their H2/H3 evidence is attached, even when their hosted implementation is ready.
+The orchestrator should prioritize H0/H1 portions of #5–#8, #10–#19 and #38, plus the pure logic/tests in #20–#25. Issues #9 and #29 are explicitly blocked. Other issues remain open until their H2/H3 evidence is attached, even when their hosted implementation is ready.
 
 ## Completeness audit
 
@@ -61,6 +64,7 @@ The v1 backlog includes explicit work and acceptance evidence for:
 - heterogeneous expert bank types and PLE NVMe/page cache;
 - AVX2 CPU fallback and required low-bit formats;
 - Pascal GPU kernel parity;
+- exact full-softmax `topk=10` router parity and fallback;
 - one-GPU bring-up and two-GPU ownership;
 - cache-zero, static cache, async fill and current-step hybrid merge;
 - contention-aware scheduling and safe pure fallbacks;
