@@ -857,12 +857,15 @@ def _run_gguf_oracle(
     hidden, expert_ids, routing_weights, active_tokens = _validate_oracle_arrays(
         layout, hidden, expert_ids, routing_weights, num_token_non_padded
     )
+    dequant_started = time.perf_counter_ns()
     dense, packed_hashes = _oracle_dense_projections(layout, fetched_sources, gguf)
+    dequant_elapsed_ns = time.perf_counter_ns() - dequant_started
     gate = dense["gate"]
     up = dense["up"]
     down = dense["down"]
     output = np.zeros((hidden.shape[0], gate.shape[1]), dtype=np.float32)
     activated = np.empty(gate.shape[0], dtype=np.float32)
+    execution_started = time.perf_counter_ns()
     for token in range(active_tokens):
         for route in range(expert_ids.shape[1]):
             expert = int(expert_ids[token, route])
@@ -879,6 +882,7 @@ def _run_gguf_oracle(
             contribution = np.matmul(down, activated).astype(np.float32, copy=False)
             np.multiply(contribution, np.float32(routing_weights[token, route]), out=contribution)
             np.add(output[token], contribution, out=output[token])
+    execution_elapsed_ns = time.perf_counter_ns() - execution_started
     return output, {
         **gguf_oracle_identity(),
         "packed_source_sha256": packed_hashes,
@@ -886,6 +890,10 @@ def _run_gguf_oracle(
             projection: _hash_array(dense[projection]) for projection in _PROJECTIONS
         },
         "output_sha256": _hash_array(output),
+        "raw_elapsed_ns": {
+            "dequantize": dequant_elapsed_ns,
+            "dense_expert": execution_elapsed_ns,
+        },
     }
 
 
@@ -1152,7 +1160,8 @@ def probe_qwen38_expert(
             "timing": {
                 "scalar_raw_elapsed_ns": scalar["raw_elapsed_ns"],
                 "native_raw_elapsed_ns": avx2["raw_elapsed_ns"],
-                "oracle_timed": False,
+                "oracle_raw_elapsed_ns": oracle.get("raw_elapsed_ns"),
+                "comparison_claim": False,
             },
             "scalar": scalar,
             "avx2": avx2,
