@@ -19,6 +19,7 @@ must also be satisfied before a backend can select it.
 | MoE token alignment | fused atomic kernel | staged atomic-free kernel |
 | top-k/top-p sampling | Triton atomic threshold search | Torch sort and inverse CDF |
 | attention tiles | large shared-memory tiles | device-budgeted descending tile ladder |
+| QSA gathered-row dot products | Triton BF16/FP16 | exact Torch FP32 reference |
 
 FlashInfer and `sgl_kernel` are disabled below compute capability 7.5. OpenAI
 `triton_kernels` is disabled below 7.0. Their in-tree fallbacks are selected before launch and

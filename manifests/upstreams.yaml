@@ -121,10 +121,53 @@ sources:
     ref: ad752c9970e0dc3f1b09aeec38235332149336ed
     license: Apache-2.0
     role: Qwen3.8 Qwen4 QSA PLE and vision source; v1 imports text only
-    usage: planned
+    usage: imported
     responsible_issue: 11
-    notice_required: false
-    imports: []
+    notice_required: true
+    imports:
+      - source_path: python/freetoken/models/qwen4_exp
+        destination_path: python/freetoken/models/qwen4_exp
+        source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
+        method: adapted
+        local_modifications:
+          - import the text model, configuration, loader, GDN, hyperconnection, router, and PLE interfaces
+          - exclude the vision tower and multimodal RoPE implementation
+          - skip vision and MTP weights and fail image execution with the v1 text-only scope message
+          - add downstream-only device-neutral reference equations and an opt-in debug hook
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 11
+        responsible_pull_request: 35
+      - source_path: python/freetoken/attention/qsa.py
+        destination_path: python/freetoken/attention/qsa.py
+        source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
+        method: adapted
+        local_modifications:
+          - use an explicit FP32 Torch score path below sm_70
+          - log the selected sparse attention implementation
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 11
+        responsible_pull_request: 35
+      - source_path: python/freetoken/kernel/triton/qsa.py
+        destination_path: python/freetoken/kernel/triton/qsa.py
+        source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
+        method: adapted
+        local_modifications:
+          - use an exact FP32 Torch gathered-row fallback below sm_70
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 11
+        responsible_pull_request: 35
+      - source_path: python/freetoken/kvcache/qsa_pool.py
+        destination_path: python/freetoken/kvcache/qsa_pool.py
+        source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
+        method: cherry-pick
+        local_modifications: []
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 11
+        responsible_pull_request: 35
   - id: freetoken-gguf-pr131
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 131

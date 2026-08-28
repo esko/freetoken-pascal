@@ -53,6 +53,15 @@ PYTHONPATH=python python -m pytest -q \
     tests/kernels/test_triton_attention.py \
     -k 'select_extend or select_decode'
 
+# Qwen3.8 reference, QSA selection/cache, text-only failure, and router controls
+# run on the host against the pinned CUDA Torch/Triton imports; no GPU is needed.
+PYTHONPATH=python python -m pytest -q \
+    tests/models/test_qwen4_exp.py \
+    tests/kernels/test_qsa.py \
+    tests/kvcache/test_qsa_pool.py \
+    tests/moe/test_fused_moe.py \
+    -k 'qwen4 or qsa or topk'
+
 nvcc \
     --cubin \
     --generate-code arch=compute_61,code=sm_61 \

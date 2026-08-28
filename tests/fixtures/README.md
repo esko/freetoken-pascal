@@ -4,8 +4,8 @@ All files in this directory are original synthetic fixtures distributed under th
 Apache-2.0 license. They contain no model weights, prompts, user data, benchmark measurements, or
 hardware claims.
 
-- `qwen4-tiny/` is a deliberately small text-only configuration and tensor-name contract. It is
-  not an executable model; Issue #11 owns generation and reference logits for tiny weights.
+- `qwen4-tiny/` is a deliberately small text-only configuration and deterministic reference
+  contract. Real runtime generation remains gated on the H2 Tesla P4 job.
 - `gguf/` is generated deterministically by `scripts/generate_test_fixtures.py`. The valid file
   contains only 282 bytes of artificial tensor payload; malformed variants exercise metadata,
   quant identifier, block stride, and offset failures.

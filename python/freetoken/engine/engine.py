@@ -133,6 +133,8 @@ def _resolve_auto_attention_backend(
         candidates.append(("dsa", True))
     if AttnType.BSA in required:
         candidates.append(("m3_sparse", True))
+    if AttnType.QSA in required:
+        candidates.append(("qsa", True))
     if AttnType.SWA in required:
         candidates.append(("triton", True))
     if AttnType.FULL in required:
@@ -181,7 +183,10 @@ def _validate_attention_backend_choice(config, override, required: frozenset[Att
         if missing:
             valid = [
                 name
-                for name in ("fa", "fi", "trtllm", "triton", "dsa", "dsv4_sparse", "m3_sparse")
+                for name in (
+                    "fa", "fi", "trtllm", "triton", "dsa", "dsv4_sparse",
+                    "m3_sparse", "qsa",
+                )
                 if required <= attention_backend_info(name).supported_types
             ]
             missing_names = "/".join(sorted(t.value for t in missing))
@@ -333,6 +338,11 @@ class Engine:
         with torch.device("meta"), torch_dtype(config.dtype):
             self.model = create_model(config.model_config)
         self.model.load_state_dict(self._load_weight_state_dict(config))
+        if hasattr(self.model, "load_host_weights"):
+            self.model.load_host_weights(
+                config.model_path,
+                dummy=config.use_dummy_weight,
+            )
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free
         # Pool-budget baseline for the desktop cache sliders: free VRAM after the weights are
@@ -1230,6 +1240,8 @@ def _adjust_config(config: EngineConfig):
 
     model_config = config.model_config
     single_stream_only = getattr(model_config, "single_stream_only", False)
+    requires_naive_cache = getattr(model_config, "requires_naive_cache", False)
+    supports_cuda_graph = getattr(model_config, "supports_cuda_graph", True)
     is_dsv4 = getattr(model_config, "dsv4_args", None) is not None
     has_swa_attention = getattr(model_config, "has_swa_attention", False)
     has_linear_attention = getattr(model_config, "has_linear_attention", False)
@@ -1269,6 +1281,14 @@ def _adjust_config(config: EngineConfig):
             override("cuda_graph_bs", [1])
             override("cuda_graph_max_bs", 1)
 
+    if not supports_cuda_graph:
+        override("cuda_graph_bs", [])
+        override("cuda_graph_max_bs", 0)
+        logger.info_rank0(
+            f"CUDA graphs disabled for {getattr(model_config, 'model_type', 'model')}: "
+            "the model requires host-side work during forward"
+        )
+
     if config.cuda_graph_max_bs is None:
         override("cuda_graph_max_bs", config.max_running_req)
 
@@ -1291,6 +1311,14 @@ def _adjust_config(config: EngineConfig):
                 )
             override("cache_type", "swa_radix")
 
+    if requires_naive_cache and getattr(config, "cache_type", "radix") != "naive":
+        override("cache_type", "naive")
+        logger.warning_rank0(
+            f"Cache type overridden to 'naive' for "
+            f"{getattr(model_config, 'model_type', 'model')}: model-owned runtime state "
+            "cannot be restored from radix prefixes"
+        )
+
     if has_linear_attention:
         override(
             "cache_type",
@@ -1302,11 +1330,11 @@ def _adjust_config(config: EngineConfig):
     # comma part must serve every required type, with packages/arch available.
     required_attn_types = _required_attn_types(model_config)
     _dtype = getattr(config, "dtype", None)  # duck-typed test configs omit it
-    if AttnType.BSA in required_attn_types and _dtype is not None and _dtype.itemsize != 2:
+    if required_attn_types & {AttnType.BSA, AttnType.QSA} and _dtype is not None and _dtype.itemsize != 2:
         # Reject at config time: the BSA pool's own assert only fires after the
         # model is resident (and not at all under `python -O`).
         raise ValueError(
-            f"--dtype {config.dtype}: block-sparse attention serves 16-bit "
+            f"--dtype {config.dtype}: sparse attention serves 16-bit "
             "compute only (the index slab budgets 2 bytes/token); use bfloat16 "
             "or float16."
         )

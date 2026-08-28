@@ -46,21 +46,26 @@ def fused_topk(
 
     from freetoken.kernel.backend import is_triton_kernels_usable
 
-    # triton_kernels ships no Windows wheel, and unlike flashinfer/sgl_kernel it is not one
-    # of the six ops the in-repo triton kernels cover -- so this router needs its own fallback.
-    if not is_triton_kernels_usable():
+    # The external Triton kernel pads several internal dimensions to powers of two, but
+    # does not pad N_EXPTS_ACT. Its tl.arange therefore cannot compile for values such as
+    # Qwen3.8-Flash-Next's topk=10. Use the exact Torch path for those models and whenever
+    # the installed package is incompatible with the current GPU architecture.
+    triton_topk_supported = topk > 0 and (topk & (topk - 1)) == 0
+    triton_topk_usable = is_triton_kernels_usable()
+    if not triton_topk_usable or not triton_topk_supported:
         global _warned_torch_topk
         if not _warned_torch_topk:
             _warned_torch_topk = True
-            # Once, not per call: this runs every MoE forward. On Linux a missing
-            # triton_kernels used to fail fast with ImportError; keep the misconfiguration
-            # visible without giving up the fallback that Windows needs.
-            logger.warning_rank0(
-                "fused_topk: triton_kernels is not installed or is incompatible with this GPU "
-                "-> pure-torch router fallback "
-                "(numerically equivalent, slower). Expected on Windows (no wheel); on Linux "
-                "install triton_kernels to restore the fused router."
-            )
+            if not triton_topk_supported:
+                logger.warning_rank0(
+                    f"fused_topk: topk={topk} is not supported by triton_kernels -> "
+                    "pure-torch router fallback (numerically equivalent, slower)."
+                )
+            else:
+                logger.warning_rank0(
+                    "fused_topk: triton_kernels is not installed or is incompatible with "
+                    "this GPU -> pure-torch router fallback (numerically equivalent, slower)."
+                )
         return _torch_fused_topk(gating_output, topk, renormalize, num_token_non_padded)
 
     from triton_kernels.topk import topk as triton_kernels_topk

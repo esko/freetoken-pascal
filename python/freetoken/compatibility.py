@@ -63,6 +63,7 @@ def build_compatibility_profile(
             "gelu_tanh": "libdevice" if pre_turing else "tanh-approx",
             "moe_align": "staged-atomic-free" if pre_volta else "fused-atomic",
             "sampling": "torch-sort" if pre_volta else "triton-atomic",
+            "qsa_sparse_attention": "torch-fp32-reference" if pre_volta else "triton",
             "attention_tiles": "shared-memory-budgeted",
         },
         "optional_packages": package_modes,

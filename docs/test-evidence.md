@@ -7,8 +7,8 @@ masquerade as P4 qualification. The fixture and schema infrastructure under `tes
 ## Fixture policy
 
 All repository fixtures are synthetic and Apache-2.0 licensed. The tiny Qwen4 configuration has
-four experts and no vision or MTP fields. It is a shape/configuration contract, not a substitute for
-the executable tiny model and reference logits owned by Issue #11.
+four experts and no vision or MTP fields. Issue #11 uses it for CPU reference equations and H1
+configuration coverage; real runtime logits and generation remain H2-gated.
 
 Regenerate the binary GGUF fixtures with:
 
