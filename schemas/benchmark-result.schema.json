@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esko/freetoken-pascal/schemas/benchmark-result.schema.json",
+  "title": "FreeToken-Pascal benchmark result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "evidence_status", "commit", "model", "quant_census_sha256", "command", "flags", "workload", "hardware_inventory_sha256", "clock_policy", "selected_behavior", "runs", "summary"],
+  "properties": {
+    "schema_name": {"const": "benchmark-result.schema.json"},
+    "schema_version": {"const": 1},
+    "evidence_status": {"enum": ["synthetic", "measured"]},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "quant_census_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "command": {"type": "string", "minLength": 1},
+    "flags": {"type": "object"},
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt_sha256", "prompt_tokens", "context_tokens", "temperature"],
+      "properties": {
+        "prompt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "prompt_tokens": {"type": "integer", "minimum": 1},
+        "context_tokens": {"type": "integer", "minimum": 1},
+        "temperature": {"type": "number", "minimum": 0}
+      }
+    },
+    "hardware_inventory_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "clock_policy": {"type": "string", "minLength": 1},
+    "selected_behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kernels", "quant_types", "cache_policy", "split_policy", "devices"],
+      "properties": {
+        "kernels": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "quant_types": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "cache_policy": {"type": "string", "minLength": 1},
+        "split_policy": {"type": "string", "minLength": 1},
+        "devices": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "runs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["wall_seconds", "prompt_tps", "decode_tps"],
+        "properties": {
+          "wall_seconds": {"type": "number", "exclusiveMinimum": 0},
+          "prompt_tps": {"type": "number", "minimum": 0},
+          "decode_tps": {"type": "number", "minimum": 0}
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_count", "median_decode_tps"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 1},
+        "median_decode_tps": {"type": "number", "minimum": 0}
+      }
+    }
+  }
+}

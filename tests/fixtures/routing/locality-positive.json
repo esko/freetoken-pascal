@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "locality-positive",
+  "num_experts": 8,
+  "steps": [
+    {"layer": 0, "experts": [0, 1]},
+    {"layer": 0, "experts": [0, 1]},
+    {"layer": 0, "experts": [0, 1]},
+    {"layer": 0, "experts": [2, 3]},
+    {"layer": 0, "experts": [0, 1]},
+    {"layer": 0, "experts": [0, 1]}
+  ]
+}

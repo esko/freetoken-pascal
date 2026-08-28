@@ -1,0 +1,16 @@
+# Synthetic test fixtures
+
+All files in this directory are original synthetic fixtures distributed under the repository's
+Apache-2.0 license. They contain no model weights, prompts, user data, benchmark measurements, or
+hardware claims.
+
+- `qwen4-tiny/` is a deliberately small text-only configuration and tensor-name contract. It is
+  not an executable model; Issue #11 owns generation and reference logits for tiny weights.
+- `gguf/` is generated deterministically by `scripts/generate_test_fixtures.py`. The valid file
+  contains only 282 bytes of artificial tensor payload; malformed variants exercise metadata,
+  quant identifier, block stride, and offset failures.
+- `routing/` contains a locality-positive trace and a cyclic adversarial trace for host cache
+  simulation.
+- `kernels/` contains arithmetic values checked against simple independent scalar formulas.
+- `results/` contains schema-valid synthetic evidence. The `evidence_status` field prevents these
+  examples from being confused with measured release results.

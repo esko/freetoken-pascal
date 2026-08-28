@@ -10,6 +10,16 @@
 #include <source_location>
 #include <type_traits>
 
+// __grid_constant__ is unavailable before Volta. Kernel parameters remain
+// const by-value objects on Pascal; only the unsupported storage annotation is
+// omitted. Keep this target-dependent because the same JIT sources serve newer
+// architectures upstream.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+#define FREETOKEN_GRID_CONSTANT __grid_constant__
+#else
+#define FREETOKEN_GRID_CONSTANT
+#endif
+
 namespace device {
 
 inline constexpr auto kWarpThreads = 32u;

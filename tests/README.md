@@ -27,6 +27,27 @@ parser inference behind `--tool-call-parser auto`.
 
 ## Running
 
+The reproducible hosted H0 command is:
+
+```bash
+PYTHONPATH=python pytest -q tests/project tests/daemon
+```
+
+It intentionally excludes GPU-, model-, and optional-runtime-dependent imported tests. The
+source-wide Ruff debt inherited from upstream is frozen by count and exact diagnostic fingerprint
+in `manifests/ruff-baseline.json`; run
+`python scripts/check_lint_baseline.py` to prevent new violations. Updating that baseline requires
+an explicit review of both additions and removals.
+
+Hardware qualification is only entered through an inventory gate:
+
+```bash
+FREETOKEN_PASCAL_TEST_LEVEL=single-p4 bash scripts/ci/hardware_gate.sh
+FREETOKEN_PASCAL_TEST_LEVEL=dual-p4 bash scripts/ci/hardware_gate.sh
+```
+
+The broader upstream development commands remain:
+
 ```bash
 uv run pytest tests/                 # full suite, ~2-4 min on a GPU box
 uv run pytest tests/ -m "not slow"   # skip the handful of tens-of-seconds tests
@@ -35,6 +56,13 @@ uv run pytest tests/kvcache/         # one subsystem
 
 GPU-dependent tests skip themselves when CUDA is unavailable. Marlin NVFP4 tests
 skip unless `vllm` is importable (dedicated venv with `vllm>=0.14,<0.15`).
+
+The `sm61`, `dual_p4`, and `large_model` markers are additionally locked by
+`tests/conftest.py`. Only `scripts/ci/hardware_gate.sh` sets the hardware verification
+flags after parsing a real inventory. On hosted or incorrectly labelled runners these
+tests report an H2/H3/H4 deferred reason; the hardware workflow itself fails rather
+than treating those skips as qualification. Shared synthetic fixtures and evidence
+schemas are documented in [docs/test-evidence.md](../docs/test-evidence.md).
 
 `needs_weights`-marked tests skip unless the env var pointing at a real local
 checkpoint is set:

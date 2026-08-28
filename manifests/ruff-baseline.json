@@ -1,0 +1,11 @@
+{
+  "ruff_version": "ruff 0.16.5",
+  "schema_version": 1,
+  "source_roots": [
+    "python",
+    "tests",
+    "benchmarks"
+  ],
+  "violation_count": 1962,
+  "violations_sha256": "d2117ac3648d198cc6246fba7fef1527c3836eb7e645e334156bfef1a6c1a0a2"
+}

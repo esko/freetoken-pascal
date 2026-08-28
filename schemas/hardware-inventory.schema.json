@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esko/freetoken-pascal/schemas/hardware-inventory.schema.json",
+  "title": "FreeToken-Pascal hardware inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "evidence_status", "captured_at", "commit", "host", "gpus", "software"],
+  "properties": {
+    "schema_name": {"const": "hardware-inventory.schema.json"},
+    "schema_version": {"const": 1},
+    "evidence_status": {"enum": ["synthetic", "measured"]},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hostname", "os", "cpu", "numa_nodes", "memory_bytes"],
+      "properties": {
+        "hostname": {"type": "string", "minLength": 1},
+        "os": {"type": "string", "minLength": 1},
+        "cpu": {"type": "string", "minLength": 1},
+        "numa_nodes": {"type": "integer", "minimum": 1},
+        "memory_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "gpus": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "name", "compute_capability", "memory_mib", "pci_bus_id", "driver", "uuid", "clocks"],
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "name": {"type": "string", "minLength": 1},
+          "compute_capability": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+          "memory_mib": {"type": "integer", "minimum": 1},
+          "pci_bus_id": {"type": "string", "minLength": 1},
+          "driver": {"type": "string", "minLength": 1},
+          "uuid": {"type": "string", "minLength": 1},
+          "clocks": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["graphics_mhz", "memory_mhz"],
+            "properties": {
+              "graphics_mhz": {"type": "integer", "minimum": 1},
+              "memory_mhz": {"type": "integer", "minimum": 1}
+            }
+          }
+        }
+      }
+    },
+    "software": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cuda_driver", "cuda_toolkit", "torch", "triton"],
+      "properties": {
+        "cuda_driver": {"type": "string", "minLength": 1},
+        "cuda_toolkit": {"type": "string", "minLength": 1},
+        "torch": {"type": "string", "minLength": 1},
+        "triton": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

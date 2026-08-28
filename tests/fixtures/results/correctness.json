@@ -1,0 +1,10 @@
+{
+  "schema_name": "correctness-evidence.schema.json",
+  "schema_version": 1,
+  "evidence_status": "synthetic",
+  "commit": "0000000000000000000000000000000000000000",
+  "subject": {"mode": "scalar-q4-reference", "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+  "reference": {"implementation": "independent-hand-calculation", "revision": "fixture-v1", "artifact_sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+  "comparisons": [{"name": "q4_0-block", "metric": "max_abs", "observed": 0.0, "limit": 0.0, "passed": true}],
+  "passed": true
+}

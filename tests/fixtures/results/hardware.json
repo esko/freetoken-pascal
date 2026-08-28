@@ -1,0 +1,10 @@
+{
+  "schema_name": "hardware-inventory.schema.json",
+  "schema_version": 1,
+  "evidence_status": "synthetic",
+  "captured_at": "2026-08-28T00:00:00Z",
+  "commit": "0000000000000000000000000000000000000000",
+  "host": {"hostname": "synthetic-host", "os": "synthetic-linux", "cpu": "synthetic-avx2", "numa_nodes": 1, "memory_bytes": 1073741824},
+  "gpus": [{"index": 0, "name": "Synthetic Tesla P4 fixture", "compute_capability": "6.1", "memory_mib": 8192, "pci_bus_id": "0000:00:00.0", "driver": "synthetic", "uuid": "GPU-SYNTHETIC", "clocks": {"graphics_mhz": 1, "memory_mhz": 1}}],
+  "software": {"cuda_driver": "synthetic", "cuda_toolkit": "12.6.3", "torch": "2.11.0+cu126", "triton": "3.6.0"}
+}

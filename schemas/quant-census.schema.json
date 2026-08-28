@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esko/freetoken-pascal/schemas/quant-census.schema.json",
+  "title": "FreeToken-Pascal quantization census",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "evidence_status", "model_sha256", "tensor_count", "total_bytes", "by_quant_type", "expert_layers"],
+  "properties": {
+    "schema_name": {"const": "quant-census.schema.json"},
+    "schema_version": {"const": 1},
+    "evidence_status": {"enum": ["synthetic", "measured"]},
+    "model_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "tensor_count": {"type": "integer", "minimum": 0},
+    "total_bytes": {"type": "integer", "minimum": 0},
+    "by_quant_type": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tensors", "bytes"],
+        "properties": {
+          "tensors": {"type": "integer", "minimum": 0},
+          "bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "expert_layers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["layer", "experts", "quant_types"],
+        "properties": {
+          "layer": {"type": "integer", "minimum": 0},
+          "experts": {"type": "integer", "minimum": 1},
+          "quant_types": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}

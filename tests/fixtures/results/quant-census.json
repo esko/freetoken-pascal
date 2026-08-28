@@ -1,0 +1,10 @@
+{
+  "schema_name": "quant-census.schema.json",
+  "schema_version": 1,
+  "evidence_status": "synthetic",
+  "model_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "tensor_count": 3,
+  "total_bytes": 278,
+  "by_quant_type": {"F32": {"tensors": 1, "bytes": 32}, "Q4_0": {"tensors": 1, "bytes": 36}, "Q6_K": {"tensors": 1, "bytes": 210}},
+  "expert_layers": [{"layer": 0, "experts": 2, "quant_types": ["Q4_0", "Q6_K"]}]
+}

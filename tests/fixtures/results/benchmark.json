@@ -1,0 +1,16 @@
+{
+  "schema_name": "benchmark-result.schema.json",
+  "schema_version": 1,
+  "evidence_status": "synthetic",
+  "commit": "0000000000000000000000000000000000000000",
+  "model": {"id": "synthetic/qwen4-tiny", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+  "quant_census_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "command": "synthetic-example --mode cache-zero",
+  "flags": {"cache_size": 0, "moe_backend": "cpu"},
+  "workload": {"prompt_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "prompt_tokens": 32, "context_tokens": 64, "temperature": 0.0},
+  "hardware_inventory_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "clock_policy": "synthetic-no-clocks",
+  "selected_behavior": {"kernels": ["scalar-reference"], "quant_types": ["Q4_0"], "cache_policy": "cache-zero", "split_policy": "forced-cpu", "devices": ["cpu"]},
+  "runs": [{"wall_seconds": 1.0, "prompt_tps": 1.0, "decode_tps": 1.0}],
+  "summary": {"sample_count": 1, "median_decode_tps": 1.0}
+}
