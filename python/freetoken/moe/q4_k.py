@@ -942,27 +942,36 @@ class _ThreadedMixedRunner:
     ) -> None:
         self.owner = owner
         self.max_threads = owner.num_threads
-        self._pool = thread_pool or ThreadPoolExecutor(
-            max_workers=self.max_threads,
-            thread_name_prefix="freetoken-mixed",
+        self._pool = (
+            thread_pool
+            if thread_pool is not None
+            else ThreadPoolExecutor(
+                max_workers=self.max_threads,
+                thread_name_prefix="freetoken-mixed",
+            )
         )
         self._owns_pool = thread_pool is None
         self._lock = threading.Lock()
-        self._workers = tuple(
-            _MixedReferenceExecutor(
-                owner.layout,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                output_dtype=np.float32,
-                decoders=owner._reference.decoders,
-                required_alignment=1,
-                primitive=owner.primitive,
-                mixed_primitive=owner.mixed_primitive,
-                q4_descriptors=owner._q4_descriptors,
-                mixed_descriptors=owner._mixed_descriptors,
+        try:
+            self._workers = tuple(
+                _MixedReferenceExecutor(
+                    owner.layout,
+                    activation=activation,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    output_dtype=np.float32,
+                    decoders=owner._reference.decoders,
+                    required_alignment=1,
+                    primitive=owner.primitive,
+                    mixed_primitive=owner.mixed_primitive,
+                    q4_descriptors=owner._q4_descriptors,
+                    mixed_descriptors=owner._mixed_descriptors,
+                )
+                for _ in range(self.max_threads)
             )
-            for _ in range(self.max_threads)
-        )
+        except BaseException:
+            if self._owns_pool:
+                self._pool.shutdown(wait=True)
+            raise
         self._plan = None
         self._route_ids: np.ndarray | None = None
         self._route_weights: np.ndarray | None = None

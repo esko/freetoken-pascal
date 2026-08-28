@@ -31,6 +31,7 @@ class UnsupportedGGUFCpuConfiguration(ValueError):
 
 
 _SUPPORTED_QUANTS = frozenset({"Q4_K", "Q5_K", "Q5_1", "Q8_0"})
+_UNSET = object()
 
 
 def _device_type(device: Any) -> str:
@@ -43,17 +44,21 @@ def _device_type(device: Any) -> str:
 def _validate_cpu_bridge_config(
     config: Any = None,
     *,
-    backend: str | None = None,
-    device: Any = None,
+    backend: str | object | None = _UNSET,
+    device: Any = _UNSET,
     cache_size: int | None = None,
     prefill: bool = False,
     grouped: bool = False,
 ) -> None:
     """Validate the small runtime surface that can be safely adapted today."""
     if config is not None:
-        if backend is None:
-            backend = getattr(config, "moe_backend", getattr(config, "backend", "cpu"))
-        if device is None:
+        if backend is _UNSET:
+            backend = getattr(
+                config,
+                "moe_backend",
+                getattr(config, "backend", "cpu"),
+            )
+        if device is _UNSET:
             # EngineConfig deliberately has no device field because the CUDA engine binds
             # one after distributed setup.  Treat that absence as unknown rather than
             # silently declaring a production config CPU-safe.
@@ -77,11 +82,21 @@ def _validate_cpu_bridge_config(
                 f"Qwen GGUF CPU bridge requires GGUF model_format, got {model_format!r}"
             )
 
-    if backend is None:
+    if backend is _UNSET:
         backend = "cpu"
+    if backend is None:
+        raise UnsupportedGGUFCpuConfiguration(
+            "Qwen GGUF CPU bridge requires an explicit backend; got None"
+        )
     if backend != "cpu":
         raise UnsupportedGGUFCpuConfiguration(
             "Qwen GGUF CPU bridge is CPU-only; GPU, hybrid, and offload backends are unsupported"
+        )
+    if device is _UNSET:
+        device = "cpu"
+    if device is None:
+        raise UnsupportedGGUFCpuConfiguration(
+            "Qwen GGUF CPU bridge requires an explicit device; got None"
         )
     if _device_type(device) != "cpu":
         raise UnsupportedGGUFCpuConfiguration(
@@ -166,6 +181,8 @@ class QwenGGUFCpuExpertBundle:
         )
         if host is None or not hasattr(host, "layout") or not hasattr(host, "experts"):
             raise TypeError("Qwen GGUF CPU bridge requires a QwenGGUFHostWeights-like host")
+        if bool(getattr(host, "cpu_bridge_claimed", False)):
+            raise RuntimeError("Qwen GGUF host is already claimed by a CPU expert bundle")
         if bool(getattr(host, "closed", getattr(host, "_closed", False))):
             raise RuntimeError("Qwen GGUF host mappings are closed")
 
@@ -188,6 +205,7 @@ class QwenGGUFCpuExpertBundle:
             message = "Qwen GGUF CPU bridge does not support expert quant types "
             message += ", ".join(unsupported)
             raise UnsupportedGGUFCpuConfiguration(message)
+        executor: Q4KExecutor | None = None
         try:
             executor = Q4KExecutor(
                 layout,
@@ -204,10 +222,24 @@ class QwenGGUFCpuExpertBundle:
                 max_routes=max_routes if max_routes is not None else top_k,
             )
         except BaseException:
-            # The caller still owns a host passed to from_host; do not close it on a failed
-            # constructor.  The path factory below transfers ownership only after success.
+            if executor is not None:
+                try:
+                    executor.close()
+                except BaseException:
+                    pass
+            # The caller still owns a host passed to from_host; do not claim or close it on a
+            # failed constructor.  The path factory below transfers ownership only after success.
             raise
-        return cls(host, layout, executor, output_dtype=np.float32)
+        try:
+            bundle = cls(host, layout, executor, output_dtype=np.float32)
+            host.claim_cpu_bridge()
+            return bundle
+        except BaseException:
+            try:
+                executor.close()
+            except BaseException:
+                pass
+            raise
 
     @property
     def closed(self) -> bool:

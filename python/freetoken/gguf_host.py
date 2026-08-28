@@ -13,6 +13,7 @@ import mmap
 import os
 import re
 import resource
+import threading
 from collections.abc import Collection
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -733,11 +734,28 @@ class QwenGGUFHostWeights:
         self.experts = experts
         self.ple = ple
         self._closed = False
+        self._cpu_bridge_claimed = False
+        self._cpu_bridge_lock = threading.Lock()
 
     @property
     def closed(self) -> bool:
         """Whether the owned expert and PLE mappings have been released."""
         return self._closed
+
+    @property
+    def cpu_bridge_claimed(self) -> bool:
+        """Whether ownership was permanently transferred to the CPU GGUF bridge."""
+        with self._cpu_bridge_lock:
+            return self._cpu_bridge_claimed
+
+    def claim_cpu_bridge(self) -> None:
+        """Permanently transfer this host's ownership to one CPU GGUF bundle."""
+        with self._cpu_bridge_lock:
+            if self._cpu_bridge_claimed:
+                raise RuntimeError("Qwen GGUF host is already claimed by a CPU expert bundle")
+            if self._closed:
+                raise RuntimeError("Qwen GGUF host mappings are closed")
+            self._cpu_bridge_claimed = True
 
     def memory_report(self) -> dict[str, int]:
         report = host_memory_report(self.layout)
@@ -748,11 +766,12 @@ class QwenGGUFHostWeights:
         }
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self.ple.close()
-        self.experts.close()
+        with self._cpu_bridge_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self.ple.close()
+            self.experts.close()
 
     def __enter__(self) -> QwenGGUFHostWeights:
         return self
