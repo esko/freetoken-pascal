@@ -499,6 +499,18 @@ def parse_args(
         ),
     )
 
+    parser.add_argument(
+        "--ple-warm-mode",
+        default=ServerArgs.ple_warm_mode,
+        choices=["cold", "page-cache-warm", "targeted", "full-model-warm"],
+        help=(
+            "Qwen3.8 GGUF PLE page-cache policy. 'cold' drops the mapped range from "
+            "cache at startup; 'page-cache-warm' requests OS readahead; 'targeted' "
+            "warms only rows selected by each lookup; 'full-model-warm' synchronously "
+            "touches the complete PLE table and is never the default."
+        ),
+    )
+
     moe_cache_group = parser.add_mutually_exclusive_group()
     moe_cache_group.add_argument(
         "--moe-cache-size",

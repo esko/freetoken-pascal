@@ -210,19 +210,79 @@ class _HostNGramEmbedding(BaseOP):
         self.split_ngram_parts = args.split_ngram_parts
         self.ngram_heads = (args.ngram_size - 1) * args.heads_per_ngram
         self.head_dim = self.embedding_dim // self.ngram_heads
-        self.layer_multipliers = torch.empty(args.ngram_size, dtype=torch.long)
-        self.ngram_heads_vocab_sizes = torch.empty(self.ngram_heads, dtype=torch.long)
-        self.ngram_heads_offsets = torch.empty(self.ngram_heads, dtype=torch.long)
+        self.layer_multipliers = (
+            torch.empty(args.ngram_size, dtype=torch.long)
+            if args.ple_layer_multipliers is None
+            else torch.tensor(args.ple_layer_multipliers, dtype=torch.long)
+        )
+        self.ngram_heads_vocab_sizes = (
+            torch.empty(self.ngram_heads, dtype=torch.long)
+            if args.ple_head_vocab_sizes is None
+            else torch.tensor(args.ple_head_vocab_sizes, dtype=torch.long)
+        )
+        self.ngram_heads_offsets = (
+            torch.empty(self.ngram_heads, dtype=torch.long)
+            if args.ple_head_offsets is None
+            else torch.tensor(args.ple_head_offsets, dtype=torch.long)
+        )
         self._handles = []
         self._shards: list[torch.Tensor] = []
         self._shard_ends = torch.empty(0, dtype=torch.long)
         self._scale = torch.tensor(1.0, dtype=torch.bfloat16)
         self._host_constants: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self._dummy = False
+        self._gguf_ple = None
 
-    def load_host_weights(self, model_path: str, *, dummy: bool = False) -> None:
+    def telemetry(self) -> dict[str, object]:
+        if self._gguf_ple is None:
+            return {
+                "source": "dummy" if self._dummy else "safetensors",
+                "mapped_bytes": 0,
+            }
+        return {"source": "gguf-mmap", **self._gguf_ple.telemetry()}
+
+    def load_host_weights(
+        self,
+        model_path: str,
+        *,
+        dummy: bool = False,
+        ple_warm_mode: str = "cold",
+    ) -> None:
         if dummy:
             self._dummy = True
+            return
+        from freetoken.models.gguf.reader import is_gguf_path
+
+        if is_gguf_path(model_path):
+            from freetoken.gguf_host import MappedPLETable
+
+            self._gguf_ple = MappedPLETable.open_from_gguf(
+                model_path,
+                warm_mode=ple_warm_mode,
+            )
+            self._host_constants = (
+                self.layer_multipliers.cpu(),
+                self.ngram_heads_vocab_sizes.cpu(),
+                self.ngram_heads_offsets.cpu(),
+            )
+            try:
+                expected_rows = int(
+                    self._host_constants[1][-1] + self._host_constants[2][-1]
+                )
+                if self._gguf_ple.descriptor.rows < expected_rows:
+                    raise RuntimeError(
+                        f"PLE table has {self._gguf_ple.descriptor.rows} rows, "
+                        f"needs {expected_rows}"
+                    )
+                if self._gguf_ple.descriptor.elements_per_row != self.head_dim:
+                    raise RuntimeError(
+                        "PLE table row width "
+                        f"{self._gguf_ple.descriptor.elements_per_row} != {self.head_dim}"
+                    )
+            except BaseException:
+                self._gguf_ple.close()
+                self._gguf_ple = None
+                raise
             return
         folder = download_hf_weight(model_path)
         index_path = os.path.join(folder, "model.safetensors.index.json")
@@ -317,6 +377,13 @@ class _HostNGramEmbedding(BaseOP):
             token_count = get_global_ctx().batch.input_ids.numel()
             return torch.zeros(token_count, self.embedding_dim, device=device, dtype=dtype)
         ngram_ids = self._current_ngram_ids().reshape(-1)
+        if self._gguf_ple is not None:
+            embedded = self._gguf_ple.lookup(ngram_ids.detach().cpu().numpy())
+            return torch.from_numpy(embedded).reshape(-1, self.embedding_dim).to(
+                device=device,
+                dtype=dtype,
+                non_blocking=True,
+            )
         shard_ids = torch.bucketize(ngram_ids, self._shard_ends, right=True)
         output = torch.empty(
             ngram_ids.numel(),
@@ -358,12 +425,25 @@ class _PLELayer(BaseOP):
         self.state_len = (args.ple_conv_kernel_size - 1) * self.dilation
         self._conv_states: dict[int, torch.Tensor] = {}
 
-    def load_host_weights(self, model_path: str, *, dummy: bool = False) -> None:
-        self.ple_embedding.load_host_weights(model_path, dummy=dummy)
+    def load_host_weights(
+        self,
+        model_path: str,
+        *,
+        dummy: bool = False,
+        ple_warm_mode: str = "cold",
+    ) -> None:
+        self.ple_embedding.load_host_weights(
+            model_path,
+            dummy=dummy,
+            ple_warm_mode=ple_warm_mode,
+        )
 
     def debug_state(self) -> dict[int, torch.Tensor]:
         """Return detached PLE convolution state for opt-in correctness probes."""
         return {slot: state.detach().clone() for slot, state in self._conv_states.items()}
+
+    def host_weight_telemetry(self) -> dict[str, object]:
+        return self.ple_embedding.telemetry()
 
     def _short_conv(self, hidden: torch.Tensor) -> torch.Tensor:
         batch = get_global_ctx().batch
@@ -549,14 +629,31 @@ class Qwen4ExpModel(BaseOP):
         self.hc_count = config.qwen4_args.hc_count
         self._image_token_id = config.image_token_id
 
-    def load_host_weights(self, model_path: str, *, dummy: bool = False) -> None:
+    def load_host_weights(
+        self,
+        model_path: str,
+        *,
+        dummy: bool = False,
+        ple_warm_mode: str = "cold",
+    ) -> None:
         for layer in self.layers.op_list:
             if layer.ple is not None:
-                layer.ple.load_host_weights(model_path, dummy=dummy)
+                layer.ple.load_host_weights(
+                    model_path,
+                    dummy=dummy,
+                    ple_warm_mode=ple_warm_mode,
+                )
 
     def debug_state(self) -> dict[int, dict[int, torch.Tensor]]:
         return {
             layer._layer_id: layer.ple.debug_state()
+            for layer in self.layers.op_list
+            if layer.ple is not None
+        }
+
+    def host_weight_telemetry(self) -> dict[int, dict[str, object]]:
+        return {
+            layer._layer_id: layer.ple.host_weight_telemetry()
             for layer in self.layers.op_list
             if layer.ple is not None
         }
@@ -596,6 +693,9 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         """Install an internal correctness hook; production defaults to disabled."""
         self._debug_hook = hook
 
+    def host_weight_telemetry(self) -> dict[int, dict[str, object]]:
+        return self.model.host_weight_telemetry()
+
     @torch.inference_mode()
     def encode_images(
         self, pixel_values: torch.Tensor, image_grid_thw: torch.Tensor
@@ -605,8 +705,18 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
             "Qwen3.8 vision inputs are outside FreeToken-Pascal v1; use text-only prompts"
         )
 
-    def load_host_weights(self, model_path: str, *, dummy: bool = False) -> None:
-        self.model.load_host_weights(model_path, dummy=dummy)
+    def load_host_weights(
+        self,
+        model_path: str,
+        *,
+        dummy: bool = False,
+        ple_warm_mode: str = "cold",
+    ) -> None:
+        self.model.load_host_weights(
+            model_path,
+            dummy=dummy,
+            ple_warm_mode=ple_warm_mode,
+        )
 
     def forward(self) -> torch.Tensor:
         hidden = self.model.forward(get_global_ctx().batch.input_ids)

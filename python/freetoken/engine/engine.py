@@ -342,6 +342,11 @@ class Engine:
             self.model.load_host_weights(
                 config.model_path,
                 dummy=config.use_dummy_weight,
+                ple_warm_mode=config.ple_warm_mode,
+            )
+        if hasattr(self.model, "host_weight_telemetry"):
+            logger.info_rank0(
+                f"Host weight placement: {self.model.host_weight_telemetry()}"
             )
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free
