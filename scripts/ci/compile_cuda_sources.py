@@ -17,8 +17,13 @@ def _sha256(path: Path) -> str:
 
 
 def _run(command: list[str], *, check: bool = True) -> tuple[int, str]:
-    result = subprocess.run(command, check=check, capture_output=True, text=True)
-    return result.returncode, (result.stdout + result.stderr).strip()
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    output = (result.stdout + result.stderr).strip()
+    if check and result.returncode:
+        raise RuntimeError(
+            f"command failed with exit {result.returncode}: {' '.join(command)}\n{output}"
+        )
+    return result.returncode, output
 
 
 def _include_profiles() -> dict[str, list[Path]]:
