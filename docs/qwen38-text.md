@@ -31,7 +31,9 @@ forwards. The model's debug hook is disabled by default and can capture selected
 PLE state for A/B tests.
 
 The pinned H1 CUDA environment runs the Qwen config/model helpers, CPU reference equations, QSA
-selection/output, QSA cache geometry, non-power-of-two router fallback, and text-only failures. H1
+selection/output, QSA cache geometry, the exact non-power-of-two Torch router fallback, and
+text-only failures. Issue #38 owns a separately gated CUDA 12.6 / `sm_61` fused `topk=10`
+router; the Torch path remains its permanent oracle and unsupported-shape fallback. H1
 also verifies that the existing CUDA translation-unit census remains compilable for `sm_61`; QSA's
 runtime-generated Triton kernels cannot be compiled without a GPU. Real runtime generation, fused
 GDN and QSA parity, and independent selected-logit comparison remain H2 requirements and cannot be

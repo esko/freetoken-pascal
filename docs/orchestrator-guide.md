@@ -49,6 +49,9 @@ Good worker tasks are bounded by one interface:
 - operations.
 
 Do not ask multiple workers to modify the same hot files simultaneously. Do not split a correctness reference from the tests that define it.
+For bounded, dependency-compatible parallel work, prefer `gpt-5.6-luna` subagents with
+`xhigh` reasoning whenever available. Preserve one owner per shared subsystem, and retain
+main-agent responsibility for integration, review, evidence and final decisions.
 
 ## Evidence policy
 

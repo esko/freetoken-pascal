@@ -18,6 +18,7 @@ Deliver FreeToken-Pascal v1: a correct, reproducible, text-only Qwen3.8-Flash-Ne
 8. **One issue, one coherent change.** Do not mix architecture ports, correctness fixes, and kernel tuning in one unreviewable patch.
 9. **Safe fallback must remain usable.** Cache size zero and hybrid split disabled must produce a stable CPU-backed path.
 10. **Update documentation with code.** Architecture, ADR status, manifest pins, benchmark commands, and operational instructions must not drift.
+11. **Parallelize bounded independent work.** Use `gpt-5.6-luna` subagents with `xhigh` reasoning whenever a subtask can run safely without conflicting edits; the main agent retains integration and verification ownership.
 
 ## Required workflow
 

@@ -33,6 +33,7 @@ Each result record contains:
 - experts per token on CPU, cached GPU and current-step GPU;
 - H2D bytes and duration;
 - CPU MoE, GPU MoE and merge critical-path duration;
+- router-only duration and complete layer/token duration;
 - remote NUMA traffic;
 - VRAM, RAM, page faults and NVMe reads;
 - output validity and task result.
@@ -46,6 +47,11 @@ Each result record contains:
 5. Best measured dual-P4 policy.
 6. llama.cpp Qwen4 Q4_K_XL reference.
 7. PXQ/llama reference when Qwen4 support is available.
+
+Router qualification additionally alternates forced `torch-reference`, forced
+`pascal-fused` and `auto` modes with cache, scheduler, model, quant, prompt and sampling
+held fixed. A router microbenchmark alone cannot enable the fused default; the
+same-workload end-to-end result must improve outside run-to-run noise.
 
 Use the exact same model bytes where the runtime permits. If formats differ, state that the comparison is not a codec-controlled A/B.
 

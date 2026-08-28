@@ -53,6 +53,7 @@ For each shipping quant and shape, the CPU expert output passes error tolerances
 ### Outcomes
 
 - PXA-derived `sm_61` low-bit GPU kernels;
+- fused Qwen3.8 `topk=10` router with a permanent Torch reference path;
 - Qwen4 TP=2 and fixed layer ownership;
 - fixed-address per-GPU expert slot pools;
 - static cache and mixed CPU/GPU output merge;
@@ -115,6 +116,7 @@ upstream import
   → Qwen4 + GGUF + PLE reference
   → AVX2 expert backend
   → P4 expert kernels
+  → fused topk=10 Pascal router
   → TP2 ownership
   → static mixed execution
   → async cache
@@ -132,6 +134,7 @@ Before P4 arrival, independent workers can handle:
 - build container and H1 CI;
 - Qwen4/GGUF loader integration;
 - CPU expert ABI/kernels;
+- fused router reference/dispatch and `sm_61` compile work after #14 H0 lands;
 - cache trace simulator;
 - benchmark result schema;
 - server/config/metrics contracts;
