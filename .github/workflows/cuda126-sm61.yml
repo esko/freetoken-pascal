@@ -1,0 +1,57 @@
+name: CUDA 12.6 sm_61
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cuda126-sm61-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  h0-container:
+    name: H0 pinned CPU container
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned CPU environment
+        run: docker build --file containers/cpu.Dockerfile --tag freetoken-pascal:cpu .
+      - name: Run hosted checks and record inventory
+        run: |
+          mkdir -p build/toolchain-cpu
+          docker run --rm \
+            --volume "${PWD}/build/toolchain-cpu:/workspace/freetoken-pascal/build/toolchain-cpu" \
+            freetoken-pascal:cpu \
+            bash -lc 'make docs-check python-check hosted-tests && python scripts/write_toolchain_inventory.py --output build/toolchain-cpu/inventory.json'
+      - name: Upload CPU environment evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-toolchain
+          path: build/toolchain-cpu/
+          if-no-files-found: error
+
+  h1-compile:
+    name: H1 compile without GPU
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned CUDA 12.6 environment
+        run: docker build --file containers/cuda126.Dockerfile --tag freetoken-pascal:cuda126 .
+      - name: Compile and inspect sm_61 probe
+        run: |
+          mkdir -p build/toolchain
+          docker run --rm \
+            --volume "${PWD}/build/toolchain:/workspace/freetoken-pascal/build/toolchain" \
+            freetoken-pascal:cuda126 \
+            bash -lc 'make docs-check python-check hosted-tests && scripts/ci/verify_cuda126.sh'
+      - name: Upload toolchain evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuda126-sm61-toolchain
+          path: build/toolchain/
+          if-no-files-found: error

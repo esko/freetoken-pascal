@@ -24,25 +24,18 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install repository tooling
+        run: python -m pip install --require-hashes -r requirements/cpu.lock
+      - name: Verify dependency locks are reproducible
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install \
-            fastapi \
-            jsonschema \
-            msgpack \
-            pre-commit \
-            pydantic \
-            pytest \
-            pyyaml \
-            pyzmq \
-            ruff \
-            uvicorn
+          scripts/lock_dependencies.sh
+          git diff --exit-code -- requirements/cpu.lock requirements/cuda126.lock
       - name: Pre-commit
         run: pre-commit run --all-files --show-diff-on-failure
       - name: Validate documentation and manifests
         run: |
           python scripts/validate_docs.py
           python scripts/check_upstream_manifest.py
+          python scripts/check_toolchain.py
       - name: Compile imported source and tests
         run: python -m compileall -q python tests scripts
       - name: Lint downstream repository tooling
