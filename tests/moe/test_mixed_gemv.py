@@ -164,6 +164,7 @@ def mixed_native_library(tmp_path_factory: pytest.TempPathFactory) -> Path | Non
         ("scalar", scalar, baseline_flags),
         ("avx2", avx2, ["-mavx2", "-mfma"]),
         ("dispatch", source, baseline_flags),
+        ("avx2_native", avx2, ["-march=native"]),
         # Package builds may inherit CXXFLAGS from a host toolchain.  Verify
         # the source-level baseline fence also wins over -march=native.
         ("scalar_native", scalar, ["-march=native"]),
@@ -173,7 +174,7 @@ def mixed_native_library(tmp_path_factory: pytest.TempPathFactory) -> Path | Non
             [
                 "g++",
                 "-std=c++17",
-                "-O2",
+                "-O3",
                 "-fPIC",
                 *extra,
                 "-I",
@@ -429,6 +430,7 @@ def test_mixed_dispatch_baseline_contains_no_forbidden_isa(
     dispatch_native = mixed_native_library.parent / "dispatch_native.o"
     scalar_native = mixed_native_library.parent / "scalar_native.o"
     avx2 = mixed_native_library.parent / "avx2.o"
+    avx2_native = mixed_native_library.parent / "avx2_native.o"
     for baseline_object in (dispatch, scalar, dispatch_native, scalar_native):
         baseline_disassembly = subprocess.run(
             ["objdump", "-d", str(baseline_object)], check=True, capture_output=True, text=True
@@ -442,6 +444,12 @@ def test_mixed_dispatch_baseline_contains_no_forbidden_isa(
     ).stdout.lower()
     assert "zmm" not in avx_disassembly
     assert "avx512" not in avx_disassembly
+    avx_native_disassembly = subprocess.run(
+        ["objdump", "-d", str(avx2_native)], check=True, capture_output=True, text=True
+    ).stdout.lower()
+    assert "zmm" not in avx_native_disassembly
+    assert "0x62" not in avx_native_disassembly
+    assert "avx512" not in avx_native_disassembly
     loaded = ctypes.CDLL(str(mixed_native_library))
     loaded.freetoken_mixed_cpu_supports_avx2.restype = ctypes.c_int
     assert loaded.freetoken_mixed_cpu_supports_avx2() in {0, 1}

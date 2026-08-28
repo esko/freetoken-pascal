@@ -4,7 +4,6 @@
 #include "mixed_gemv_native.h"
 
 #include <cstdint>
-#include <cstring>
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
@@ -18,7 +17,7 @@
 
 namespace {
 
-float half_to_float(uint16_t bits) {
+FREETOKEN_AVX2_TARGET float half_to_float(uint16_t bits) {
   const uint32_t sign = static_cast<uint32_t>(bits & 0x8000u) << 16;
   uint32_t exponent = (bits >> 10) & 0x1Fu;
   uint32_t mantissa = bits & 0x3FFu;
@@ -40,24 +39,27 @@ float half_to_float(uint16_t bits) {
   } else {
     value = sign | ((exponent + (127 - 15)) << 23) | (mantissa << 13);
   }
-  float result;
-  std::memcpy(&result, &value, sizeof(result));
-  return result;
+  union {
+    uint32_t bits;
+    float value;
+  } result = {value};
+  return result.value;
 }
 
-uint16_t load_u16(const uint8_t* address) {
-  uint16_t value;
-  std::memcpy(&value, address, sizeof(value));
-  return value;
+FREETOKEN_AVX2_TARGET uint16_t load_u16(const uint8_t* address) {
+  return static_cast<uint16_t>(address[0]) |
+         static_cast<uint16_t>(static_cast<uint16_t>(address[1]) << 8);
 }
 
-uint32_t load_u32(const uint8_t* address) {
-  uint32_t value;
-  std::memcpy(&value, address, sizeof(value));
-  return value;
+FREETOKEN_AVX2_TARGET uint32_t load_u32(const uint8_t* address) {
+  return static_cast<uint32_t>(address[0]) |
+         (static_cast<uint32_t>(address[1]) << 8) |
+         (static_cast<uint32_t>(address[2]) << 16) |
+         (static_cast<uint32_t>(address[3]) << 24);
 }
 
-void scale_min(const uint8_t* scales, int index, int* scale, int* minimum) {
+FREETOKEN_AVX2_TARGET void scale_min(const uint8_t* scales, int index, int* scale,
+                                     int* minimum) {
   if (index < 4) {
     *scale = scales[index] & 0x3F;
     *minimum = scales[index + 4] & 0x3F;
