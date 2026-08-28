@@ -48,6 +48,20 @@ Each result record contains:
 6. llama.cpp Qwen4 Q4_K_XL reference.
 7. PXQ/llama reference when Qwen4 support is available.
 
+For the H0 mixed CPU slice, collect Gorilla-relevant normal and promoted raw
+route/thread sweeps with:
+
+```bash
+PYTHONPATH=python python scripts/bench_q4_k_threaded.py --profile normal --output normal.json
+PYTHONPATH=python python scripts/bench_q4_k_threaded.py --profile promoted --output promoted.json
+```
+
+The harness uses the production 2560-hidden/640-intermediate geometry by
+default, retains route widths 1/2/4/8/10 and every requested thread count, and
+records the selected quant kernels and fallback. Its `synthetic` and
+`observation_only` fields are deliberate: raw samples are evidence for later
+target-host analysis and make no performance claim.
+
 Router qualification additionally alternates forced `torch-reference`, forced
 `pascal-fused` and `auto` modes with cache, scheduler, model, quant, prompt and sampling
 held fixed. A router microbenchmark alone cannot enable the fused default; the

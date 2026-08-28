@@ -94,10 +94,16 @@ The Q4 artifact remains heterogeneous: layer 2 gate/up uses Q5_K and the promote
 down banks use Q5_1 or Q8_0. The separate `mixed_gemv` primitive now provides direct
 packed-row GEMV for those three formats, with format-tagged AVX2 dispatch and the
 same scalar reference fallback. Its optional helper is loaded from
-`FREETOKEN_MIXED_GEMV_NATIVE_LIB` or the package extension. This is an H0
-pre-integration slice: neither direct CPU path is yet wired into
-`python/freetoken/moe/cpu_executor.py`, and it does not replace the production
-runtime until the mixed-format runtime integration work is complete.
+`FREETOKEN_MIXED_GEMV_NATIVE_LIB` or the package extension. The H0 adapter
+dispatches each packed projection to its format-specific primitive and retains
+the dense/dequantize ABI oracle. An opt-in `num_threads > 1` runner is created
+only when the selected layer has native AVX2 coverage for all three projections
+and valid census geometry. It partitions route columns into private worker
+requests, reduces partials in partition order, and commits once on the owner
+thread. Scalar helpers, unavailable native libraries, unsupported geometries,
+and partial layers remain serial. The runner owns a persistent pool and
+prepared private buffers; omitted caller output is allocated fresh only after
+success so results never alias worker scratch.
 
 ## MoE decode operation
 

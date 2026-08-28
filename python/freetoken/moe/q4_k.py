@@ -19,26 +19,39 @@ import ctypes
 import importlib.util
 import os
 import platform
+import threading
+import time
 from collections.abc import Iterable, Mapping
+from concurrent.futures import FIRST_EXCEPTION, Executor, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import numpy as np
 
 from freetoken.moe.cpu_abi import (
+    Busy,
+    Cancelled,
     CpuAbiError,
     CpuExecutionRequest,
     CpuExecutionResult,
     CpuExecutionTelemetry,
     CpuExpertDescriptor,
     CpuExpertLayout,
+    CpuMicrobenchmarkProjection,
+    CpuMicrobenchmarkSample,
     ExecutionFailed,
     InvalidRequest,
     ReferenceCpuExpertExecutor,
     UnsupportedQuantType,
     UnsupportedShape,
+    WorkspaceNotPrepared,
+    _cancelled,
+    _checked_int,
+    _clear_output,
 )
 from freetoken.moe.ggml_reference import BUILTIN_REFERENCE_DECODERS
+from freetoken.moe.mixed_gemv import _FORMATS as _MIXED_FORMATS
+from freetoken.moe.mixed_gemv import MixedGemvPrimitive, select_mixed_gemv_primitive
 
 Q4K_BLOCK_ELEMENTS = 256
 Q4K_BLOCK_BYTES = 144
@@ -46,6 +59,25 @@ Q4K_SCALE_BYTES = 12
 Q4K_DATA_OFFSET = 16
 Q4K_MODE = Literal["auto", "scalar", "avx2"]
 _Q4K_TYPES = frozenset({12, "Q4_K", "q4_k"})
+
+
+def partition_q4_k_routes(route_count: int, thread_count: int) -> tuple[tuple[int, int], ...]:
+    """Partition route columns into balanced, contiguous worker ranges."""
+    route_count = _checked_int(route_count, "route_count")
+    thread_count = _checked_int(thread_count, "thread_count")
+    if route_count <= 0:
+        raise ValueError(f"route_count must be positive, got {route_count}")
+    if thread_count <= 0:
+        raise ValueError(f"thread_count must be positive, got {thread_count}")
+    workers = min(route_count, thread_count)
+    base, remainder = divmod(route_count, workers)
+    ranges: list[tuple[int, int]] = []
+    begin = 0
+    for worker in range(workers):
+        end = begin + base + int(worker < remainder)
+        ranges.append((begin, end))
+        begin = end
+    return tuple(ranges)
 
 
 def _is_q4_k_descriptor(descriptor: CpuExpertDescriptor) -> bool:
@@ -60,6 +92,32 @@ def _has_q4_k_geometry(descriptor: CpuExpertDescriptor) -> bool:
 
 def _has_q4_k_marker(descriptor: CpuExpertDescriptor) -> bool:
     return descriptor.quant_type in _Q4K_TYPES or descriptor.quant_name.upper() == "Q4_K"
+
+
+def _mixed_format(descriptor: CpuExpertDescriptor) -> str | None:
+    """Return a canonical companion format when type and name agree."""
+    name = descriptor.quant_name.upper()
+    if name not in _MIXED_FORMATS:
+        return None
+    quant_type = _MIXED_FORMATS[name][0]
+    if descriptor.quant_type not in {quant_type, name, name.lower()}:
+        return None
+    return name
+
+
+def _has_mixed_geometry(descriptor: CpuExpertDescriptor) -> bool:
+    name = _mixed_format(descriptor)
+    if name is None:
+        return False
+    _, block_elements, block_bytes = _MIXED_FORMATS[name]
+    return descriptor.input_dim % block_elements == 0 and descriptor.row_stride_bytes == (
+        descriptor.input_dim // block_elements * block_bytes
+    )
+
+
+def _packed_source(descriptor: CpuExpertDescriptor) -> bool:
+    source = descriptor.source
+    return callable(getattr(source, "expert_packed", None)) and not isinstance(source, np.ndarray)
 
 
 def _uint8_block(block: Any) -> np.ndarray:
@@ -431,18 +489,22 @@ def _packed_expert_for_gemv(descriptor: CpuExpertDescriptor, expert: int) -> np.
     return packed
 
 
-class _Q4KReferenceExecutor(ReferenceCpuExpertExecutor):
-    """Issue #15 executor with a packed-row GEMV matvec seam."""
+class _MixedReferenceExecutor(ReferenceCpuExpertExecutor):
+    """Issue #15 executor with direct Q4_K and companion-format GEMV seams."""
 
     def __init__(
         self,
         *args: Any,
         primitive: Q4KPrimitive,
+        mixed_primitive: MixedGemvPrimitive,
         q4_descriptors: frozenset[tuple[int, str]],
+        mixed_descriptors: frozenset[tuple[int, str]],
         **kwargs: Any,
     ):
         self._q4_primitive = primitive
+        self._mixed_primitive = mixed_primitive
         self._q4_descriptors = q4_descriptors
+        self._mixed_descriptors = mixed_descriptors
         super().__init__(*args, **kwargs)
 
     def _matvec(
@@ -465,6 +527,19 @@ class _Q4KReferenceExecutor(ReferenceCpuExpertExecutor):
                 input_scratch,
                 out=out,
             )
+        if key in self._mixed_descriptors:
+            packed = _packed_expert_for_gemv(descriptor, expert)
+            input_scratch = self._workspace["input"][: descriptor.input_dim]
+            np.copyto(input_scratch, vector, casting="unsafe")
+            quant_name = _mixed_format(descriptor)
+            assert quant_name is not None
+            return self._mixed_primitive.gemv(
+                packed,
+                descriptor.input_dim,
+                input_scratch,
+                quant_name=quant_name,
+                out=out,
+            )
         if _has_q4_k_marker(descriptor):
             if not _is_q4_k_descriptor(descriptor):
                 raise UnsupportedQuantType(
@@ -477,6 +552,12 @@ class _Q4KReferenceExecutor(ReferenceCpuExpertExecutor):
                         f"packed {descriptor.projection} Q4_K input dimension "
                         f"{descriptor.input_dim} is not a multiple of {Q4K_BLOCK_ELEMENTS}"
                     )
+        if _mixed_format(descriptor) is not None and not _has_mixed_geometry(descriptor):
+            if _packed_source(descriptor):
+                raise UnsupportedShape(
+                    f"packed {descriptor.projection} {descriptor.quant_name} input dimension "
+                    f"{descriptor.input_dim} has incompatible block geometry"
+                )
         return super()._matvec(
             descriptor,
             expert,
@@ -487,7 +568,7 @@ class _Q4KReferenceExecutor(ReferenceCpuExpertExecutor):
 
 
 class Q4KExecutor:
-    """Issue #15 ABI adapter using direct packed Q4_K row GEMV."""
+    """Issue #15 ABI adapter using direct packed Q4_K/mixed row GEMV."""
 
     def __init__(
         self,
@@ -499,51 +580,96 @@ class Q4KExecutor:
         output_dtype: np.dtype | type = np.float32,
         reference_decoders: Mapping[int | str, Any] | None = None,
         required_alignment: int = 32,
+        num_threads: int = 1,
+        thread_pool: Executor | None = None,
     ) -> None:
         self.layout = layout
         self.primitive = select_q4_k_primitive(mode)
+        self.mixed_primitive = select_mixed_gemv_primitive(mode)
         self.requested_mode = str(mode).lower()
+        num_threads = _checked_int(num_threads, "num_threads")
+        if num_threads <= 0:
+            raise InvalidRequest(f"num_threads must be positive, got {num_threads}")
+        self.num_threads = num_threads
         q4_descriptors = frozenset(
             (descriptor.layer_id, descriptor.projection)
             for descriptor in layout.descriptors
-            if _is_q4_k_descriptor(descriptor) and _has_q4_k_geometry(descriptor)
+            if _is_q4_k_descriptor(descriptor)
+            and _has_q4_k_geometry(descriptor)
+            and _packed_source(descriptor)
         )
         self._q4_descriptors = q4_descriptors
         primitive_fallback_reason = self.primitive.fallback_reason
+        mixed_fallback_reason = self.mixed_primitive.fallback_reason
         capability_fallback_reason: str | None = None
-        q4_compatible = True
         alignment = int(required_alignment)
         if alignment <= 0:
             raise ValueError("required_alignment must be positive")
+        mixed_descriptors = frozenset(
+            (descriptor.layer_id, descriptor.projection)
+            for descriptor in layout.descriptors
+            if _has_mixed_geometry(descriptor)
+            and _packed_source(descriptor)
+            and self.mixed_primitive.isa == "avx2"
+        )
         for descriptor in layout.descriptors:
-            if not _is_q4_k_descriptor(descriptor):
-                q4_compatible = False
-                capability_fallback_reason = "unsupported_quant_type"
+            if _has_q4_k_marker(descriptor) and not _is_q4_k_descriptor(descriptor):
+                capability_fallback_reason = capability_fallback_reason or "unsupported_quant_type"
+        for descriptor in layout.descriptors:
+            if self.requested_mode in {"scalar", "forced_scalar"}:
                 continue
-            if not _has_q4_k_geometry(descriptor):
-                q4_compatible = False
-                capability_fallback_reason = capability_fallback_reason or "unsupported_shape"
+            if _has_q4_k_marker(descriptor) and not _is_q4_k_descriptor(descriptor):
+                capability_fallback_reason = capability_fallback_reason or "unsupported_quant_type"
                 continue
-            if self.requested_mode not in {"scalar", "forced_scalar"} and (
-                descriptor.source_address is None
-                or descriptor.source_address % alignment
-                or descriptor.row_stride_bytes % 16
-            ):
-                # The scalar primitive is safe for any byte address; keep the
-                # packed GEMV path and make the downgrade observable.
-                self.primitive = select_q4_k_primitive("scalar")
-                capability_fallback_reason = capability_fallback_reason or "unsupported_alignment"
+            if _is_q4_k_descriptor(descriptor) and _has_q4_k_geometry(descriptor):
+                if (
+                    descriptor.source_address is None
+                    or descriptor.source_address % alignment
+                    or descriptor.row_stride_bytes % 16
+                ):
+                    self.primitive = select_q4_k_primitive("scalar")
+                    capability_fallback_reason = (
+                        capability_fallback_reason or "unsupported_alignment"
+                    )
+            elif _mixed_format(descriptor) is not None and _has_mixed_geometry(descriptor):
+                if descriptor.source_address is None or descriptor.source_address % alignment:
+                    mixed_descriptors = frozenset(
+                        key
+                        for key in mixed_descriptors
+                        if key != (descriptor.layer_id, descriptor.projection)
+                    )
+                    capability_fallback_reason = (
+                        capability_fallback_reason or "unsupported_alignment"
+                    )
 
-        self._q4_compatible = q4_compatible
-        self._fallback_reason = capability_fallback_reason or primitive_fallback_reason
+        if not q4_descriptors and not mixed_descriptors:
+            for descriptor in layout.descriptors:
+                if not _is_q4_k_descriptor(descriptor):
+                    capability_fallback_reason = (
+                        capability_fallback_reason or "unsupported_quant_type"
+                    )
+                    break
+
+        # The scalar mixed decoder is deliberately retained as a reference
+        # fallback.  Q4_K scalar GEMV predates this adapter and remains direct.
+        self._mixed_descriptors = mixed_descriptors
+        self._direct_descriptors = q4_descriptors | mixed_descriptors
+        self._q4_compatible = bool(q4_descriptors) and all(
+            (item.layer_id, item.projection) in q4_descriptors for item in layout.descriptors
+        )
+        has_q4_formats = any(_has_q4_k_marker(item) for item in layout.descriptors)
+        has_mixed_formats = any(_mixed_format(item) is not None for item in layout.descriptors)
+        primitive_fallback = primitive_fallback_reason if has_q4_formats else None
+        mixed_fallback = mixed_fallback_reason if has_mixed_formats else None
+        self._fallback_reason = capability_fallback_reason or primitive_fallback or mixed_fallback
         reference_descriptors = tuple(
             descriptor
             for descriptor in layout.descriptors
-            if (descriptor.layer_id, descriptor.projection) not in q4_descriptors
+            if (descriptor.layer_id, descriptor.projection) not in self._direct_descriptors
         )
         if (
-            q4_descriptors
-            and not q4_compatible
+            self._direct_descriptors
+            and len(self._direct_descriptors) != len(layout.descriptors)
             and reference_descriptors
             and all(
                 not _has_q4_k_marker(descriptor)
@@ -562,7 +688,7 @@ class Q4KExecutor:
             if _is_q4_k_descriptor(descriptor):
                 decoders[descriptor.quant_type] = self._decode_rows
                 decoders[descriptor.quant_name] = self._decode_rows
-        self._reference = _Q4KReferenceExecutor(
+        self._reference = _MixedReferenceExecutor(
             layout,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
@@ -570,14 +696,68 @@ class Q4KExecutor:
             decoders=decoders,
             required_alignment=1,
             primitive=self.primitive,
+            mixed_primitive=self.mixed_primitive,
             q4_descriptors=q4_descriptors,
+            mixed_descriptors=mixed_descriptors,
         )
         self.hidden_size = self._reference.hidden_size
         self.intermediate_size = self._reference.intermediate_size
+        self._threaded_runner: _ThreadedMixedRunner | None = None
+        if num_threads > 1 and any(self._layer_direct_eligible(layer) for layer in layout.layers):
+            self._threaded_runner = _ThreadedMixedRunner(
+                self,
+                thread_pool=thread_pool,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                output_dtype=output_dtype,
+                required_alignment=required_alignment,
+            )
 
     @property
     def backend(self) -> str:
         return self._backend_for(None)
+
+    @property
+    def parallel_enabled(self) -> bool:
+        """Whether this executor has an opt-in threaded runner."""
+        return self._threaded_runner is not None
+
+    def _layer_direct_eligible(self, layer_id: int) -> bool:
+        """Require all three projections of one census geometry to be direct."""
+        try:
+            descriptors = tuple(
+                self.layout.descriptor(layer_id, projection)
+                for projection in ("gate", "up", "down")
+            )
+        except InvalidRequest:
+            return False
+        keys = {(item.layer_id, item.projection) for item in descriptors}
+        if not keys <= self._direct_descriptors:
+            return False
+        if any(key in self._q4_descriptors for key in keys) and self.primitive.isa != "avx2":
+            return False
+        if (
+            any(key in self._mixed_descriptors for key in keys)
+            and self.mixed_primitive.isa != "avx2"
+        ):
+            return False
+        gate, up, down = descriptors
+        if gate.num_experts != up.num_experts or gate.num_experts != down.num_experts:
+            return False
+        if (gate.input_dim, gate.output_dim) != (up.input_dim, up.output_dim):
+            return False
+        if (down.output_dim, down.input_dim) != (gate.input_dim, gate.output_dim):
+            return False
+        # This is the actual Q4 census family, without baking layer IDs into
+        # the ABI: Q4_K or promoted Q5_K gate/up and Q5_1/Q8_0 down.
+        gate_name = _mixed_format(gate) or ("Q4_K" if _is_q4_k_descriptor(gate) else None)
+        up_name = _mixed_format(up) or ("Q4_K" if _is_q4_k_descriptor(up) else None)
+        down_name = _mixed_format(down) or ("Q4_K" if _is_q4_k_descriptor(down) else None)
+        return (
+            gate_name in {"Q4_K", "Q5_K"}
+            and up_name == gate_name
+            and down_name in {"Q4_K", "Q5_1", "Q8_0"}
+        )
 
     def _backend_for(self, layer_id: int | None) -> str:
         descriptors = self.layout.descriptors
@@ -586,12 +766,16 @@ class Q4KExecutor:
         direct = {
             (descriptor.layer_id, descriptor.projection)
             for descriptor in descriptors
-            if (descriptor.layer_id, descriptor.projection) in self._q4_descriptors
+            if (descriptor.layer_id, descriptor.projection) in self._direct_descriptors
         }
         if not direct:
             return "reference"
         if len(direct) == len(descriptors):
-            return self.primitive.backend
+            if all(key in self._q4_descriptors for key in direct):
+                return self.primitive.backend
+            if all(key in self._mixed_descriptors for key in direct):
+                return self.mixed_primitive.backend
+            return "mixed_avx2"
         return "mixed"
 
     def _kernel_census(self, layer_id: int | None) -> tuple[str, ...]:
@@ -604,6 +788,11 @@ class Q4KExecutor:
             key = (descriptor.layer_id, descriptor.projection)
             if key in self._q4_descriptors:
                 selected.add(self.primitive.backend)
+                continue
+            if key in self._mixed_descriptors:
+                quant_name = _mixed_format(descriptor)
+                assert quant_name is not None
+                selected.add(self.mixed_primitive.backend_for(quant_name))
                 continue
             source = descriptor.source
             if isinstance(source, np.ndarray) or hasattr(source, "expert_dense"):
@@ -621,16 +810,20 @@ class Q4KExecutor:
         backend = self._backend_for(telemetry.layer_id)
         if backend == "mixed":
             return self._fallback_reason
-        if backend == "reference" and not self._q4_descriptors:
+        if backend == "reference" and not self._direct_descriptors:
             return self._fallback_reason or telemetry.fallback_reason
         return telemetry.fallback_reason if backend == "reference" else self._fallback_reason
 
     @property
     def last_telemetry(self) -> CpuExecutionTelemetry | None:
+        if self._threaded_runner is not None and self._threaded_runner.last_telemetry is not None:
+            return self._threaded_runner.last_telemetry
         telemetry = self._reference.last_telemetry
         return None if telemetry is None else self._decorate(telemetry)
 
     def prepare(self, max_tokens: int, max_routes: int):
+        if self._threaded_runner is not None:
+            return self._threaded_runner.prepare(max_tokens, max_routes)
         return self._reference.prepare(max_tokens, max_routes)
 
     def _decode_rows(
@@ -667,6 +860,8 @@ class Q4KExecutor:
         )
 
     def execute(self, *args: Any, **kwargs: Any) -> CpuExecutionResult:
+        if self._threaded_runner is not None:
+            return self._threaded_runner.execute(*args, **kwargs)
         try:
             result = self._reference.execute(*args, **kwargs)
         except CpuAbiError as error:
@@ -678,6 +873,8 @@ class Q4KExecutor:
     def execute_group(
         self, requests: Iterable[CpuExecutionRequest]
     ) -> tuple[CpuExecutionResult, ...]:
+        if self._threaded_runner is not None:
+            return self._threaded_runner.execute_group(requests)
         return tuple(
             self.execute(
                 request.layer_id,
@@ -693,11 +890,617 @@ class Q4KExecutor:
         )
 
     def microbenchmark(self, *args: Any, **kwargs: Any):
+        if self._threaded_runner is not None:
+            return self._threaded_runner.microbenchmark(*args, **kwargs)
+        if "thread_counts" in kwargs:
+            raise InvalidRequest(
+                "thread_count sweep requires an AVX2 executor with threaded support"
+            )
         samples = self._reference.microbenchmark(*args, **kwargs)
         return tuple(
             replace(sample, telemetry=tuple(self._decorate(item) for item in sample.telemetry))
             for sample in samples
         )
+
+    def close(self) -> None:
+        if self._threaded_runner is not None:
+            self._threaded_runner.close()
+
+    def __enter__(self) -> Q4KExecutor:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        del exc_type, exc_value, traceback
+        self.close()
+
+
+class _WorkerCancellation:
+    """Internal cancellation event; user callbacks never cross into workers."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+
+class _ThreadedMixedRunner:
+    """Prepared, request-isolated route partitioning for native mixed GEMV."""
+
+    def __init__(
+        self,
+        owner: Q4KExecutor,
+        *,
+        thread_pool: Executor | None,
+        activation: str,
+        apply_router_weight_on_input: bool,
+        output_dtype: np.dtype | type,
+        required_alignment: int,
+    ) -> None:
+        self.owner = owner
+        self.max_threads = owner.num_threads
+        self._pool = thread_pool or ThreadPoolExecutor(
+            max_workers=self.max_threads,
+            thread_name_prefix="freetoken-mixed",
+        )
+        self._owns_pool = thread_pool is None
+        self._lock = threading.Lock()
+        self._workers = tuple(
+            _MixedReferenceExecutor(
+                owner.layout,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                output_dtype=np.float32,
+                decoders=owner._reference.decoders,
+                required_alignment=1,
+                primitive=owner.primitive,
+                mixed_primitive=owner.mixed_primitive,
+                q4_descriptors=owner._q4_descriptors,
+                mixed_descriptors=owner._mixed_descriptors,
+            )
+            for _ in range(self.max_threads)
+        )
+        self._plan = None
+        self._route_ids: np.ndarray | None = None
+        self._route_weights: np.ndarray | None = None
+        self._outputs: np.ndarray | None = None
+        self._merged: np.ndarray | None = None
+        self._thread_workspace_bytes = 0
+        self._worker_workspace_bytes = 0
+        self._last_telemetry: CpuExecutionTelemetry | None = None
+        self._output_dtype = np.dtype(output_dtype)
+        self._closed = False
+
+    @property
+    def last_telemetry(self) -> CpuExecutionTelemetry | None:
+        return self._last_telemetry
+
+    def _decorate(self, telemetry: CpuExecutionTelemetry) -> CpuExecutionTelemetry:
+        return self.owner._decorate(telemetry)
+
+    @property
+    def _workspace_bytes(self) -> int:
+        plan_bytes = self._plan.workspace_bytes if self._plan is not None else 0
+        return plan_bytes + self._worker_workspace_bytes + self._thread_workspace_bytes
+
+    def _busy(self, started: int) -> Busy:
+        error = Busy("executor already has an active request")
+        telemetry = self._decorate(
+            CpuExecutionTelemetry(
+                backend="reference",
+                layer_id=None,
+                tokens_requested=0,
+                tokens_non_padded=0,
+                routes_requested=0,
+                routes_executed=0,
+                unique_experts=0,
+                bytes_read_packed=0,
+                elapsed_ns=time.perf_counter_ns() - started,
+                workspace_bytes=self._workspace_bytes,
+                fallback_reason="busy",
+                error="Busy",
+                error_detail=str(error),
+                thread_count=0,
+            )
+        )
+        error.telemetry = telemetry
+        self._last_telemetry = telemetry
+        return error
+
+    def prepare(self, max_tokens: int, max_routes: int):
+        started = time.perf_counter_ns()
+        if self._closed:
+            raise InvalidRequest("Q4_K executor is closed")
+        if not self._lock.acquire(blocking=False):
+            raise self._busy(started)
+        try:
+            plan = self.owner._reference.prepare(max_tokens, max_routes)
+            for worker in self._workers:
+                worker.prepare(max_tokens, max_routes)
+            self._route_ids = np.full(
+                (self.max_threads, plan.max_tokens, plan.max_routes), -1, dtype=np.int32
+            )
+            self._route_weights = np.zeros(
+                (self.max_threads, plan.max_tokens, plan.max_routes), dtype=np.float32
+            )
+            self._outputs = np.empty(
+                (self.max_threads, plan.max_tokens, self.owner.hidden_size), dtype=np.float32
+            )
+            self._merged = np.empty((plan.max_tokens, self.owner.hidden_size), dtype=np.float32)
+            self._plan = plan
+            self._worker_workspace_bytes = sum(
+                worker._plan.workspace_bytes for worker in self._workers if worker._plan is not None
+            )
+            self._thread_workspace_bytes = (
+                self._route_ids.nbytes
+                + self._route_weights.nbytes
+                + self._outputs.nbytes
+                + self._merged.nbytes
+            )
+            return plan
+        finally:
+            self._lock.release()
+
+    def _serial(self, *args: Any, **kwargs: Any) -> CpuExecutionResult:
+        try:
+            result = self.owner._reference.execute(*args, **kwargs)
+        except CpuAbiError as error:
+            if error.telemetry is not None:
+                error.telemetry = self._decorate(replace(error.telemetry, thread_count=1))
+                self._last_telemetry = error.telemetry
+            raise
+        telemetry = self._decorate(replace(result.telemetry, thread_count=1))
+        self._last_telemetry = telemetry
+        return CpuExecutionResult(result.output, telemetry)
+
+    def _error_telemetry(
+        self,
+        *,
+        layer_id: int | None,
+        tokens: int,
+        active_tokens: int,
+        routes_requested: int,
+        unique_experts: set[int],
+        started: int,
+        error: CpuAbiError,
+        thread_count: int,
+        observations: Iterable[CpuExecutionTelemetry] = (),
+    ) -> CpuExecutionTelemetry:
+        observed = tuple(observations)
+        telemetry = CpuExecutionTelemetry(
+            backend="reference",
+            layer_id=layer_id,
+            tokens_requested=tokens,
+            tokens_non_padded=active_tokens,
+            routes_requested=routes_requested,
+            routes_executed=sum(item.routes_executed for item in observed),
+            unique_experts=len(unique_experts),
+            bytes_read_packed=sum(item.bytes_read_packed for item in observed),
+            elapsed_ns=time.perf_counter_ns() - started,
+            workspace_bytes=self._workspace_bytes,
+            fallback_reason=self.owner._fallback_reason,
+            cancelled=isinstance(error, Cancelled),
+            error=type(error).__name__,
+            error_detail=str(error),
+            thread_count=thread_count,
+        )
+        return self._decorate(telemetry)
+
+    @staticmethod
+    def _cancel_and_drain(futures: Iterable[Any]) -> None:
+        pending = tuple(futures)
+        for future in pending:
+            try:
+                future.cancel()
+            except BaseException:
+                pass
+        for future in pending:
+            try:
+                future.result()
+            except BaseException:
+                pass
+
+    def execute(
+        self,
+        layer_id: int,
+        hidden: np.ndarray,
+        expert_ids: np.ndarray,
+        routing_weights: np.ndarray,
+        *,
+        num_token_non_padded: int | None = None,
+        output: np.ndarray | None = None,
+        accumulate: bool = False,
+        cancellation: Any = None,
+        _thread_count: int | None = None,
+    ) -> CpuExecutionResult:
+        started = time.perf_counter_ns()
+        result_output = output
+        parsed_layer: int | None = None
+        tokens = 0
+        active_tokens = 0
+        routes_requested = 0
+        unique: set[int] = set()
+        submitted: list[Any] = []
+        actual_threads = 1
+        if self._closed:
+            raise InvalidRequest("Q4_K executor is closed")
+        if not self._lock.acquire(blocking=False):
+            raise self._busy(started)
+        try:
+            selected_threads = (
+                self.max_threads
+                if _thread_count is None
+                else _checked_int(_thread_count, "thread_count")
+            )
+            if not 1 <= selected_threads <= self.max_threads:
+                raise InvalidRequest(
+                    f"thread_count={selected_threads} outside [1, {self.max_threads}]"
+                )
+            parsed_layer = _checked_int(layer_id, "layer_id")
+            hidden, expert_ids, routing_weights, result_output, tokens = (
+                self.owner._reference._validate_arrays(
+                    parsed_layer, hidden, expert_ids, routing_weights, output
+                )
+            )
+            if num_token_non_padded is None:
+                active_tokens = tokens
+            else:
+                active_tokens = _checked_int(num_token_non_padded, "num_token_non_padded")
+                if not 0 <= active_tokens <= tokens:
+                    raise InvalidRequest(
+                        f"num_token_non_padded={active_tokens} outside [0, {tokens}]"
+                    )
+            descriptor = self.owner.layout.descriptor(parsed_layer, "gate")
+            routes_requested = active_tokens * expert_ids.shape[1]
+            _, unique = self.owner._reference._validate_ids(descriptor, expert_ids, active_tokens)
+            if _cancelled(cancellation):
+                raise Cancelled("CPU expert execution cancelled before compute")
+            if (
+                selected_threads == 1
+                or expert_ids.shape[1] == 0
+                or not self.owner._layer_direct_eligible(parsed_layer)
+            ):
+                return self._serial(
+                    parsed_layer,
+                    hidden,
+                    expert_ids,
+                    routing_weights,
+                    num_token_non_padded=active_tokens,
+                    output=result_output,
+                    accumulate=accumulate,
+                    cancellation=cancellation,
+                )
+            route_ids = self._route_ids
+            route_weights = self._route_weights
+            outputs = self._outputs
+            merged = self._merged
+            if route_ids is None or route_weights is None or outputs is None or merged is None:
+                raise WorkspaceNotPrepared("call prepare before execute")
+            ranges = partition_q4_k_routes(expert_ids.shape[1], selected_threads)
+            actual_threads = len(ranges)
+            worker_cancel = _WorkerCancellation()
+            for index, (begin, end) in enumerate(ranges):
+                width = end - begin
+                ids_view = route_ids[index, :tokens, :width]
+                weights_view = route_weights[index, :tokens, :width]
+                np.copyto(ids_view, expert_ids[:, begin:end], casting="unsafe")
+                np.copyto(weights_view, routing_weights[:, begin:end], casting="unsafe")
+                try:
+                    future = self._pool.submit(
+                        self._workers[index].execute,
+                        parsed_layer,
+                        hidden,
+                        ids_view,
+                        weights_view,
+                        num_token_non_padded=active_tokens,
+                        output=outputs[index, :tokens],
+                        accumulate=False,
+                        cancellation=worker_cancel,
+                    )
+                except BaseException as submit_error:
+                    worker_cancel.cancel()
+                    self._cancel_and_drain(submitted)
+                    wrapped = ExecutionFailed(
+                        f"threaded mixed GEMV submission failed: {submit_error}"
+                    )
+                    wrapped.telemetry = self._error_telemetry(
+                        layer_id=parsed_layer,
+                        tokens=tokens,
+                        active_tokens=active_tokens,
+                        routes_requested=routes_requested,
+                        unique_experts=unique,
+                        started=started,
+                        error=wrapped,
+                        thread_count=len(submitted) or 1,
+                    )
+                    self._last_telemetry = wrapped.telemetry
+                    _clear_output(result_output)
+                    raise wrapped from submit_error
+                submitted.append(future)
+
+            pending = set(submitted)
+            indexed = {future: index for index, future in enumerate(submitted)}
+            results: list[CpuExecutionResult | None] = [None] * len(submitted)
+            observations: list[CpuExecutionTelemetry] = []
+            first_error: CpuAbiError | None = None
+            while pending:
+                done, pending = wait(pending, timeout=0.01, return_when=FIRST_EXCEPTION)
+                for future in sorted(done, key=lambda item: indexed[item]):
+                    try:
+                        result = future.result()
+                    except CpuAbiError as error:
+                        first_error = first_error or error
+                        if error.telemetry is not None:
+                            observations.append(error.telemetry)
+                    except BaseException as worker_error:
+                        wrapped = ExecutionFailed(
+                            f"threaded mixed GEMV worker failed: {worker_error}"
+                        )
+                        first_error = first_error or wrapped
+                    else:
+                        results[indexed[future]] = result
+                        observations.append(result.telemetry)
+                if first_error is not None:
+                    worker_cancel.cancel()
+                    self._cancel_and_drain(pending)
+                    pending.clear()
+                    break
+                if _cancelled(cancellation):
+                    worker_cancel.cancel()
+            if first_error is not None:
+                telemetry = self._error_telemetry(
+                    layer_id=parsed_layer,
+                    tokens=tokens,
+                    active_tokens=active_tokens,
+                    routes_requested=routes_requested,
+                    unique_experts=unique,
+                    started=started,
+                    error=first_error,
+                    thread_count=actual_threads,
+                    observations=observations,
+                )
+                first_error.telemetry = telemetry
+                self._last_telemetry = telemetry
+                _clear_output(result_output)
+                raise first_error
+            if _cancelled(cancellation):
+                cancelled = Cancelled("CPU expert execution cancelled during compute")
+                worker_cancel.cancel()
+                self._cancel_and_drain(submitted)
+                cancelled.telemetry = self._error_telemetry(
+                    layer_id=parsed_layer,
+                    tokens=tokens,
+                    active_tokens=active_tokens,
+                    routes_requested=routes_requested,
+                    unique_experts=unique,
+                    started=started,
+                    error=cancelled,
+                    thread_count=actual_threads,
+                    observations=observations,
+                )
+                self._last_telemetry = cancelled.telemetry
+                _clear_output(result_output)
+                raise cancelled
+            if any(result is None for result in results):
+                raise ExecutionFailed("threaded mixed GEMV completed without all partitions")
+            if result_output is None:
+                result_output = np.empty((tokens, self.owner.hidden_size), dtype=self._output_dtype)
+            if accumulate and output is not None:
+                np.copyto(merged[:tokens], result_output, casting="unsafe")
+            else:
+                merged[:tokens].fill(0.0)
+            # The index order is part of the ABI: completion order is deliberately
+            # ignored so floating-point reduction is reproducible.
+            for result in results:
+                assert result is not None
+                np.add(merged[:tokens], result.output, out=merged[:tokens])
+            np.copyto(result_output, merged[:tokens], casting="unsafe")
+            telemetry = self._decorate(
+                CpuExecutionTelemetry(
+                    backend="reference",
+                    layer_id=parsed_layer,
+                    tokens_requested=tokens,
+                    tokens_non_padded=active_tokens,
+                    routes_requested=routes_requested,
+                    routes_executed=sum(item.routes_executed for item in observations),
+                    unique_experts=len(unique),
+                    bytes_read_packed=sum(item.bytes_read_packed for item in observations),
+                    elapsed_ns=time.perf_counter_ns() - started,
+                    workspace_bytes=self._workspace_bytes,
+                    fallback_reason=self.owner._fallback_reason,
+                    thread_count=actual_threads,
+                )
+            )
+            self._last_telemetry = telemetry
+            return CpuExecutionResult(result_output, telemetry)
+        except CpuAbiError as error:
+            if error.telemetry is None:
+                error.telemetry = self._error_telemetry(
+                    layer_id=parsed_layer,
+                    tokens=tokens,
+                    active_tokens=active_tokens,
+                    routes_requested=routes_requested,
+                    unique_experts=unique,
+                    started=started,
+                    error=error,
+                    thread_count=actual_threads,
+                    observations=(),
+                )
+                self._last_telemetry = error.telemetry
+            _clear_output(result_output)
+            raise
+        except BaseException as error:
+            wrapped = ExecutionFailed(f"threaded mixed GEMV execution failed: {error}")
+            wrapped.telemetry = self._error_telemetry(
+                layer_id=parsed_layer,
+                tokens=tokens,
+                active_tokens=active_tokens,
+                routes_requested=routes_requested,
+                unique_experts=unique,
+                started=started,
+                error=wrapped,
+                thread_count=actual_threads,
+            )
+            self._last_telemetry = wrapped.telemetry
+            _clear_output(result_output)
+            raise wrapped from error
+        finally:
+            self._lock.release()
+
+    def execute_group(
+        self, requests: Iterable[CpuExecutionRequest]
+    ) -> tuple[CpuExecutionResult, ...]:
+        """Execute grouped requests serially at the public request boundary."""
+        return tuple(
+            self.execute(
+                request.layer_id,
+                request.hidden,
+                request.expert_ids,
+                request.routing_weights,
+                num_token_non_padded=request.num_token_non_padded,
+                output=request.output,
+                accumulate=request.accumulate,
+                cancellation=request.cancellation,
+            )
+            for request in requests
+        )
+
+    def microbenchmark(
+        self,
+        layer_id: int,
+        hidden: np.ndarray,
+        expert_ids: np.ndarray,
+        routing_weights: np.ndarray,
+        *,
+        repeats: int = 1,
+        route_counts: Iterable[int] | None = None,
+        miss_counts: Iterable[int] | None = None,
+        num_token_non_padded: int | None = None,
+        thread_counts: Iterable[int] | None = None,
+    ) -> tuple[CpuMicrobenchmarkSample, ...]:
+        repeats = _checked_int(repeats, "repeats")
+        if repeats <= 0:
+            raise InvalidRequest("repeats must be positive")
+        layer_id = _checked_int(layer_id, "layer_id")
+        hidden, expert_ids, routing_weights, _, tokens = self.owner._reference._validate_arrays(
+            layer_id, hidden, expert_ids, routing_weights, None
+        )
+        active_tokens = (
+            tokens
+            if num_token_non_padded is None
+            else _checked_int(num_token_non_padded, "num_token_non_padded")
+        )
+        if not 0 <= active_tokens <= tokens:
+            raise InvalidRequest(f"num_token_non_padded={active_tokens} outside [0, {tokens}]")
+        max_width = min(self.owner.layout.top_k, expert_ids.shape[1])
+        if max_width <= 0:
+            raise InvalidRequest("microbenchmark requires at least one supplied route")
+        selected_widths = (
+            tuple(width for width in (1, 2, 4, 8, 10) if width <= max_width)
+            if route_counts is None
+            else tuple(_checked_int(value, "route_count") for value in route_counts)
+        )
+        if not selected_widths:
+            raise InvalidRequest("route_counts must not be empty")
+        if any(not 1 <= width <= max_width for width in selected_widths):
+            raise InvalidRequest(f"route_count outside [1, {max_width}]")
+        expected_misses = (
+            (None,) * len(selected_widths)
+            if miss_counts is None
+            else tuple(_checked_int(value, "miss_count") for value in miss_counts)
+        )
+        if len(expected_misses) != len(selected_widths):
+            raise InvalidRequest("route_counts and miss_counts must have equal lengths")
+        selected_threads = (
+            tuple(
+                dict.fromkeys(
+                    count for count in (1, 2, 4, 8, self.max_threads) if count <= self.max_threads
+                )
+            )
+            if thread_counts is None
+            else tuple(_checked_int(value, "thread_count") for value in thread_counts)
+        )
+        if not selected_threads:
+            raise InvalidRequest("thread_counts must not be empty")
+        if any(not 1 <= count <= self.max_threads for count in selected_threads):
+            raise InvalidRequest(f"thread_count outside [1, {self.max_threads}]")
+        projections = tuple(
+            CpuMicrobenchmarkProjection(
+                projection=projection,
+                quant_name=self.owner.layout.descriptor(layer_id, projection).quant_name,
+                quant_type=self.owner.layout.descriptor(layer_id, projection).quant_type,
+                row_stride_bytes=self.owner.layout.descriptor(
+                    layer_id, projection
+                ).row_stride_bytes,
+                expert_stride_bytes=self.owner.layout.descriptor(
+                    layer_id, projection
+                ).expert_stride_bytes,
+            )
+            for projection in ("gate", "up", "down")
+        )
+        if self._plan is None:
+            raise WorkspaceNotPrepared("call prepare before microbenchmark")
+        samples: list[CpuMicrobenchmarkSample] = []
+        descriptor = self.owner.layout.descriptor(layer_id, "gate")
+        for width, expected in zip(selected_widths, expected_misses, strict=True):
+            ids = expert_ids[:active_tokens, :width]
+            actual_misses, _ = self.owner._reference._validate_ids(descriptor, ids, active_tokens)
+            if expected is not None and (expected < 0 or expected != actual_misses):
+                raise InvalidRequest(
+                    f"miss_count={expected} does not match supplied active IDs ({actual_misses})"
+                )
+            for requested_threads in selected_threads:
+                # A warm-up is required by the benchmark contract but is never
+                # retained as a raw observation.
+                self.execute(
+                    layer_id,
+                    hidden,
+                    expert_ids[:, :width],
+                    routing_weights[:, :width],
+                    num_token_non_padded=active_tokens,
+                    _thread_count=requested_threads,
+                )
+                elapsed: list[int] = []
+                telemetry: list[CpuExecutionTelemetry] = []
+                for _ in range(repeats):
+                    result = self.execute(
+                        layer_id,
+                        hidden,
+                        expert_ids[:, :width],
+                        routing_weights[:, :width],
+                        num_token_non_padded=active_tokens,
+                        _thread_count=requested_threads,
+                    )
+                    elapsed.append(result.telemetry.elapsed_ns)
+                    telemetry.append(result.telemetry)
+                samples.append(
+                    CpuMicrobenchmarkSample(
+                        layer_id=layer_id,
+                        route_count=width,
+                        miss_count=actual_misses,
+                        repeats=repeats,
+                        elapsed_ns=tuple(elapsed),
+                        telemetry=tuple(telemetry),
+                        tokens_requested=tokens,
+                        tokens_non_padded=active_tokens,
+                        hidden_size=self.owner.hidden_size,
+                        intermediate_size=self.owner.intermediate_size,
+                        workspace_bytes=self._workspace_bytes,
+                        projections=projections,
+                        thread_count=requested_threads,
+                    )
+                )
+        return tuple(samples)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._owns_pool:
+            self._pool.shutdown(wait=True)
 
 
 Q4KCpuExpertExecutor = Q4KExecutor
@@ -714,6 +1517,7 @@ __all__ = [
     "decode_q4_k",
     "decode_q4_k_block",
     "dequantize_q4_k",
+    "partition_q4_k_routes",
     "q4_k_dot",
     "q4_k_dot_scalar",
     "select_q4_k_primitive",

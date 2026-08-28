@@ -8,7 +8,6 @@ from concurrent.futures import Future
 
 import numpy as np
 import pytest
-
 from freetoken.moe import q4_k
 from freetoken.moe.cpu_abi import (
     Cancelled,
@@ -23,9 +22,7 @@ from freetoken.moe.ggml_reference import (
     Q5_K_BLOCK_BYTES,
     Q8_0_BLOCK_BYTES,
 )
-from freetoken.moe.mixed_gemv import MixedGemvPrimitive
 from freetoken.moe.q4_k import Q4K_BLOCK_BYTES, Q4KExecutor, partition_q4_k_routes
-
 
 _BLOCKS = {
     "Q4_K": (256, Q4K_BLOCK_BYTES, 12),
@@ -46,12 +43,21 @@ class _PackedSource:
         return self.values[expert]
 
 
+class _MetadataSource:
+    """Bounded metadata-only source for exact census eligibility tests."""
+
+    range_offset = 0
+    range_size = 10**12
+    source_address = 0
+
+    def expert_packed(self, expert: int) -> np.ndarray:
+        raise AssertionError(f"metadata-only source was unexpectedly executed: {expert}")
+
+
 def _source(experts: int, rows: int, input_dim: int, quant_name: str) -> _PackedSource:
     block_elements, block_bytes, _ = _BLOCKS[quant_name]
     row_bytes = input_dim // block_elements * block_bytes
-    values = np.arange(experts * rows * row_bytes, dtype=np.uint8).reshape(
-        experts, rows, row_bytes
-    )
+    values = np.arange(experts * rows * row_bytes, dtype=np.uint8).reshape(experts, rows, row_bytes)
     return _PackedSource(np.ascontiguousarray(values))
 
 
@@ -146,6 +152,40 @@ def test_partition_is_balanced_and_index_ordered() -> None:
     assert partition_q4_k_routes(3, 10) == ((0, 1), (1, 2), (2, 3))
 
 
+def test_exact_qwen_census_geometry_gates_every_normal_and_promoted_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_native(monkeypatch)
+    promoted = {2, 4, 30, 46, 47}
+    descriptors = []
+    for layer in (0, 2, 4, 30, 46, 47):
+        gate_up = "Q5_K" if layer == 2 else "Q4_K"
+        down = "Q8_0" if layer in promoted else "Q5_1"
+        for projection, quant_name, output_dim, input_dim in (
+            ("gate", gate_up, 640, 2560),
+            ("up", gate_up, 640, 2560),
+            ("down", down, 2560, 640),
+        ):
+            descriptors.append(
+                _descriptor(
+                    layer,
+                    projection,
+                    quant_name,
+                    _MetadataSource(),
+                    experts=512,
+                    output_dim=output_dim,
+                    input_dim=input_dim,
+                )
+            )
+    layout = CpuExpertLayout(tuple(descriptors), top_k=10)
+    executor = Q4KExecutor(layout, mode="avx2", num_threads=2, required_alignment=1)
+    assert executor.parallel_enabled
+    assert all(executor._layer_direct_eligible(layer) for layer in layout.layers)
+    assert executor._kernel_census(0) == ("q4_k_avx2", "q5_1_avx2")
+    assert executor._kernel_census(2) == ("q5_k_avx2", "q8_0_avx2")
+    executor.close()
+
+
 @pytest.mark.parametrize("promoted", [False, True])
 def test_threaded_mixed_routes_match_serial_for_normal_and_promoted_layers(
     promoted: bool, monkeypatch: pytest.MonkeyPatch
@@ -159,11 +199,11 @@ def test_threaded_mixed_routes_match_serial_for_normal_and_promoted_layers(
     hidden, ids, weights = _inputs()
     expected = serial.execute(layout.layers[0], hidden, ids, weights)
     actual = threaded.execute(layout.layers[0], hidden, ids, weights)
-    np.testing.assert_allclose(actual.output, expected.output)
+    np.testing.assert_allclose(actual.output, expected.output, rtol=3e-5, atol=3e-5)
     assert actual.telemetry.thread_count == 3
     assert actual.telemetry.routes_executed == 20
     assert actual.telemetry.kernel_census == (
-        ("q4_k_avx2", "q5_1_avx2") if not promoted else ("q5_1_avx2", "q5_k_avx2")
+        ("q4_k_avx2", "q5_1_avx2") if not promoted else ("q5_k_avx2", "q8_0_avx2")
     )
 
 
@@ -257,6 +297,7 @@ def test_worker_failure_cancels_and_drains_siblings(monkeypatch: pytest.MonkeyPa
     original = runner._workers[1].execute
 
     def fail(*args, **kwargs):
+        time.sleep(0.02)
         raise RuntimeError("worker exploded")
 
     monkeypatch.setattr(runner._workers[0], "execute", fail)

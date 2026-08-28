@@ -469,6 +469,9 @@ class CpuExecutionTelemetry:
     error: str | None = None
     error_detail: str | None = None
     kernel_census: tuple[str, ...] = ("reference",)
+    # Number of worker partitions that actually participated in this request.
+    # Validation and pre-compute cancellation report one (the owner thread).
+    thread_count: int = 1
 
     @property
     def expert_count(self) -> int:
@@ -493,6 +496,7 @@ class CpuExecutionTelemetry:
             "error": self.error,
             "error_detail": self.error_detail,
             "kernel_census": list(self.kernel_census),
+            "thread_count": self.thread_count,
         }
 
 
@@ -544,9 +548,10 @@ class CpuMicrobenchmarkSample:
     intermediate_size: int
     workspace_bytes: int
     projections: tuple[CpuMicrobenchmarkProjection, ...]
+    thread_count: int | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "layer_id": self.layer_id,
             "route_count": self.route_count,
             "miss_count": self.miss_count,
@@ -560,6 +565,9 @@ class CpuMicrobenchmarkSample:
             "workspace_bytes": self.workspace_bytes,
             "projections": [item.as_dict() for item in self.projections],
         }
+        if self.thread_count is not None:
+            payload["thread_count"] = self.thread_count
+        return payload
 
 
 @dataclass(frozen=True)
