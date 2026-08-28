@@ -732,6 +732,12 @@ class QwenGGUFHostWeights:
         self.layout = layout
         self.experts = experts
         self.ple = ple
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        """Whether the owned expert and PLE mappings have been released."""
+        return self._closed
 
     def memory_report(self) -> dict[str, int]:
         report = host_memory_report(self.layout)
@@ -742,6 +748,9 @@ class QwenGGUFHostWeights:
         }
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         self.ple.close()
         self.experts.close()
 

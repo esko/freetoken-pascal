@@ -58,6 +58,11 @@ class _Banks:
             bank.close()
 
 
+class _Ple:
+    def close(self) -> None:
+        return None
+
+
 def _descriptor(
     layer: int,
     projection: str,
@@ -68,7 +73,7 @@ def _descriptor(
     output_dim: int = 256,
     experts: int = 2,
 ) -> tuple[ExpertBankDescriptor, np.ndarray]:
-    block_bytes = {"Q4_K": 144, "Q5_K": 176, "Q5_1": 22, "Q8_0": 34}[quant_name]
+    block_bytes = {"Q4_K": 144, "Q5_K": 176, "Q5_1": 24, "Q8_0": 34}[quant_name]
     block_elements = 256 if quant_name in {"Q4_K", "Q5_K"} else 32
     row_bytes = input_dim // block_elements * block_bytes
     values = np.ascontiguousarray(
@@ -114,11 +119,11 @@ def _host() -> QwenGGUFHostWeights:
     )
     layout = QwenHostLayout(
         experts=expert_layout,
-        ple=None,  # type: ignore[arg-type]
+        ple=_Ple(),  # type: ignore[arg-type]
         total_tensor_bytes=sum(item.tensor_bytes for item in descriptors),
         shard_paths=("synthetic.gguf",),
     )
-    return QwenGGUFHostWeights(layout, _Banks(expert_layout, banks), None)  # type: ignore[arg-type]
+    return QwenGGUFHostWeights(layout, _Banks(expert_layout, banks), _Ple())  # type: ignore[arg-type]
 
 
 def test_bundle_keeps_host_alive_and_closes_owned_mapping_once() -> None:
@@ -140,7 +145,7 @@ def test_bundle_preserves_mixed_layout_and_kernel_census() -> None:
 
     bundle = QwenGGUFCpuExpertBundle.from_host(_host(), top_k=1, mode="scalar")
     assert [item.quant_name for item in bundle.layout.descriptors] == ["Q4_K", "Q4_K", "Q5_1"]
-    assert bundle.kernel_census(0) == ("q4_k_scalar", "reference_q5_1")
+    assert bundle.kernel_census == ("q4_k_scalar", "reference_q5_1")
     bundle.close()
 
 
@@ -186,6 +191,10 @@ def test_config_registration_guard_is_fail_closed() -> None:
     Config.moe_cache_size = 1
     assert not qwen_gguf_cpu_bridge_supported(Config())
 
+    del Config.device
+    Config.moe_cache_size = 0
+    assert not qwen_gguf_cpu_bridge_supported(Config())
+
 
 def test_cpu_tensor_decode_adapter_returns_cpu_tensor() -> None:
     torch = pytest.importorskip("torch")
@@ -216,4 +225,3 @@ def test_tensor_decode_rejects_non_cpu_inputs() -> None:
     with pytest.raises(ValueError, match="CPU"):
         bundle.decode(0, hidden, weights, ids)
     bundle.close()
-
