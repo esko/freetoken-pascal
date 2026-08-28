@@ -14,10 +14,7 @@ import gguf
 import numpy as np
 
 REVISION = "c8b5954a88c2775c546b92593eda40ea041d3176"
-BASE_URL = (
-    "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/"
-    f"{REVISION}"
-)
+BASE_URL = f"https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/{REVISION}"
 ROWS = (
     {
         "variant": "UD-Q4_K_XL",

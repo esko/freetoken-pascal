@@ -31,6 +31,7 @@ def inspect_gguf(
 ) -> dict[str, Any]:
     """Validate a GGUF or complete shard set without materializing weight data."""
     import gguf
+
     source = Path(path)
     try:
         shards = gguf_shard_paths(source)
@@ -90,8 +91,7 @@ def inspect_gguf(
             expected_bytes = rows * packed_row_bytes
             if tensor.data.nbytes != expected_bytes:
                 raise ValueError(
-                    f"{tensor.name}: data size {tensor.data.nbytes} does not match "
-                    f"{expected_bytes}"
+                    f"{tensor.name}: data size {tensor.data.nbytes} does not match {expected_bytes}"
                 )
 
             offset = int(tensor.data_offset)

@@ -12,9 +12,7 @@ FIXTURES = ROOT / "tests/fixtures"
 
 def test_census_matches_schema_fixture() -> None:
     actual = build_quant_census(FIXTURES / "gguf/valid-heterogeneous.gguf")
-    expected = json.loads(
-        (FIXTURES / "results/quant-census.json").read_text(encoding="utf-8")
-    )
+    expected = json.loads((FIXTURES / "results/quant-census.json").read_text(encoding="utf-8"))
 
     assert actual == expected
 
