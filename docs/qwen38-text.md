@@ -27,8 +27,20 @@ and runs exact sparse GQA over the original K/V values.
 
 `freetoken.models.qwen4_exp.reference` contains device-neutral equations for GDN recurrence,
 hyperconnection mixing, and routed/shared expert semantics. They are not used by production
-forwards. The model's debug hook is disabled by default and can capture selected logits plus cloned
-PLE state for A/B tests.
+forwards. The model's debug hook is disabled by default. When explicitly enabled for a correctness
+run, it captures cloned semantic observations at stable boundaries: global router IDs and weights,
+GDN recurrent state, logical QSA selections/state, PLE contribution/state, and selected logits.
+Capture allocations therefore cannot affect production runs, and captured route IDs precede any
+cache-slot remapping.
+
+`tests/fixtures/qwen38-reference-corpus.json` defines the synthetic, deterministic prompt matrix and
+pins its tokenizer revision. Long-context templates must be materialized with that tokenizer and
+must prove their exact 32K, 128K, or 262K token count; declaring a target in fixture metadata is not
+evidence. `scripts/write_qwen38_observations.py` writes non-pickle semantic array bundles, and
+`scripts/compare_qwen38_observations.py` binds both implementations to the same artifact, quant
+census, corpus, prompt, context length, cache mode, and quantization before comparing them. Exact
+routing/state observations and documented numeric tolerances are both required. Synthetic bundles
+exercise the H0 contract only and cannot satisfy the H2 model gate.
 
 The pinned H1 CUDA environment runs the Qwen config/model helpers, CPU reference equations, QSA
 selection/output, QSA cache geometry, the exact non-power-of-two Torch router fallback, and
