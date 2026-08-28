@@ -49,7 +49,9 @@ descriptors, prepare/execute/group/cancel/telemetry contracts, caller-owned part
 accumulation, bounded workspace and explicit decoder/thread-pool/NUMA hooks. Its
 microbenchmark interface records raw repeated timings for the supplied production
 geometry and every requested miss width from 1 through top-k; it does not by itself
-constitute a performance claim.
+constitute a performance claim. The Issue #16 threaded route adapter is opt-in,
+native-only, and census-gated per layer; it keeps serial execution for scalar,
+unsupported, and mixed-reference configurations.
 
 ### Exit gate
 
