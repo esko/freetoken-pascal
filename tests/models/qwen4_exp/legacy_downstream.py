@@ -1161,5 +1161,3 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
 
 
 __all__ = ["Qwen4ExpForCausalLM", "build_ngram_ids"]
-
-

@@ -293,4 +293,3 @@ def qsa_sparse_gqa(
 
 
 __all__ = ["compact_qsa_blocks", "qsa_sparse_gqa"]
-
