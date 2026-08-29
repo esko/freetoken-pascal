@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import mmap
 import subprocess
 import sys
 from pathlib import Path
@@ -189,6 +190,9 @@ def test_ple_warm_modes_and_fault_telemetry_are_observable() -> None:
         after = weights.ple.telemetry()
 
     assert before["mode"] == "cold"
+    if hasattr(mmap, "MADV_RANDOM"):
+        assert before["advice"] == "madv-random"
+        assert before["advice_applied"] is True
     assert after["lookup_rows"] == 3
     assert after["packed_bytes_read"] == 3 * 90
     assert after["minor_faults"] >= 0

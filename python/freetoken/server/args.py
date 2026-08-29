@@ -148,6 +148,8 @@ def parse_args(
             return "muse_glimmer"
         if "gemma4" in marker:
             return "gemma4"
+        if "qwen4_exp" in marker or "qwen4exp" in marker or "qwen3.8-flash" in marker:
+            return "qwen3_coder"
         if (
             "qwen3_5" in marker
             or "qwen3.5" in marker
@@ -191,7 +193,14 @@ def parse_args(
             return "deepseekv32"
         if any(
             tag in marker
-            for tag in ("qwen3", "qwen3.5", "qwen3_5", "qwen4_exp", "qwen4exp")
+            for tag in (
+                "qwen3",
+                "qwen3.5",
+                "qwen3_5",
+                "qwen3.8-flash",
+                "qwen4_exp",
+                "qwen4exp",
+            )
         ):
             return "qwen3"
         if "glm" in marker:

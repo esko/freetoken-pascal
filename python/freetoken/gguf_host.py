@@ -805,6 +805,7 @@ class MappedPLETable:
             model_shard_paths=layout.shard_paths,
         )
         try:
+            table._apply_random_advice()
             if warm_mode == "full-ple-warm":
                 raise ValueError("GGUF warm mode is full-model-warm")
             table.set_warm_mode(warm_mode)
@@ -1156,6 +1157,7 @@ def open_qwen_host_weights(
             ple_mapping,
             model_shard_paths=layout.shard_paths,
         )
+        ple._apply_random_advice()
         ple.set_warm_mode(ple_warm_mode)
     except BaseException:
         experts.close()

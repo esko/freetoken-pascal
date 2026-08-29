@@ -120,7 +120,7 @@ def _backend_requirements_met(name: str) -> bool:
 
 
 def _resolve_auto_attention_backend(
-    required: frozenset[AttnType], hybrid_linear: bool
+    required: frozenset[AttnType], hybrid_linear: bool = False
 ) -> str:
     """First candidate (in per-type priority order) whose arch condition holds,
     whose packages are installed, and whose every comma part serves ALL required
@@ -134,7 +134,7 @@ def _resolve_auto_attention_backend(
     if AttnType.BSA in required:
         candidates.append(("m3_sparse", True))
     if AttnType.QSA in required:
-        candidates.append(("qsa", True))
+        candidates.append(("qsa_sparse", True))
     if AttnType.SWA in required:
         candidates.append(("triton", True))
     if AttnType.FULL in required:
@@ -150,7 +150,8 @@ def _resolve_auto_attention_backend(
         if not _backend_parts_serve(name, required):
             continue
         if hybrid_linear and not all(
-            attention_backend_info(p).hybrid_linear_ok for p in name.split(",")
+            getattr(attention_backend_info(p), "hybrid_linear_ok", True)
+            for p in name.split(",")
         ):
             continue
         if not _backend_requirements_met(name):
@@ -184,8 +185,8 @@ def _validate_attention_backend_choice(config, override, required: frozenset[Att
             valid = [
                 name
                 for name in (
-                    "fa", "fi", "trtllm", "triton", "dsa", "dsv4_sparse",
-                    "m3_sparse", "qsa",
+                    "fa", "fi", "trtllm", "triton", "dsa", "dsv4_sparse", "m3_sparse",
+                    "qsa_sparse",
                 )
                 if required <= attention_backend_info(name).supported_types
             ]
@@ -195,7 +196,9 @@ def _validate_attention_backend_choice(config, override, required: frozenset[Att
                 f"attention, which backend {part!r} does not support; valid backends: "
                 f"{', '.join(valid)} (or auto), got {config.attention_backend!r}."
             )
-        if getattr(model_config, "has_linear_attention", False) and not info.hybrid_linear_ok:
+        if getattr(model_config, "has_linear_attention", False) and not getattr(
+            info, "hybrid_linear_ok", True
+        ):
             raise ValueError(
                 f"backend {part!r} does not support hybrid-linear (GDN/mamba) models, "
                 f"got {config.attention_backend!r}."
@@ -375,6 +378,12 @@ class Engine:
         self._post_weights_free = post_weights_free
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
+        # Host-side auxiliary stores (qwen4_exp's pinned PLE table): after the weights so a
+        # load failure is not masked, before the MoE offload cache so the bank residency
+        # planning sees the pin quota the table already spent.
+        self._host_tables_bytes = 0
+        if hasattr(self.model, "load_host_tables"):
+            self._host_tables_bytes = int(self.model.load_host_tables(config) or 0)
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
         if hasattr(self.model, "prepare_for_runtime"):
@@ -403,6 +412,7 @@ class Engine:
                 dtype=self.dtype,
                 device=self.device,
                 tp_size=config.tp_info.size,
+                slot_states=config.model_config.slot_states,
             )
             self.ctx.linear_state_pool = self.linear_state_pool
         else:
@@ -584,9 +594,11 @@ class Engine:
             not cpu_layer_ids
             and config.moe_cpu_layers is None
             and config.moe_backend in ("offload", "hybrid")
-            and _pin_budget_bytes() is not None
+            and _pin_budget_bytes(self._host_tables_bytes) is not None
         ):
-            cpu_layer_ids = _auto_cpu_layers(config, config.model_config.num_moe_layers)
+            cpu_layer_ids = _auto_cpu_layers(
+                config, config.model_config.num_moe_layers, reserved=self._host_tables_bytes
+            )
         if config.moe_backend == "hybrid":
             decode_target = "hybrid"
         elif cpu_layer_ids:
@@ -599,7 +611,7 @@ class Engine:
         split_residency = (
             bool(cpu_layer_ids)
             and config.moe_backend in ("offload", "hybrid")
-            and _pin_budget_bytes() is not None
+            and _pin_budget_bytes(self._host_tables_bytes) is not None
         )
         if config.host_bank_policy is not None and split_residency:
             raise ValueError(
@@ -610,7 +622,7 @@ class Engine:
             # cpu mode pins every bank for the prefill double buffer; over the pin cap that dies in cudaHostRegister, so lock everything instead
             from freetoken.moe.expert_banks import bank_bytes_estimate, ftw_bank_bytes
 
-            budget = _pin_budget_bytes()
+            budget = _pin_budget_bytes(self._host_tables_bytes)
             bank_bytes = None
             if budget is not None:
                 bank_bytes = ftw_bank_bytes(config.model_path) or bank_bytes_estimate(config.model_config)
@@ -1306,18 +1318,20 @@ def _guard_qwen_gguf_engine_setup(config: EngineConfig) -> None:
     )
 
 
-def _pin_budget_bytes() -> int | None:
-    """Bytes this process can safely cudaHostRegister, or None when the platform does not cap pinning (plain Linux).
+def _pin_budget_bytes(reserved: int = 0) -> int | None:
+    """Bytes this process can still safely cudaHostRegister, or None when the platform does not cap pinning (plain Linux).
 
-    WSL's WDDM-backed CUDA caps pinning near half of RAM, shared across processes -- budget 40%. FREETOKEN_PIN_BUDGET_GB overrides anywhere."""
+    WSL's WDDM-backed CUDA caps pinning near half of RAM, shared across processes -- budget 40%. FREETOKEN_PIN_BUDGET_GB overrides anywhere. ``reserved`` subtracts host bytes already pinned outside the expert banks (qwen4_exp's PLE table)."""
     if env := os.environ.get("FREETOKEN_PIN_BUDGET_GB"):
-        return int(float(env) * 2**30)
-    if not hasattr(os, "uname") or "microsoft" not in os.uname().release.lower():  # WSL kernel tag
+        cap = int(float(env) * 2**30)
+    elif not hasattr(os, "uname") or "microsoft" not in os.uname().release.lower():  # WSL kernel tag
         return None
-    return int(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") * 0.4)
+    else:
+        cap = int(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") * 0.4)
+    return max(0, cap - reserved)
 
 
-def _auto_cpu_layers(config: EngineConfig, num_moe_layers: int) -> frozenset[int]:
+def _auto_cpu_layers(config: EngineConfig, num_moe_layers: int, reserved: int = 0) -> frozenset[int]:
     """Pick CPU (locked) MoE layers automatically when the banks exceed the pin budget.
 
     Locks just enough head+tail layers: per-layer decode miss rates are U-shaped, so the ends are the cheapest to move off the slot cache."""
@@ -1326,7 +1340,7 @@ def _auto_cpu_layers(config: EngineConfig, num_moe_layers: int) -> frozenset[int
     bank_bytes = ftw_bank_bytes(config.model_path) or bank_bytes_estimate(config.model_config)
     if not bank_bytes:
         return frozenset()
-    budget = _pin_budget_bytes()
+    budget = _pin_budget_bytes(reserved)
     if budget is None or bank_bytes <= budget:
         return frozenset()
     if not _cpu_moe_executor_viable(config.model_config):
@@ -1458,8 +1472,12 @@ def _adjust_config(config: EngineConfig):
     # comma part must serve every required type, with packages/arch available.
     required_attn_types = _required_attn_types(model_config)
     _dtype = getattr(config, "dtype", None)  # duck-typed test configs omit it
-    if required_attn_types & {AttnType.BSA, AttnType.QSA} and _dtype is not None and _dtype.itemsize != 2:
-        # Reject at config time: the BSA pool's own assert only fires after the
+    if (
+        required_attn_types & {AttnType.BSA, AttnType.QSA}
+        and _dtype is not None
+        and _dtype.itemsize != 2
+    ):
+        # Reject at config time: the sparse pool's own assert only fires after the
         # model is resident (and not at all under `python -O`).
         raise ValueError(
             f"--dtype {config.dtype}: sparse attention serves 16-bit "

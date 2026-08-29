@@ -120,21 +120,18 @@ sources:
     upstream_ref: refs/pull/232/head
     ref: ad752c9970e0dc3f1b09aeec38235332149336ed
     license: Apache-2.0
-    role: Qwen3.8 Qwen4 QSA PLE and vision source; v1 imports text only
+    role: historical Qwen3.8 source retained only for downstream-specific text paths
     usage: imported
     responsible_issue: 11
     notice_required: true
     imports:
-      - source_path: python/freetoken/models/qwen4_exp
-        destination_path: python/freetoken/models/qwen4_exp
+      - source_path: python/freetoken/models/qwen4_exp/config.py
+        destination_path: python/freetoken/models/qwen4_exp/config.py
         source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
         method: adapted
         local_modifications:
-          - import the text model, configuration, loader, GDN, hyperconnection, router, and PLE interfaces
-          - exclude the vision tower and multimodal RoPE implementation
-          - skip vision and MTP weights and fail image execution with the v1 text-only scope message
-          - add downstream-only device-neutral reference equations and an opt-in debug hook
-          - preserve exact GGUF PLE address metadata and serve selected IQ4_NL rows from a bounded file-backed mapping
+          - retain GGUF PLE geometry and hash metadata absent from merged PR 257
+          - retain fail-closed low-bit expert quant validation
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 11
@@ -151,7 +148,7 @@ sources:
         responsible_issue: 11
         responsible_pull_request: 35
       - source_path: python/freetoken/kernel/triton/qsa.py
-        destination_path: python/freetoken/kernel/triton/qsa.py
+        destination_path: python/freetoken/kernel/triton/qsa_legacy.py
         source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
         method: adapted
         local_modifications:
@@ -160,11 +157,13 @@ sources:
         header_policy: preserved
         responsible_issue: 11
         responsible_pull_request: 35
-      - source_path: python/freetoken/kvcache/qsa_pool.py
-        destination_path: python/freetoken/kvcache/qsa_pool.py
+      - source_path: python/freetoken/models/qwen4_exp/model.py
+        destination_path: tests/models/qwen4_exp/legacy_downstream.py
         source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
-        method: cherry-pick
-        local_modifications: []
+        method: adapted
+        local_modifications:
+          - isolate pre-sync PLE reference helpers outside the installed runtime
+          - retain only for regression comparison during issue 76 migration
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 11
@@ -228,15 +227,38 @@ sources:
         header_policy: preserved
         responsible_issue: 12
         responsible_pull_request: 36
-  - id: freetoken-qwen4-pr257-merge-reference
+  - id: freetoken-qwen4-pr257-merge
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 257
     upstream_ref: refs/pull/257/merge
     ref: bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40
     license: Apache-2.0
-    role: merged Qwen3.8 semantics, QSA, arbitrary-K router, PLE, graph and hybrid-MoE reference
-    usage: reference
+    role: authoritative Qwen3.8 semantics, QSA, arbitrary-K router, PLE, graph and hybrid-MoE source
+    usage: imported
     responsible_issue: 77
+    notice_required: true
+    imports:
+      - source_path: .
+        destination_path: .
+        source_ref: bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40
+        method: merge
+        local_modifications:
+          - retain downstream GGUF parsing and quantized host layouts
+          - retain dedicated NVMe PLE mapping and bounded host-table adapters
+          - retain Pascal fallbacks, CPU expert execution, placement safety and evidence contracts
+          - isolate pre-sync QSA and PLE helpers as reference-only test paths
+        license: Apache-2.0
+        header_policy: preserved by history
+        responsible_issue: 77
+  - id: freetoken-ple-mmap-pr279
+    repository: https://github.com/FlashML-org/FreeToken
+    pull_request: 279
+    upstream_ref: refs/pull/279/head
+    ref: feaeaa31c0cea385a1c9ee107d4b1053f83b35db
+    license: Apache-2.0
+    role: immutable reference for upstream mmap PLE behavior
+    usage: reference
+    responsible_issue: 13
     notice_required: false
     imports: []
   - id: freetoken-fp8-rowwise-safety

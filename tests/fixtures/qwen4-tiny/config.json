@@ -37,7 +37,7 @@
     "heads_per_ngram": 2,
     "ple_conv_kernel_size": 4,
     "ple_embed_dim": 32,
-    "ple_layer_ids": [2],
+    "ple_layer_ids": [1],
     "rms_norm_eps": 1e-06,
     "rope_parameters": {
       "mrope_interleaved": true,

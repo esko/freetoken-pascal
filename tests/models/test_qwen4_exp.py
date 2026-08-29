@@ -24,8 +24,9 @@ from freetoken.models.qwen4_exp.gguf import (
     _grouped_to_tiled_indices,
     _ungroup_v,
 )
-from freetoken.models.qwen4_exp.model import (
-    Qwen4ExpForCausalLM,
+from freetoken.models.qwen4_exp.model import Qwen4ExpForCausalLM, _MappedPLETable
+from freetoken.models.qwen4_exp.ple import NGramEmbedding
+from tests.models.qwen4_exp.legacy_downstream import (
     _HostNGramEmbedding,
     _ple_request_tokens,
     _PLELayer,
@@ -149,7 +150,9 @@ def test_qwen4_config_uses_exact_qsa_prefix():
     assert config.attn_quant == "none"
     assert config.qwen4_args.ple_layer_ids == (1,)
     assert config.qwen4_args.output_gate_type == "sigmoid"
-    assert config.requires_naive_cache
+    # PLE state is now declared on the snapshot/COW-aware linear-state pool; the pre-#257
+    # adapter required naive cache only because it owned an unsnapshotted Python state map.
+    assert not config.requires_naive_cache
     assert not config.supports_cuda_graph
     assert not config.is_multimodal
     assert config.is_linear_layer(0)
@@ -162,10 +165,10 @@ def test_qwen4_config_accepts_transformers_sparse_attention_alias():
     config = parse_config(hf_config)
     assert not config.is_linear_layer(3)
     assert config.attn_type_for_layer(3).value == "qsa"
-    spec = config.kv_cache_group_specs()[0]
+    spec = next(spec for spec in config.kv_cache_group_specs() if spec.attn_type.value == "qsa")
     assert spec.layer_ids == (3,)
     assert spec.index_head_dim == 128
-    assert spec.index_compress_ratio == 4
+    assert spec.index_ratio == 4
     assert spec.index_token_budget == 2048
 
 
@@ -173,7 +176,9 @@ def test_qwen4_config_accepts_missing_norm_topk_prob():
     hf_config = _config()
     del hf_config.text_config.norm_topk_prob
     config = parse_config(hf_config)
-    assert not config.norm_topk_prob
+    # HF Qwen4ExpTextConfig defaults this omitted field to True and the upstream MoE block
+    # renormalizes selected routes accordingly.
+    assert config.norm_topk_prob
 
 
 def test_qwen4_config_accepts_routed_expert_nvfp4():
@@ -319,7 +324,44 @@ def test_qwen4_gguf_config_uses_exact_artifact_geometry():
     assert config.qwen4_args.ple_head_offsets is not None
     assert config.is_linear_layer(2)
     assert not config.is_linear_layer(3)
-    assert config.attention_group_for_layer(3).index_compress_ratio == 4
+    assert config.attention_group_for_layer(3).index_ratio == 4
+    assert config.qwen4_args.index_compress_ratio == config.qwen4_args.index_ratio == 4
+
+
+def test_qwen4_gguf_ple_metadata_seeds_current_embedding_buffers():
+    args = parse_gguf_config(_gguf_shim()).qwen4_args
+    embedding = NGramEmbedding(args)
+
+    assert torch.equal(
+        embedding.layer_multipliers,
+        torch.tensor(args.ple_layer_multipliers, dtype=torch.int64),
+    )
+    assert torch.equal(
+        embedding.ngram_heads_vocab_sizes,
+        torch.tensor(args.ple_head_vocab_sizes, dtype=torch.int64),
+    )
+    assert torch.equal(
+        embedding.ngram_heads_offsets,
+        torch.tensor(args.ple_head_offsets, dtype=torch.int64),
+    )
+
+
+def test_qwen4_mapped_ple_table_flattens_rows_and_checks_geometry():
+    class Table:
+        descriptor = SimpleNamespace(rows=8, elements_per_row=2)
+
+        @staticmethod
+        def lookup(ids):
+            return np.arange(ids.size * 2, dtype=np.float32).reshape(*ids.shape, 2)
+
+    table = _MappedPLETable(Table(), head_dim=2)
+    row_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int64)
+    output = table.lookup(row_ids)
+
+    assert output.shape == (2, 4)
+    torch.testing.assert_close(output.float(), torch.arange(8).reshape(2, 4).float())
+    with pytest.raises(ValueError, match="geometry"):
+        _MappedPLETable(Table(), head_dim=3)
 
 
 @pytest.mark.parametrize(
@@ -609,7 +651,7 @@ def test_safetensors_ple_undersized_table_closes_open_handles(
             self._inner.__exit__(*args)
 
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model.safetensors.safe_open",
+        "tests.models.qwen4_exp.legacy_downstream.safetensors.safe_open",
         lambda path, **kwargs: TrackedHandle(path, **kwargs),
     )
     with pytest.raises(RuntimeError, match="has 4 rows, needs 6"):
@@ -786,7 +828,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=5, cached_len=0, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model.get_global_ctx",
+        "tests.models.qwen4_exp.legacy_downstream.get_global_ctx",
         lambda: SimpleNamespace(batch=full_batch),
     )
     expected = full._short_conv(values)
@@ -797,7 +839,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=2, cached_len=0, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model.get_global_ctx",
+        "tests.models.qwen4_exp.legacy_downstream.get_global_ctx",
         lambda: SimpleNamespace(batch=first_batch),
     )
     first = chunked._short_conv(values[:2])
@@ -806,7 +848,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=3, cached_len=2, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model.get_global_ctx",
+        "tests.models.qwen4_exp.legacy_downstream.get_global_ctx",
         lambda: SimpleNamespace(batch=second_batch),
     )
     second = chunked._short_conv(values[2:])
@@ -818,7 +860,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=1, cached_len=0, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model.get_global_ctx",
+        "tests.models.qwen4_exp.legacy_downstream.get_global_ctx",
         lambda: SimpleNamespace(batch=reset_batch),
     )
     actual_reset = chunked._short_conv(reused)
@@ -836,8 +878,9 @@ def test_qwen4_vision_entrypoint_fails_with_v1_scope_message() -> None:
 def test_qwen4_debug_hook_is_opt_in_and_captures_logits_and_state(monkeypatch) -> None:
     model = object.__new__(Qwen4ExpForCausalLM)
     model.model = SimpleNamespace(
-        forward=lambda input_ids: input_ids.float().unsqueeze(-1),
+        forward=lambda input_ids, batch=None: input_ids.float().unsqueeze(-1),
         debug_state=lambda: {1: {7: torch.tensor([3.0])}},
+        set_debug_observer=lambda observer: None,
     )
     model.lm_head = SimpleNamespace(forward=lambda hidden: torch.cat((hidden, -hidden), dim=-1))
     model._debug_hook = None
@@ -865,7 +908,8 @@ def test_qwen4_debug_hook_collects_opt_in_semantic_events(monkeypatch) -> None:
         def set_debug_observer(self, observer):
             self.observer = observer
 
-        def forward(self, input_ids):
+        def forward(self, input_ids, batch=None):
+            del batch
             if self.observer is not None:
                 self.observer(
                     "router",

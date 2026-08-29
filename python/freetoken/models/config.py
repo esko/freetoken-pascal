@@ -100,6 +100,9 @@ class KVCacheGroupSpec:
     index_num_kv_heads: int = 1
     index_compress_ratio: int = 1
     index_token_budget: int = 0
+    # QSA compression: one index-key row per index_ratio tokens (1 keeps the BSA/DSA
+    # per-token slab). The pool factory and the cost model divide by the same value.
+    index_ratio: int = 1
     # Attention-type taxonomy value for this group; drives the backend capability
     # matrix and (with the pool factory) selects the KV pool family.
     attn_type: AttnType = AttnType.FULL
@@ -137,6 +140,10 @@ class FullAttentionGroupConfig(BaseAttentionGroupConfig):
     mla: bool = False
     index_head_dim: int = 0
     num_index_layers: int = 0
+    # QSA compression ratio (> 1 -> AttnType.QSA): index-key rows are per token group,
+    # so the index slab costs index_head_dim * num_index_layers * 2 // index_ratio per token.
+    index_ratio: int = 1
+    index_token_budget: int = 0
 
 
 @dataclass(frozen=True)
@@ -182,7 +189,8 @@ class LinearGatedDeltaGroupConfig(BaseAttentionGroupConfig):
     key_head_dim: int
     value_head_dim: int
     conv_kernel_dim: int
-    output_gate: bool
+    # Output-gate activation name ("silu", "sigmoid"), forwarded to rms_norm_gated.
+    output_gate: str
 
 
 @dataclass(frozen=True)
@@ -211,14 +219,31 @@ AttentionGroupConfig: TypeAlias = (
 
 def _full_group_attn_type(group: FullAttentionGroupConfig) -> AttnType:
     # Mirrors the pool-factory split: mla + index slab -> DSAKVCache, mla -> MLAKVCache,
-    # GQA (non-mla) + index slab -> BSAKVCache (MiniMax-M3 block-sparse attention).
+    # GQA (non-mla) + index slab -> QSAKVCache when the index keys are compressed
+    # (index_ratio > 1, Qwen3.8-Flash-Next) else BSAKVCache (MiniMax-M3 block-sparse).
     if not group.mla:
         if group.index_head_dim > 0 and group.num_index_layers > 0:
-            return AttnType.BSA
+            return AttnType.QSA if group.index_ratio > 1 else AttnType.BSA
         return AttnType.FULL
     if group.index_head_dim > 0 and group.num_index_layers > 0:
         return AttnType.DSA
     return AttnType.MLA
+
+
+@dataclass(frozen=True)
+class SlotStateSpec:
+    """One extra per-request tensor riding the LinearStatePool slots.
+
+    Allocated as ``[max(1, len(layer_ids)), num_slots, *shape]`` and advanced, snapshot,
+    COW'd and rebuilt with the GDN state; the owner reads it back through
+    ``pool.slot_state(name, layer_id)``. ``shape`` is per slot and TP-replicated.
+    """
+
+    name: str
+    shape: Tuple[int, ...]
+    layer_ids: Tuple[int, ...] = ()
+    dtype: Any | None = None  # a torch dtype; None -> the pool's compute dtype
+    fill_value: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -325,6 +350,9 @@ class ModelConfig:
     # Exact source GGUF shard used to derive this config. Kept separate from quant labels:
     # heterogeneous checkpoints have no single model-wide quant type.
     gguf_model_path: str | None = None
+    # Extra per-request tensors riding the LinearStatePool slots (see SlotStateSpec);
+    # () for models without any. Requires a linear-attention group to ride on.
+    slot_states: Tuple[SlotStateSpec, ...] = ()
 
     @property
     def is_moe(self) -> bool:
@@ -445,6 +473,8 @@ class ModelConfig:
                         mla=group.mla,
                         index_head_dim=group.index_head_dim,
                         num_index_layers=group.num_index_layers,
+                        index_ratio=group.index_ratio,
+                        index_token_budget=group.index_token_budget,
                         attn_type=_full_group_attn_type(group),
                     )
                 )
