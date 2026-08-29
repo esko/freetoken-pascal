@@ -120,7 +120,7 @@ sources:
     upstream_ref: refs/pull/232/head
     ref: ad752c9970e0dc3f1b09aeec38235332149336ed
     license: Apache-2.0
-    role: Qwen3.8 Qwen4 QSA PLE and vision source; v1 imports text only
+    role: historical Qwen3.8 source retained only for downstream-specific text paths
     usage: imported
     responsible_issue: 11
     notice_required: true
@@ -251,6 +251,16 @@ sources:
         license: Apache-2.0
         header_policy: preserved by history
         responsible_issue: 77
+  - id: freetoken-ple-mmap-pr279
+    repository: https://github.com/FlashML-org/FreeToken
+    pull_request: 279
+    upstream_ref: refs/pull/279/head
+    ref: feaeaa31c0cea385a1c9ee107d4b1053f83b35db
+    license: Apache-2.0
+    role: immutable reference for upstream mmap PLE behavior
+    usage: reference
+    responsible_issue: 13
+    notice_required: false
   - id: freetoken-fp8-rowwise-safety
     repository: https://github.com/FlashML-org/FreeToken
     upstream_ref: refs/heads/main

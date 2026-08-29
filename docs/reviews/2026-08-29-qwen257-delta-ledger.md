@@ -4,6 +4,7 @@
 - Initial downstream base: `9ef3651309fe4058672f2cc92069238dea06be1b`
 - Upstream PR #257 merge: `bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40`
 - Exact synchronized upstream tip: `58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6`
+- PLE mmap donor reference only: PR #279 head `feaeaa31c0cea385a1c9ee107d4b1053f83b35db`
 - Validation class: H0/H1; no P4 evidence
 
 The exact upstream tip is a parent of the downstream reconciliation merge. The merged PR #257 implementation is authoritative for Qwen configuration, modular GDN/hyperconnection/MoE/PLE/model code, QSA cache/backend contracts, the arbitrary-`K` router, and associated tests. Closed PR #232 remains historical provenance only for downstream code that still differs for Pascal, GGUF, file-backed PLE, or reference testing.
@@ -32,3 +33,5 @@ The exact upstream tip is a parent of the downstream reconciliation merge. The m
 - Cache-zero and the CPU expert bridge remain available; upstream GPU/cache paths do not silently replace them.
 - Vision and MTP remain outside v1.
 - Triton QSA/router sources are present for H1 compile and future H2 qualification, but no P4 support or performance is claimed from hosted tests.
+
+Open PR #279 is not part of this merge. Its immutable head is recorded as a reference for issue #13; no source from that PR is imported here.
