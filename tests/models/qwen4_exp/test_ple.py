@@ -418,7 +418,9 @@ def test_track_snapshot_equals_a_prefill_stopped_at_the_boundary():
 
     stopped = torch.zeros_like(slab)
     _forward(layer, R[:CHUNK_SIZE], _meta([tokens[:CHUNK_SIZE]], [[EOS, EOS]], slots=[live]), stopped)
-    assert torch.equal(got, stopped[live])
+    # The dependency-light CPU fallback may group the two forwards differently; require
+    # numerical state equivalence while the CUDA kernel tests retain their exact path checks.
+    torch.testing.assert_close(got, stopped[live], rtol=1e-6, atol=1e-6)
 
 
 def test_prefix_hit_matches_the_uncached_run():
