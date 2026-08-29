@@ -482,7 +482,7 @@ def test_qwen4_ple_explicitly_loads_dedicated_artifact(tmp_path: Path) -> None:
     config = parse_gguf_config(_gguf_shim())
     args = replace(
         config.qwen4_args,
-        ple_embed_dim=160,
+        ple_embed_dim=2560,
         ple_head_vocab_sizes=(8, 8),
         ple_head_offsets=(0, 8),
     )
