@@ -60,6 +60,25 @@ def _pack_block(name: str, seed: int) -> np.ndarray:
     return block
 
 
+def _pack_adversarial_q5_k_block(qh_byte: int, seed: int) -> np.ndarray:
+    """Build a Q5_K block covering qh, scale/min and nibble windows."""
+    block = np.zeros(Q5_K_BLOCK_BYTES, dtype=np.uint8)
+    block[:2] = _half_bytes(0.75)
+    block[2:4] = _half_bytes(-0.5)
+    block[4:16] = np.array(
+        [0x00, 0x3F, 0x40, 0x7F, 0x80, 0xBF, 0xC0, 0xFF, 0x0F, 0xF0, 0x55, 0xAA],
+        dtype=np.uint8,
+    )
+    block[16:48] = np.uint8(qh_byte)
+    for pair in range(4):
+        begin = 48 + pair * 32
+        block[begin : begin + 32] = np.asarray(
+            [(seed + pair * 29 + lane * 17) & 0xFF for lane in range(32)],
+            dtype=np.uint8,
+        )
+    return block
+
+
 def _pack_rows(name: str, rows: int, input_dim: int, seed: int) -> np.ndarray:
     elements, _ = _FORMATS[name]
     blocks = input_dim // elements
@@ -365,6 +384,83 @@ def test_native_q5_1_multi_block_gemv_preserves_block_reduction_order(
     np.testing.assert_array_equal(bounded, actual)
 
 
+@pytest.mark.parametrize("qh_byte", [0x00, 0x55, 0xAA, 0xFF])
+def test_native_q5_k_expands_qh_scale_min_and_nibble_windows(
+    qh_byte: int,
+    mixed_native_library: Path | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise both scale/min encodings and every packed Q5_K subblock window."""
+    if mixed_native_library is None:
+        pytest.skip("g++ unavailable")
+    monkeypatch.setenv("FREETOKEN_MIXED_GEMV_NATIVE_LIB", str(mixed_native_library))
+    primitive = select_mixed_gemv_primitive("forced_avx2")
+    if primitive.isa == "scalar":
+        pytest.skip("AVX2/FMA unavailable")
+    block = _pack_adversarial_q5_k_block(qh_byte, seed=173)
+    expected = _independent_decode("Q5_K", block)
+    decoded = np.empty(Q5_K_BLOCK_ELEMENTS, dtype=np.float32)
+    primitive.decode(block, quant_name="Q5_K", out=decoded)
+    np.testing.assert_array_equal(decoded, expected)
+    vector = np.linspace(-3.0, 2.0, Q5_K_BLOCK_ELEMENTS, dtype=np.float32)
+    expected_dot = np.asarray(np.sum(expected * vector, dtype=np.float32), dtype=np.float32)
+    np.testing.assert_allclose(
+        primitive.dot(block, vector, quant_name="Q5_K"), expected_dot, rtol=3e-5, atol=3e-5
+    )
+
+
+def test_native_q5_k_production_width_gemv_preserves_block_order_and_canaries(
+    mixed_native_library: Path | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate 2560-input Q5_K rows, exact block accumulation and boundaries."""
+    if mixed_native_library is None:
+        pytest.skip("g++ unavailable")
+    monkeypatch.setenv("FREETOKEN_MIXED_GEMV_NATIVE_LIB", str(mixed_native_library))
+    primitive = select_mixed_gemv_primitive("forced_avx2")
+    if primitive.isa == "scalar":
+        pytest.skip("AVX2/FMA unavailable")
+    rows = _pack_rows("Q5_K", 3, 2560, seed=919)
+    blocks = rows.shape[1] // Q5_K_BLOCK_BYTES
+    for row in range(rows.shape[0]):
+        for block_index in range(blocks):
+            begin = block_index * Q5_K_BLOCK_BYTES
+            rows[row, begin : begin + Q5_K_BLOCK_BYTES] = _pack_adversarial_q5_k_block(
+                (0x00, 0x55, 0xAA, 0xFF)[(row + block_index) % 4],
+                seed=row * 31 + block_index,
+            )
+    vector = np.linspace(-500.0, 500.0, 2560, dtype=np.float32)
+
+    expected = np.zeros(rows.shape[0], dtype=np.float32)
+    for row in range(rows.shape[0]):
+        for block_index in range(blocks):
+            block_begin = block_index * Q5_K_BLOCK_BYTES
+            input_begin = block_index * Q5_K_BLOCK_ELEMENTS
+            expected[row] = np.float32(
+                expected[row]
+                + primitive.dot(
+                    rows[row, block_begin : block_begin + Q5_K_BLOCK_BYTES],
+                    vector[input_begin : input_begin + Q5_K_BLOCK_ELEMENTS],
+                    quant_name="Q5_K",
+                )
+            )
+    actual = np.empty(rows.shape[0], dtype=np.float32)
+    primitive.gemv(rows, 2560, vector, quant_name="Q5_K", out=actual)
+    np.testing.assert_array_equal(actual, expected)
+
+    independent = _independent_gemv("Q5_K", rows, 2560, vector)
+    np.testing.assert_allclose(actual, independent, rtol=3e-5, atol=3e-3)
+
+    canary = np.full(rows.nbytes + 64, 0xCD, dtype=np.uint8)
+    bounded_rows = canary[32:-32].reshape(rows.shape)
+    bounded_rows[:] = rows
+    bounded = np.empty(rows.shape[0], dtype=np.float32)
+    primitive.gemv(bounded_rows, 2560, vector, quant_name="Q5_K", out=bounded)
+    np.testing.assert_array_equal(canary[:32], 0xCD)
+    np.testing.assert_array_equal(canary[-32:], 0xCD)
+    np.testing.assert_array_equal(bounded, actual)
+
+
 @pytest.mark.parametrize("scale", [0.03125, -0.75, 1.0])
 def test_native_q8_0_vectorized_decode_preserves_signed_int8_codes(
     scale: float,
@@ -605,25 +701,30 @@ def test_mixed_dispatch_baseline_contains_no_forbidden_isa(
     scalar_native = mixed_native_library.parent / "scalar_native.o"
     avx2 = mixed_native_library.parent / "avx2.o"
     avx2_native = mixed_native_library.parent / "avx2_native.o"
+
+    def assert_no_evex_or_avx512(disassembly: str) -> None:
+        # A literal 0x62 can occur in VEX bytes or branch displacements.  EVEX
+        # is identified by 0x62 as the first instruction byte instead.
+        assert re.search(r":\s+62(?:\s|$)", disassembly) is None
+        assert "zmm" not in disassembly
+        assert "avx512" not in disassembly
+
     for baseline_object in (dispatch, scalar, dispatch_native, scalar_native):
         baseline_disassembly = subprocess.run(
             ["objdump", "-d", str(baseline_object)], check=True, capture_output=True, text=True
         ).stdout.lower()
         assert "zmm" not in baseline_disassembly
         assert "ymm" not in baseline_disassembly
-        assert "0x62" not in baseline_disassembly
+        assert_no_evex_or_avx512(baseline_disassembly)
         assert re.search(r"\b(v[a-z][a-z0-9]*)\b", baseline_disassembly) is None
     avx_disassembly = subprocess.run(
         ["objdump", "-d", str(avx2)], check=True, capture_output=True, text=True
     ).stdout.lower()
-    assert "zmm" not in avx_disassembly
-    assert "avx512" not in avx_disassembly
+    assert_no_evex_or_avx512(avx_disassembly)
     avx_native_disassembly = subprocess.run(
         ["objdump", "-d", str(avx2_native)], check=True, capture_output=True, text=True
     ).stdout.lower()
-    assert "zmm" not in avx_native_disassembly
-    assert "0x62" not in avx_native_disassembly
-    assert "avx512" not in avx_native_disassembly
+    assert_no_evex_or_avx512(avx_native_disassembly)
     loaded = ctypes.CDLL(str(mixed_native_library))
     loaded.freetoken_mixed_cpu_supports_avx2.restype = ctypes.c_int
     assert loaded.freetoken_mixed_cpu_supports_avx2() in {0, 1}
