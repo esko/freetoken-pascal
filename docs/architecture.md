@@ -89,6 +89,26 @@ implicit global state. The Issue #15 reference executor is serial, so later para
 backends must preserve request isolation, cancellation, accumulation, and telemetry
 semantics when those hooks become active.
 
+The H0 CPU topology foundation is the Torch-free `freetoken.moe.cpu_topology` module.
+`discover_cpu_topology()` reads the process affinity mask and injectable Linux sysfs
+topology data, groups only allowed SMT siblings, and reports immutable physical-core
+representatives with `full`, `partial`, or `logical-only` confidence, source, and
+fallback reason. `WorkerAffinityPolicy` produces an immutable `WorkerPlan` with exact
+worker CPU IDs, requested/effective thread counts, optional coordinator reservation,
+and an observable `planned-unverified` affinity status. Its default `mask` partition
+uses the discovered process mask as authoritative; `contiguous` and `numa` rank
+partitions require explicit selection. No affinity is changed by this module, and a
+NUMA plan is an intent only until target-host enforcement and placement validation.
+
+On 2026-08-29, the target-host Gorilla observation at source commit
+`e6a28d06a5ec6d76745730254b89a5b697fa5e53` reported two Xeon E5-2673 v3 sockets, 48
+online logical CPUs, SMT pairs `0/24` through `23/47`, and a process/cgroup mask of
+`0-47`. The descriptive sysfs result was 24 representatives (`0-23`), with node-0
+representatives `0-11` and node-1 representatives `12-23`; `numactl --hardware`
+reported local/remote distances of 10/21. This is H0 host-topology evidence only and
+does not claim worker affinity enforcement, memory placement, P4 availability, or
+performance.
+
 Issue #16 adds a Torch/CUDA-independent Q4_K adapter at this boundary. It decodes the
 GGML 144-byte, 256-value block layout and uses direct packed-row GEMV for compatible
 gate, up, or down descriptors, with a scalar implementation retained as the reference
