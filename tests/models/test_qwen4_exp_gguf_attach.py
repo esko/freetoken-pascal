@@ -19,6 +19,7 @@ from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
 from freetoken.models.qwen4_exp.model import (
     Qwen4ExpForCausalLM,
     Qwen4ExpModel,
+    _MoeExecutionContext,
     _SparseMoE,
 )
 
@@ -147,6 +148,38 @@ class _FakeAdapter:
         self.created.append(self)
 
 
+class _FakeBridge:
+    """Small lifecycle double for the eager attachment transaction."""
+
+    requires_moe_execution_context = True
+    created: ClassVar[list[_FakeBridge]] = []
+    fail_layer: int | None = None
+    busy_layer: int | None = None
+
+    def __init__(self, layer, *, transfer=None, cache_size=0, tp_size=1):
+        del cache_size, tp_size
+        layer_id = layer.layer_id
+        if layer_id == self.fail_layer:
+            raise RuntimeError(f"injected bridge {layer_id} failure")
+        self.layer = layer
+        self.layer_id = layer_id
+        self.transfer = transfer
+        self.closed = False
+        self.created.append(self)
+
+    def ensure_quiescent(self):
+        if self.layer_id == self.busy_layer:
+            raise RuntimeError("eager bridge is busy")
+
+    def close(self):
+        self.ensure_quiescent()
+        self.closed = True
+
+    @property
+    def host_weight_telemetry(self):
+        return {"layer_id": self.layer_id, "closed": self.closed}
+
+
 @pytest.fixture
 def fake_adapter(monkeypatch):
     from freetoken.models.qwen4_exp import gguf_attach as attach_module
@@ -155,6 +188,20 @@ def fake_adapter(monkeypatch):
     _FakeAdapter.fail_layer = None
     monkeypatch.setattr(attach_module, "QwenGGUFCpuMoELayer", _FakeAdapter)
     return _FakeAdapter
+
+
+@pytest.fixture
+def fake_eager_attachment(monkeypatch):
+    from freetoken.models.qwen4_exp import gguf_attach as attach_module
+
+    _FakeAdapter.created = []
+    _FakeAdapter.fail_layer = None
+    _FakeBridge.created = []
+    _FakeBridge.fail_layer = None
+    _FakeBridge.busy_layer = None
+    monkeypatch.setattr(attach_module, "QwenGGUFCpuMoELayer", _FakeAdapter)
+    monkeypatch.setattr(attach_module, "GGUFCpuEagerBridge", _FakeBridge)
+    return _FakeBridge
 
 
 def test_attach_builds_every_adapter_before_swapping_and_detach_restores_state(
@@ -248,6 +295,143 @@ def test_attach_rejects_closed_bundle_and_tp2_before_construction(fake_adapter, 
     with pytest.raises(ValueError, match="TP=1"):
         model.attach_gguf_cpu_expert_bundle(bundle)
     assert tuple(layer.mlp.experts for layer in model.layers.op_list) == originals
+
+
+def test_eager_attach_builds_bridges_before_swap_and_detach_closes_only_wrappers(
+    fake_eager_attachment,
+):
+    model, originals = _model()
+    bundle = _bundle()
+    before = model.state_dict()
+    transfer = object()
+
+    model.attach_gguf_cpu_eager_bridge(bundle, transfer=transfer)
+
+    bridges = tuple(layer.mlp.experts for layer in model.layers.op_list)
+    assert bridges == tuple(fake_eager_attachment.created)
+    assert all(bridge.transfer is transfer for bridge in bridges)
+    assert model.gguf_cpu_expert_telemetry() == {
+        index: {"layer_id": index, "closed": False} for index in range(3)
+    }
+
+    model.detach_gguf_cpu_expert_bundle()
+    assert tuple(layer.mlp.experts for layer in model.layers.op_list) == originals
+    assert all(bridge.closed for bridge in bridges)
+    assert bundle.closed is False
+    after = model.state_dict()
+    assert after.keys() == before.keys()
+    for name in before:
+        assert after[name] is before[name]
+
+
+def test_eager_middle_bridge_failure_closes_created_wrappers_without_mutation(
+    fake_eager_attachment,
+):
+    model, originals = _model()
+    fake_eager_attachment.fail_layer = 1
+
+    with pytest.raises(RuntimeError, match="injected bridge 1 failure"):
+        model.attach_gguf_cpu_eager_bridge(_bundle())
+
+    assert tuple(layer.mlp.experts for layer in model.layers.op_list) == originals
+    assert [bridge.closed for bridge in fake_eager_attachment.created] == [True]
+
+
+def test_eager_detach_busy_preflight_preserves_attachment(fake_eager_attachment):
+    model, originals = _model()
+    model.attach_gguf_cpu_eager_bridge(_bundle())
+    fake_eager_attachment.busy_layer = 1
+
+    with pytest.raises(RuntimeError, match="busy"):
+        model.detach_gguf_cpu_expert_bundle()
+
+    assert tuple(layer.mlp.experts for layer in model.layers.op_list) != originals
+    assert [bridge.closed for bridge in fake_eager_attachment.created] == [False, False, False]
+
+
+def test_eager_execution_context_rejects_before_router_or_shared_work():
+    events = []
+
+    class _Gate:
+        def forward(self, hidden):
+            events.append("router")
+            return torch.zeros(hidden.shape[0], 3)
+
+    class _Shared:
+        def forward(self, hidden):
+            events.append("shared")
+            return torch.zeros_like(hidden)
+
+    class _SharedGate:
+        def forward(self, hidden):
+            events.append("shared_gate")
+            return torch.zeros(hidden.shape[0], 1)
+
+    class _EagerRouted:
+        requires_moe_execution_context = True
+
+        def forward(self, **kwargs):
+            events.append("routed")
+            return torch.zeros_like(kwargs["hidden_states"])
+
+    moe = object.__new__(_SparseMoE)
+    moe.gate = _Gate()
+    moe.shared_expert = _Shared()
+    moe.shared_expert_gate = _SharedGate()
+    moe.experts = _EagerRouted()
+    hidden = torch.zeros(1, 4)
+
+    for context in (
+        _MoeExecutionContext("prefill", 1, False),
+        _MoeExecutionContext("decode", 2, False),
+        _MoeExecutionContext("decode", 1, True),
+    ):
+        events.clear()
+        with pytest.raises(ValueError, match="eager GGUF"):
+            moe.forward(hidden, execution_context=context)
+        assert events == []
+
+
+def test_eager_execution_context_is_explicit_and_preserves_shared_addition_order():
+    events = []
+
+    class _Gate:
+        def forward(self, hidden):
+            events.append("router")
+            return torch.zeros(hidden.shape[0], 3)
+
+    class _Shared:
+        def forward(self, hidden):
+            events.append("shared")
+            return torch.full_like(hidden, 2)
+
+    class _SharedGate:
+        def forward(self, hidden):
+            events.append("shared_gate")
+            return torch.full((hidden.shape[0], 1), 100.0)
+
+    class _EagerRouted:
+        requires_moe_execution_context = True
+
+        def forward(self, **kwargs):
+            events.append("routed")
+            assert kwargs["phase"] == "decode"
+            assert kwargs["group_size"] == 1
+            assert kwargs["graph_capture"] is False
+            assert kwargs["workspace"] is None
+            return torch.ones_like(kwargs["hidden_states"])
+
+    moe = object.__new__(_SparseMoE)
+    moe.gate = _Gate()
+    moe.shared_expert = _Shared()
+    moe.shared_expert_gate = _SharedGate()
+    moe.experts = _EagerRouted()
+    hidden = torch.zeros(1, 4)
+
+    actual = moe.forward(hidden, execution_context=_MoeExecutionContext("decode", 1, False))
+
+    assert events == ["router", "shared", "shared_gate", "routed"]
+    assert torch.equal(actual, torch.full_like(hidden, 3))
 
 
 def test_sparse_moe_keeps_adapter_drop_in_forward_contract():
