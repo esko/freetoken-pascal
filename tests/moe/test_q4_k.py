@@ -611,6 +611,59 @@ def test_q4_k_native_source_compiles_without_forbidden_isa(
                 dtype=np.float32,
             )
             np.testing.assert_allclose(output_rows, expected_rows, rtol=2e-5, atol=2e-5)
+
+        # Exercise every packed nibble window explicitly, including windows
+        # whose low and high nibbles are opposites.  This catches a SIMD lane
+        # selection error that random blocks do not guarantee to expose.
+        nibble_block = _pack_q4_k_block(127)
+        nibble_block[16:] = np.resize(
+            np.array([0x00, 0xFF, 0x0F, 0xF0, 0xA5, 0x5A], dtype=np.uint8),
+            Q4K_BLOCK_BYTES - 16,
+        )
+        nibble_vector = np.linspace(-3.0, 3.0, Q4K_BLOCK_ELEMENTS, dtype=np.float32)
+        nibble_expected = q4_k_dot(nibble_block, nibble_vector, mode="scalar")
+        np.testing.assert_allclose(
+            primitive.dot(nibble_block, nibble_vector),
+            nibble_expected,
+            rtol=2e-5,
+            atol=2e-5,
+        )
+
+        # Keep the established float32-per-block reduction order for a full
+        # production-width row.  A single fused accumulator can otherwise
+        # drift materially on cancellation-heavy multi-block inputs.
+        rows = _pack_q4_k_rows(2, 2560, seed=321)
+        reduction_vector = np.linspace(-500.0, 500.0, 2560, dtype=np.float32)
+        output_rows = np.empty(rows.shape[0], dtype=np.float32)
+        primitive.gemv(rows, 2560, reduction_vector, out=output_rows)
+        # Use the public AVX2 block dot as the oracle here.  Its vector lanes
+        # have a deliberately different FMA order from the scalar decoder;
+        # composing those dots isolates the cross-block reduction contract.
+        expected_rows = np.zeros(rows.shape[0], dtype=np.float32)
+        for row in range(rows.shape[0]):
+            for block in range(2560 // Q4K_BLOCK_ELEMENTS):
+                begin = block * Q4K_BLOCK_BYTES
+                expected_rows[row] = np.float32(
+                    expected_rows[row]
+                    + primitive.dot(
+                        rows[row, begin : begin + Q4K_BLOCK_BYTES],
+                        reduction_vector[
+                            block * Q4K_BLOCK_ELEMENTS : (block + 1) * Q4K_BLOCK_ELEMENTS
+                        ],
+                    )
+                )
+        np.testing.assert_array_equal(output_rows, expected_rows)
+
+        # Surround a strided production-width view with canaries so the native
+        # row/block loops cannot read or write beyond the declared row extent.
+        canary = np.full(rows.nbytes + 64, 0xCD, dtype=np.uint8)
+        bounded_rows = canary[32:-32].reshape(rows.shape)
+        bounded_rows[:] = rows
+        bounded_output = np.empty(rows.shape[0], dtype=np.float32)
+        primitive.gemv(bounded_rows, 2560, reduction_vector, out=bounded_output)
+        np.testing.assert_array_equal(canary[:32], 0xCD)
+        np.testing.assert_array_equal(canary[-32:], 0xCD)
+        np.testing.assert_array_equal(bounded_output, output_rows)
     else:
         assert primitive.isa == "scalar"
         assert primitive.fallback_reason == "avx2_unavailable"

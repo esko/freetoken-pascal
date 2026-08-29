@@ -75,18 +75,28 @@ freetoken_q4k_dot_avx2_impl(const uint8_t* block, const float* input) {
   const float d = half_to_float(d_bits);
   const float dmin = half_to_float(dmin_bits);
   __m256 accumulator = _mm256_setzero_ps();
-  alignas(32) float values[8];
+  const __m256i nibble_mask = _mm256_set1_epi32(0x0F);
   for (int subblock = 0; subblock < 8; ++subblock) {
     int scale;
     int minimum;
     scale_min(block + 4, subblock, &scale, &minimum);
-    const float factor = d * static_cast<float>(scale);
-    const float offset = dmin * static_cast<float>(minimum);
+    const __m256 factor_vector = _mm256_set1_ps(d * static_cast<float>(scale));
+    const __m256 offset_vector = _mm256_set1_ps(-dmin * static_cast<float>(minimum));
+    const int group = subblock / 2;
     for (int lane = 0; lane < 32; lane += 8) {
-      for (int j = 0; j < 8; ++j) {
-        values[j] = factor * q4_code(block, subblock, lane + j) - offset;
+      // Each packed byte contains two adjacent codes.  Expand eight low or
+      // high nibbles directly to eight float lanes and retain the scalar
+      // scale/minimum decode as the layout oracle.
+      const __m128i packed = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(
+          block + 16 + group * 32 + lane));
+      __m256i codes = _mm256_cvtepu8_epi32(packed);
+      if (subblock & 1) {
+        codes = _mm256_and_si256(_mm256_srli_epi32(codes, 4), nibble_mask);
+      } else {
+        codes = _mm256_and_si256(codes, nibble_mask);
       }
-      const __m256 weights = _mm256_load_ps(values);
+      const __m256 weights = _mm256_fmadd_ps(
+          _mm256_cvtepi32_ps(codes), factor_vector, offset_vector);
       const __m256 activations = _mm256_loadu_ps(input + subblock * 32 + lane);
       accumulator = _mm256_fmadd_ps(weights, activations, accumulator);
     }
