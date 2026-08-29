@@ -11,6 +11,7 @@ import freetoken.models.qwen4_exp as qwen4_exp
 import gguf
 import numpy as np
 import pytest
+from safetensors.torch import save_file
 import torch
 from freetoken.layers.moe import MoELayer
 from freetoken.moe.fused import FusedMoe
@@ -472,6 +473,68 @@ def test_qwen4_gguf_ple_maps_and_dequantizes_selected_rows(monkeypatch):
     assert embedding.telemetry()["source"] == "gguf-mmap"
     assert embedding.telemetry()["packed_bytes_read"] == 4 * 90
     embedding._gguf_ple.close()
+
+
+def _write_ple_safetensors_fixture(
+    folder: Path,
+    *,
+    shard_shapes: tuple[tuple[int, ...], ...] = ((2, 2), (2, 2)),
+    include_scale: bool = True,
+    scale_shape: tuple[int, ...] = (),
+) -> None:
+    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+    weight_map: dict[str, str] = {}
+    for shard_id, shape in enumerate(shard_shapes):
+        key = f"{prefix}.shard_{shard_id}.weight"
+        filename = f"ple-{shard_id:05d}.safetensors"
+        save_file(
+            {key: torch.zeros(shape, dtype=torch.float8_e4m3fn)},
+            str(folder / filename),
+        )
+        weight_map[key] = filename
+    if include_scale:
+        key = f"{prefix}.weight_scale"
+        filename = "ple-scale.safetensors"
+        save_file({key: torch.ones(scale_shape, dtype=torch.bfloat16)}, str(folder / filename))
+        weight_map[key] = filename
+    (folder / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map}), encoding="utf-8"
+    )
+
+
+def _tiny_safetensors_ple_embedding() -> _HostNGramEmbedding:
+    args = SimpleNamespace(
+        ngram_size=3,
+        heads_per_ngram=1,
+        eos_token_id=99,
+        ple_embed_dim=4,
+        split_ngram_parts=2,
+        ple_layer_multipliers=(3, 5, 7),
+        ple_head_vocab_sizes=(2, 2),
+        ple_head_offsets=(0, 2),
+    )
+    return _HostNGramEmbedding(SimpleNamespace(qwen4_args=args), layer_id=0)
+
+
+def test_safetensors_ple_rejects_missing_weight_scale(tmp_path: Path) -> None:
+    _write_ple_safetensors_fixture(tmp_path, include_scale=False)
+
+    with pytest.raises(RuntimeError, match="missing .*weight_scale"):
+        _tiny_safetensors_ple_embedding().load_host_weights(str(tmp_path))
+
+
+def test_safetensors_ple_rejects_nonuniform_shard_rows(tmp_path: Path) -> None:
+    _write_ple_safetensors_fixture(tmp_path, shard_shapes=((2, 2), (3, 2)))
+
+    with pytest.raises(RuntimeError, match="shard .* shape"):
+        _tiny_safetensors_ple_embedding().load_host_weights(str(tmp_path))
+
+
+def test_safetensors_ple_rejects_non_scalar_weight_scale(tmp_path: Path) -> None:
+    _write_ple_safetensors_fixture(tmp_path, scale_shape=(2,))
+
+    with pytest.raises(RuntimeError, match="must be one floating-point value"):
+        _tiny_safetensors_ple_embedding().load_host_weights(str(tmp_path))
 
 
 def test_qwen4_weight_names():
