@@ -94,6 +94,12 @@ prevalidation, all-layer adapter construction, middle-layer rollback, duplicate 
 closed/TP2 rejection, detach identity restoration, state-dict invariance, and
 caller-owned bundle lifetime. They do not claim full-model CPU execution or serving
 support.
+The eager bridge tests use a fake transfer seam to prove direct CPU execution, ordered
+hidden/router and hidden/route copies, exactly one adapter invocation, output device and
+dtype restoration, output independence, observer propagation, pre-transfer rejection of
+prefill/group/graph/workspace modes, stale-telemetry clearing, and close-versus-in-flight
+admission. They are H0 seam tests only; blocking real-CUDA copies and serving integration
+remain H2-unverified.
 
 ### MoE operation
 

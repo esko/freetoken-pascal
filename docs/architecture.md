@@ -141,6 +141,21 @@ detach restores the exact objects and never closes the caller-owned bundle. The
 model's CPU adapter does not make its CUDA-oriented trunk, router, shared expert, or
 LM head CPU-runnable, and the Engine registration guard remains in place.
 
+The standalone `GGUFCpuEagerBridge` is an explicit, model-neutral H0/H1 seam for a
+caller that already owns a Qwen GGUF CPU layer. Every call must name `phase="decode"`
+and uses `group_size=1`, TP1 and `cache_size=0`; prefill, grouped work, caller
+workspaces and CUDA graph capture fail before any transfer. CPU tensors call the
+adapter directly. Device tensors use an injected blocking transfer seam (or the
+blocking `Tensor.to` default) to copy hidden states and either router logits or prepared
+routes to CPU, execute the adapter exactly once, then copy the independent routed result
+back to the original device and dtype. The seam has no nonblocking, pinned-memory,
+stream, overlap or performance contract. Request-scoped telemetry reports the transfer
+path, copied fields/bytes, one CPU execution, adapter telemetry and errors; a failed
+request clears the prior success. Bridge close only rejects new work and never closes
+the borrowed layer or bundle. This is an experimental correctness boundary: real
+CUDA-transfer and serving evidence remain H2-unverified, and Engine/model defaults are
+unchanged.
+
 ## MoE decode operation
 
 For each layer and decode step:

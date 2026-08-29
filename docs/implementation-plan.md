@@ -74,6 +74,19 @@ The bundle remains caller-owned and is never closed by the model. This construct
 lifetime foundation does not make the CUDA-oriented trunk, router, shared expert, or
 LM head CPU-runnable, and it does not remove the Engine guard.
 
+The next standalone bridge is `GGUFCpuEagerBridge` in `moe/gguf_transfer.py`. It is an
+explicit experimental H0/H1 wrapper around the CPU layer, with a required
+`phase="decode"`, `group_size=1`, TP1 and `cache_size=0`. It rejects prefill, grouped
+requests, graph capture and caller workspaces before transfer. CPU inputs use the
+adapter directly; non-CPU inputs use an injected blocking transfer seam (defaulting to
+blocking `.to(device="cpu")`) for hidden states and either router logits or prepared
+routes, invoke the adapter once, and copy the independent routed result back to the
+original device and dtype. It makes no stream, pinned-memory, overlap or performance
+claim. Its request-scoped telemetry exposes transfer fields/bytes, CPU execution count,
+adapter telemetry and failure state, and `close()` only closes bridge admission. Engine,
+model attachment and CLI wiring remain unchanged until a later CUDA correctness gate;
+real CUDA transfer behavior is H2-unverified.
+
 ### Exit gate
 
 For each shipping quant and shape, the CPU expert output passes error tolerances against dequantize-plus-reference matmul. End-to-end cache-zero output remains correct.
