@@ -31,6 +31,25 @@ Runs on GitHub-hosted Linux without a GPU:
 - tiny model/config conversion;
 - deterministic state serialization without CUDA.
 
+Issue #18 also provides a bounded host-resource lifecycle observation:
+
+```text
+make stress-host-resources STRESS_ARGS="--seed 18 --iterations 8 --threads 2 --allow-fallback"
+```
+
+The harness allocates one tiny pageable policy-owned bank set at a time and drives the
+production `Q4KExecutor` through an embedded deterministic Q4/mixed-GEMV primitive
+seam. It checks serial/thread parity, concurrent `Busy`, cancellation
+rollback/recovery, and close races. Its JSON records the seed, executor/primitive
+census, actual current-allocation policy accounting separately from cumulative
+allocations, accepted/busy/cancelled/recovered counts, and before/after resource
+observations. `claim_status` is always `observation_only`: RSS, swap, descriptor, and
+thread observations are descriptive, not pass/fail evidence, and this test makes no
+no-swap, NUMA, staging, performance, or P4 claim. The fallback flag is only for
+CPU-only H0 jobs; omit it on a Torch host to require the production HostBank path. Use
+an outer process timeout in CI or on a host. The RSS report names its per-iteration
+sample maximum `sampled_max_after_iteration`; it is not a live or process-lifetime peak.
+
 ### H1 — CUDA compilation
 
 Runs in a CUDA 12.6 build container, GPU optional:

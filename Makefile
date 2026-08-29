@@ -1,4 +1,4 @@
-.PHONY: check dev-cpu dev-cuda126 docs-check env-clean env-cpu env-cuda126 expert-probe target-cpu-native target-cpu-expert-benchmark hosted-tests python-check toolchain-check
+.PHONY: check dev-cpu dev-cuda126 docs-check env-clean env-cpu env-cuda126 expert-probe stress-host-resources target-cpu-native target-cpu-expert-benchmark hosted-tests python-check toolchain-check
 
 check: docs-check python-check hosted-tests
 	pre-commit run --all-files
@@ -28,6 +28,9 @@ dev-cuda126: env-cuda126
 expert-probe:
 	PYTHONPATH=python python scripts/probe_qwen38_expert.py $(PROBE_ARGS)
 
+stress-host-resources:
+	timeout 60s env PYTHONPATH=python python scripts/stress_host_resources.py $(STRESS_ARGS)
+
 target-cpu-native:
 	python scripts/build_target_cpu_native.py $(NATIVE_ARGS)
 
@@ -39,14 +42,14 @@ env-clean:
 
 python-check:
 	python -m compileall -q python tests scripts benchmarks
-	ruff check scripts benchmarks/bench_qwen38_real_expert.py python/freetoken/kernel/pinned.py python/freetoken/moe/cpu_abi.py python/freetoken/moe/ggml_reference.py python/freetoken/moe/q4_k.py python/freetoken/moe/mixed_gemv.py python/freetoken/moe/gguf_cpu.py python/freetoken/moe/gguf_layer.py python/freetoken/moe/gguf_transfer.py python/freetoken/moe/real_artifact_probe.py python/freetoken/moe/real_artifact_benchmark.py python/freetoken/models/qwen4_exp/gguf_attach.py tests/models/test_qwen4_exp_gguf_attach.py tests/moe/test_host_banks.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py tests/moe/test_mixed_gemv.py tests/moe/test_q4_k_threaded.py tests/moe/test_q4_k_threaded_mixed.py tests/moe/test_gguf_cpu_bridge.py tests/moe/test_gguf_cpu_layer.py tests/moe/test_gguf_transfer.py tests/project/test_qwen38_real_expert_probe.py tests/project/test_qwen38_real_expert_benchmark.py
-	ruff format --check scripts benchmarks/bench_qwen38_real_expert.py python/freetoken/kernel/pinned.py python/freetoken/moe/cpu_abi.py python/freetoken/moe/ggml_reference.py python/freetoken/moe/q4_k.py python/freetoken/moe/mixed_gemv.py python/freetoken/moe/gguf_cpu.py python/freetoken/moe/real_artifact_probe.py python/freetoken/moe/real_artifact_benchmark.py python/freetoken/models/qwen4_exp/gguf_attach.py tests/models/test_qwen4_exp_gguf_attach.py tests/moe/test_host_banks.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py tests/moe/test_mixed_gemv.py tests/moe/test_q4_k_threaded.py tests/moe/test_q4_k_threaded_mixed.py tests/moe/test_gguf_cpu_bridge.py tests/moe/test_gguf_cpu_layer.py tests/moe/test_gguf_transfer.py tests/project/test_qwen38_real_expert_probe.py tests/project/test_qwen38_real_expert_benchmark.py
+	ruff check scripts benchmarks/bench_qwen38_real_expert.py python/freetoken/kernel/pinned.py python/freetoken/moe/cpu_abi.py python/freetoken/moe/ggml_reference.py python/freetoken/moe/q4_k.py python/freetoken/moe/mixed_gemv.py python/freetoken/moe/gguf_cpu.py python/freetoken/moe/gguf_layer.py python/freetoken/moe/gguf_transfer.py python/freetoken/moe/real_artifact_probe.py python/freetoken/moe/real_artifact_benchmark.py python/freetoken/models/qwen4_exp/gguf_attach.py tests/models/test_qwen4_exp_gguf_attach.py tests/moe/test_host_banks.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py tests/moe/test_mixed_gemv.py tests/moe/test_q4_k_threaded.py tests/moe/test_q4_k_threaded_mixed.py tests/moe/test_gguf_cpu_bridge.py tests/moe/test_gguf_cpu_layer.py tests/moe/test_gguf_transfer.py tests/project/test_qwen38_real_expert_probe.py tests/project/test_qwen38_real_expert_benchmark.py tests/moe/test_stress_host_resources.py
+	ruff format --check scripts benchmarks/bench_qwen38_real_expert.py python/freetoken/kernel/pinned.py python/freetoken/moe/cpu_abi.py python/freetoken/moe/ggml_reference.py python/freetoken/moe/q4_k.py python/freetoken/moe/mixed_gemv.py python/freetoken/moe/gguf_cpu.py python/freetoken/moe/real_artifact_probe.py python/freetoken/moe/real_artifact_benchmark.py python/freetoken/models/qwen4_exp/gguf_attach.py tests/models/test_qwen4_exp_gguf_attach.py tests/moe/test_host_banks.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py tests/moe/test_mixed_gemv.py tests/moe/test_q4_k_threaded.py tests/moe/test_q4_k_threaded_mixed.py tests/moe/test_gguf_cpu_bridge.py tests/moe/test_gguf_cpu_layer.py tests/moe/test_gguf_transfer.py tests/project/test_qwen38_real_expert_probe.py tests/project/test_qwen38_real_expert_benchmark.py tests/moe/test_stress_host_resources.py
 	ruff check python/freetoken/moe/cpu_topology.py tests/moe/test_cpu_topology.py
 	ruff format --check python/freetoken/moe/cpu_topology.py tests/moe/test_cpu_topology.py
 	ruff check python/freetoken/moe/cpu_affinity.py tests/moe/test_cpu_affinity.py tests/moe/test_cpu_moe_affinity_native.py
 	ruff format --check python/freetoken/moe/cpu_affinity.py tests/moe/test_cpu_affinity.py tests/moe/test_cpu_moe_affinity_native.py
 
 hosted-tests:
-	PYTHONPATH=python pytest -q tests/project tests/daemon tests/models/test_qwen4_exp_gguf_attach.py tests/moe/test_host_banks.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py tests/moe/test_mixed_gemv.py tests/moe/test_q4_k_threaded.py tests/moe/test_q4_k_threaded_mixed.py tests/moe/test_gguf_cpu_bridge.py tests/moe/test_gguf_cpu_layer.py tests/moe/test_gguf_transfer.py
+	PYTHONPATH=python pytest -q tests/project tests/daemon tests/models/test_qwen4_exp_gguf_attach.py tests/moe/test_host_banks.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py tests/moe/test_mixed_gemv.py tests/moe/test_q4_k_threaded.py tests/moe/test_q4_k_threaded_mixed.py tests/moe/test_gguf_cpu_bridge.py tests/moe/test_gguf_cpu_layer.py tests/moe/test_gguf_transfer.py tests/moe/test_stress_host_resources.py
 	PYTHONPATH=python pytest -q tests/moe/test_cpu_topology.py
 	PYTHONPATH=python pytest -q tests/moe/test_cpu_affinity.py tests/moe/test_cpu_moe_affinity_native.py
