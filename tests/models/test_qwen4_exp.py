@@ -24,8 +24,8 @@ from freetoken.models.qwen4_exp.gguf import (
     _grouped_to_tiled_indices,
     _ungroup_v,
 )
-from freetoken.models.qwen4_exp.model import (
-    Qwen4ExpForCausalLM,
+from freetoken.models.qwen4_exp.model import Qwen4ExpForCausalLM
+from tests.models.qwen4_exp.legacy_downstream import (
     _HostNGramEmbedding,
     _ple_request_tokens,
     _PLELayer,
@@ -614,7 +614,7 @@ def test_safetensors_ple_undersized_table_closes_open_handles(
             self._inner.__exit__(*args)
 
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model_legacy.safetensors.safe_open",
+        "tests.models.qwen4_exp.legacy_downstream.safetensors.safe_open",
         lambda path, **kwargs: TrackedHandle(path, **kwargs),
     )
     with pytest.raises(RuntimeError, match="has 4 rows, needs 6"):
@@ -791,7 +791,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=5, cached_len=0, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model_legacy.get_global_ctx",
+        "tests.models.qwen4_exp.legacy_downstream.get_global_ctx",
         lambda: SimpleNamespace(batch=full_batch),
     )
     expected = full._short_conv(values)
@@ -802,7 +802,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=2, cached_len=0, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model_legacy.get_global_ctx",
+        "tests.models.qwen4_exp.legacy_downstream.get_global_ctx",
         lambda: SimpleNamespace(batch=first_batch),
     )
     first = chunked._short_conv(values[:2])
@@ -811,7 +811,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=3, cached_len=2, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model_legacy.get_global_ctx",
+        "tests.models.qwen4_exp.legacy_downstream.get_global_ctx",
         lambda: SimpleNamespace(batch=second_batch),
     )
     second = chunked._short_conv(values[2:])
@@ -823,7 +823,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=1, cached_len=0, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model_legacy.get_global_ctx",
+        "tests.models.qwen4_exp.legacy_downstream.get_global_ctx",
         lambda: SimpleNamespace(batch=reset_batch),
     )
     actual_reset = chunked._short_conv(reused)

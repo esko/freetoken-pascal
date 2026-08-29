@@ -28,12 +28,6 @@ from .gguf_attach import (
 from .hc import GatedResidual
 from .moe import Qwen4ExpMoE
 from .ple import PLELayer, PLETableBackend, ZeroTable, build_ple_metadata, commit_ngram_context
-from .model_legacy import (
-    _HostNGramEmbedding,
-    _ple_request_tokens,
-    _PLELayer,
-    build_ngram_ids,
-)
 
 if TYPE_CHECKING:
     from freetoken.core import Batch
@@ -491,8 +485,4 @@ __all__ = [
     "Qwen4ExpDecoderLayer",
     "Qwen4ExpForCausalLM",
     "Qwen4ExpModel",
-    "_HostNGramEmbedding",
-    "_ple_request_tokens",
-    "_PLELayer",
-    "build_ngram_ids",
 ]
