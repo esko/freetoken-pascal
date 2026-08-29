@@ -94,6 +94,7 @@ class _RequestProgress:
     """Mutable, request-local facts retained when an eager call fails."""
 
     started: int
+    generation: int
     phase: str | None
     group_size: int | None
     input_device: str | None = None
@@ -201,6 +202,9 @@ class GGUFCpuEagerBridge:
         self._layer = layer
         self._transfer = transfer if transfer is not None else BlockingTensorTransfer()
         self._lock = threading.Lock()
+        self._telemetry_lock = threading.Lock()
+        self._next_generation = 0
+        self._committed_generation = 0
         self._closed = False
         self._last_telemetry: GGUFEagerBridgeTelemetry | None = None
         self._last_error_telemetry: GGUFEagerBridgeTelemetry | None = None
@@ -216,11 +220,13 @@ class GGUFCpuEagerBridge:
 
     @property
     def last_telemetry(self) -> GGUFEagerBridgeTelemetry | None:
-        return self._last_telemetry
+        with self._telemetry_lock:
+            return self._last_telemetry
 
     @property
     def last_error_telemetry(self) -> GGUFEagerBridgeTelemetry | None:
-        return self._last_error_telemetry
+        with self._telemetry_lock:
+            return self._last_error_telemetry
 
     @property
     def host_weight_telemetry(self) -> dict[str, object]:
@@ -231,11 +237,12 @@ class GGUFCpuEagerBridge:
             value.update(adapter_telemetry())
         elif isinstance(adapter_telemetry, Mapping):
             value.update(adapter_telemetry)
-        value["eager_bridge_telemetry"] = (
-            None if self._last_telemetry is None else self._last_telemetry.as_dict()
-        )
+        with self._telemetry_lock:
+            telemetry = self._last_telemetry
+            error_telemetry = self._last_error_telemetry
+        value["eager_bridge_telemetry"] = None if telemetry is None else telemetry.as_dict()
         value["eager_bridge_error_telemetry"] = (
-            None if self._last_error_telemetry is None else self._last_error_telemetry.as_dict()
+            None if error_telemetry is None else error_telemetry.as_dict()
         )
         return value
 
@@ -311,13 +318,13 @@ class GGUFCpuEagerBridge:
         method: str,
     ) -> Any:
         started = time.perf_counter_ns()
-        progress = _RequestProgress(
+        progress = self._new_request_progress(
             started=started,
             phase=phase,
-            group_size=(int(group_size) if isinstance(group_size, Integral) else None),
+            group_size=group_size,
         )
-        self._begin_request()
         try:
+            self._begin_request()
             self._validate_request_mode(
                 phase,
                 group_size,
@@ -339,7 +346,7 @@ class GGUFCpuEagerBridge:
                 # request validated before close() must not execute after close() wins.
                 if self._closed:
                     raise RuntimeError("GGUF eager bridge is closed")
-                return self._execute_locked(
+                output, telemetry = self._execute_locked(
                     hidden_states,
                     route_inputs,
                     phase=phase,
@@ -349,6 +356,8 @@ class GGUFCpuEagerBridge:
                     method=method,
                     progress=progress,
                 )
+                self._commit_success(progress, telemetry)
+                return output
             finally:
                 self._lock.release()
         except Exception as error:
@@ -357,8 +366,7 @@ class GGUFCpuEagerBridge:
                 hidden_states=hidden_states,
                 progress=progress,
             )
-            self._last_telemetry = None
-            self._last_error_telemetry = telemetry
+            self._commit_error(progress, telemetry)
             raise
 
     def _execute_locked(
@@ -372,7 +380,7 @@ class GGUFCpuEagerBridge:
         debug_observer: Callable[[str, dict[str, object]], None] | None,
         method: str,
         progress: _RequestProgress,
-    ) -> Any:
+    ) -> tuple[Any, GGUFEagerBridgeTelemetry]:
         original_device = _device(hidden_states)
         original_dtype = _dtype(hidden_states)
         original_shape = _shape(hidden_states)
@@ -477,7 +485,7 @@ class GGUFCpuEagerBridge:
             if _dtype(output) != original_dtype or _shape(output) != original_shape:
                 raise RuntimeError("transfer seam changed routed result shape or dtype")
 
-        self._last_telemetry = GGUFEagerBridgeTelemetry(
+        telemetry = GGUFEagerBridgeTelemetry(
             backend=self._BACKEND,
             layer_id=getattr(self._layer, "layer_id", None),
             phase=phase,
@@ -497,8 +505,7 @@ class GGUFCpuEagerBridge:
             fallback_reason=(None if not transfers else "explicit_eager_cpu_bridge"),
             elapsed_ns=time.perf_counter_ns() - progress.started,
         )
-        self._last_error_telemetry = None
-        return output
+        return output, telemetry
 
     @staticmethod
     def _validate_request_mode(
@@ -536,8 +543,51 @@ class GGUFCpuEagerBridge:
     def _begin_request(self) -> None:
         if self._closed:
             raise RuntimeError("GGUF eager bridge is closed")
-        self._last_telemetry = None
-        self._last_error_telemetry = None
+
+    def _new_request_progress(
+        self,
+        *,
+        started: int,
+        phase: str | None,
+        group_size: Any,
+    ) -> _RequestProgress:
+        with self._telemetry_lock:
+            self._next_generation += 1
+            generation = self._next_generation
+            # A newly started request is the newest telemetry generation, even
+            # while it is still validating or waiting for admission.
+            self._last_telemetry = None
+            self._last_error_telemetry = None
+        return _RequestProgress(
+            started=started,
+            generation=generation,
+            phase=phase,
+            group_size=(int(group_size) if isinstance(group_size, Integral) else None),
+        )
+
+    def _commit_success(
+        self,
+        progress: _RequestProgress,
+        telemetry: GGUFEagerBridgeTelemetry,
+    ) -> None:
+        with self._telemetry_lock:
+            if progress.generation < self._committed_generation:
+                return
+            self._committed_generation = progress.generation
+            self._last_telemetry = telemetry
+            self._last_error_telemetry = None
+
+    def _commit_error(
+        self,
+        progress: _RequestProgress,
+        telemetry: GGUFEagerBridgeTelemetry,
+    ) -> None:
+        with self._telemetry_lock:
+            if progress.generation < self._committed_generation:
+                return
+            self._committed_generation = progress.generation
+            self._last_telemetry = None
+            self._last_error_telemetry = telemetry
 
     def _reject(
         self,
@@ -548,15 +598,21 @@ class GGUFCpuEagerBridge:
         group_size: int | None,
     ) -> Any:
         started = time.perf_counter_ns()
-        progress = _RequestProgress(started=started, phase=phase, group_size=group_size)
-        self._begin_request()
+        progress = self._new_request_progress(
+            started=started,
+            phase=phase,
+            group_size=group_size,
+        )
+        try:
+            self._begin_request()
+        except Exception as request_error:
+            error = request_error
         telemetry = self._make_error_telemetry(
             error,
             hidden_states=hidden_states,
             progress=progress,
         )
-        self._last_telemetry = None
-        self._last_error_telemetry = telemetry
+        self._commit_error(progress, telemetry)
         raise error
 
     def _make_error_telemetry(

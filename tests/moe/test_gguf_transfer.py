@@ -310,6 +310,50 @@ def test_failed_request_clears_success_telemetry_and_does_not_return_stale_outpu
     assert bridge.last_error_telemetry.error == "UnsupportedGGUFCpuConfiguration"
 
 
+def test_delayed_older_error_cannot_overwrite_later_success_telemetry() -> None:
+    error_started = Event()
+    release_error = Event()
+
+    class _DelayedErrorBridge(GGUFCpuEagerBridge):
+        def _make_error_telemetry(self, error, *, hidden_states, progress):
+            if progress.generation == 1:
+                error_started.set()
+                assert release_error.wait(2)
+            return super()._make_error_telemetry(
+                error,
+                hidden_states=hidden_states,
+                progress=progress,
+            )
+
+    layer = _Layer()
+    bridge = _DelayedErrorBridge(layer)
+    hidden, weights, ids = _inputs()
+    failures: list[Exception] = []
+
+    def fail_old_request() -> None:
+        try:
+            bridge.routed_forward(hidden, weights, ids, phase="prefill")
+        except Exception as error:
+            failures.append(error)
+
+    worker = Thread(target=fail_old_request, daemon=True)
+    worker.start()
+    assert error_started.wait(2)
+
+    bridge.routed_forward(hidden, weights, ids, phase="decode")
+    assert bridge.last_telemetry is not None
+    assert bridge.last_telemetry.phase == "decode"
+
+    release_error.set()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], ValueError)
+    assert bridge.last_telemetry is not None
+    assert bridge.last_telemetry.phase == "decode"
+    assert bridge.last_error_telemetry is None
+
+
 def test_close_rejects_in_flight_request_and_never_closes_borrowed_layer() -> None:
     layer = _Layer()
     layer.block = True
