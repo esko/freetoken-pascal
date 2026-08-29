@@ -35,6 +35,7 @@ from enum import Enum
 
 import torch
 
+from freetoken.moe.host_memory import SwapProbe, probe_swap
 from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
@@ -147,6 +148,14 @@ class HostBankAccounting:
     layers: tuple[str, ...] = ()
     numa_policy: NumaPolicy = NumaPolicy.PREFERRED
     numa_node: int | None = None
+    require_no_swap: bool = False
+    swap_status: str = "not-requested"
+    swap_probe_source: str | None = None
+    swap_probe_errors: tuple[str, ...] = ()
+    vm_swap_bytes: int | None = None
+    swap_total_bytes: int | None = None
+    swap_free_bytes: int | None = None
+    active_swap_devices: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -161,6 +170,22 @@ class HostBankAccounting:
             "applied_layers": list(self.applied_layers),
             "numa_policy": self.numa_policy.value,
             "numa_node": self.numa_node,
+            "require_no_swap": self.require_no_swap,
+            "swap_status": self.swap_status,
+            "swap_probe_source": self.swap_probe_source,
+            "swap_probe_errors": list(self.swap_probe_errors),
+            "vm_swap_bytes": self.vm_swap_bytes,
+            "process_vm_swap_bytes": self.vm_swap_bytes,
+            "swap_total_bytes": self.swap_total_bytes,
+            "swap_free_bytes": self.swap_free_bytes,
+            "active_swap_devices": list(self.active_swap_devices),
+            "no_swap_observed": (
+                True
+                if self.swap_status == "clear"
+                else False
+                if self.swap_status in ("swap-active", "process-swapped")
+                else None
+            ),
         }
 
 
@@ -182,8 +207,11 @@ class HostBankPolicy:
     selected_layers: tuple[int, ...] | None = None
     numa_policy: NumaPolicy | str = NumaPolicy.PREFERRED
     numa_node: int | None = None
+    require_no_swap: bool = False
+    swap_probe_reader: Callable[[str], str] | None = field(default=None, repr=False, compare=False)
     accounting: HostBankAccounting = field(init=False)
     _plan: HostBankPlan | None = field(default=None, init=False, repr=False)
+    _swap_probe: SwapProbe | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._validate_configuration()
@@ -191,11 +219,14 @@ class HostBankPolicy:
             strategy=self.strategy,
             numa_policy=self.numa_policy,
             numa_node=self.numa_node,
+            require_no_swap=self.require_no_swap,
         )
 
     def _validate_configuration(self) -> None:
         """Normalize and validate mutable configuration before every preflight."""
         self.strategy = _normalize_strategy(self.strategy)
+        if not isinstance(self.require_no_swap, bool):
+            raise ValueError("require_no_swap must be a boolean")
         try:
             self.numa_policy = (
                 self.numa_policy
@@ -238,6 +269,50 @@ class HostBankPolicy:
             ):
                 raise ValueError("selected_layers must contain non-negative integer IDs")
 
+    def _record_swap_probe(self, probe: SwapProbe) -> None:
+        self._swap_probe = probe
+        self.accounting.require_no_swap = self.require_no_swap
+        self.accounting.swap_status = probe.status
+        self.accounting.swap_probe_source = probe.source
+        self.accounting.swap_probe_errors = probe.errors
+        self.accounting.vm_swap_bytes = probe.vm_swap_bytes
+        self.accounting.swap_total_bytes = probe.swap_total_bytes
+        self.accounting.swap_free_bytes = probe.swap_free_bytes
+        self.accounting.active_swap_devices = probe.active_swap_devices
+
+    def _reset_preflight_state(self) -> None:
+        """Discard a prior reservation before any new validation or probe."""
+        self._plan = None
+        self._swap_probe = None
+        self.accounting = HostBankAccounting(
+            strategy=HostBankStrategy.PAGEABLE,
+            require_no_swap=self.require_no_swap,
+        )
+
+    def preflight_swap(self, *, probe: SwapProbe | None = None) -> SwapProbe:
+        """Observe swap state and enforce ``require_no_swap`` before allocation.
+
+        The observation is procfs-only and point-in-time. It deliberately does
+        not attempt to alter swap, lock pages, or infer swap state from an
+        allocation attempt.
+        """
+        self._reset_preflight_state()
+        self.validate_for_config()
+        if probe is None:
+            probe = probe_swap(read_text=self.swap_probe_reader)
+        if not isinstance(probe, SwapProbe):
+            raise ValueError("swap preflight requires a SwapProbe result")
+        self._record_swap_probe(probe)
+        if self.require_no_swap and not probe.no_swap:
+            detail = "; ".join(probe.errors) or probe.status
+            raise ValueError(f"require_no_swap preflight failed: {probe.status}: {detail}")
+        return probe
+
+    @property
+    def swap_probe(self) -> SwapProbe | None:
+        """The latest read-only swap observation, if preparation reached it."""
+        return self._swap_probe
+
     def validate_for_config(self) -> None:
         """Validate strategy-level requirements before a model is loaded."""
         self._validate_configuration()
@@ -268,20 +343,20 @@ class HostBankPolicy:
         num_layers: int,
     ) -> HostBankPlan:
         """Validate all limits and produce the per-layer decision before allocation."""
-        self._plan = None
-        # Invalidate prior telemetry before any operation that can fail.  An
-        # invalid mutated policy must not continue exposing a successful old
-        # reservation as though it were still active.
-        self.accounting = HostBankAccounting(strategy=HostBankStrategy.PAGEABLE)
+        self._reset_preflight_state()
         # Policy fields remain public for compatibility, so callers may mutate
         # them after construction.  Revalidate before deriving any allocation
         # decision to keep that mutation fail-closed.
         self.validate_for_config()
+        swap_probe = self.preflight_swap() if self.require_no_swap else None
         self.accounting = HostBankAccounting(
             strategy=self.strategy,
             numa_policy=self.numa_policy,
             numa_node=self.numa_node,
+            require_no_swap=self.require_no_swap,
         )
+        if swap_probe is not None:
+            self._record_swap_probe(swap_probe)
         if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers <= 0:
             raise ValueError(f"num_layers must be a positive integer, got {num_layers}")
         if not specs:
@@ -301,21 +376,22 @@ class HostBankPolicy:
             bytes_per_bank = _aligned_nbytes(tuple(shape), dtype)
             for layer in range(num_layers):
                 per_layer[layer] += bytes_per_bank
-        return self._prepare_layer_bytes(per_layer)
+        return self._prepare_layer_bytes(per_layer, swap_probe=swap_probe)
 
     def prepare_layer_bytes(
         self,
         layer_bytes: Sequence[int],
         *,
         source_bytes: int | None = None,
+        swap_probe: SwapProbe | None = None,
     ) -> HostBankPlan:
         """Prepare an exact per-layer allocation plan supplied by a checkpoint index."""
-        self._plan = None
-        # Invalidate prior telemetry before any operation that can fail.  An
-        # invalid mutated policy must not continue exposing a successful old
-        # reservation as though it were still active.
-        self.accounting = HostBankAccounting(strategy=HostBankStrategy.PAGEABLE)
+        self._reset_preflight_state()
         self.validate_for_config()
+        if self.require_no_swap:
+            swap_probe = self.preflight_swap(probe=swap_probe)
+        elif swap_probe is not None:
+            self._record_swap_probe(swap_probe)
         per_layer = list(layer_bytes)
         if not per_layer or any(
             isinstance(value, bool) or not isinstance(value, int) or value <= 0
@@ -330,13 +406,16 @@ class HostBankPolicy:
             or source_bytes < 0
         ):
             raise ValueError("source_bytes must be a non-negative integer")
-        return self._prepare_layer_bytes(per_layer, source_bytes=source_bytes)
+        return self._prepare_layer_bytes(
+            per_layer, source_bytes=source_bytes, swap_probe=swap_probe
+        )
 
     def _prepare_layer_bytes(
         self,
         per_layer: Sequence[int],
         *,
         source_bytes: int | None = None,
+        swap_probe: SwapProbe | None,
     ) -> HostBankPlan:
         num_layers = len(per_layer)
         if source_bytes is None:
@@ -410,7 +489,10 @@ class HostBankPolicy:
             layers=labels,
             numa_policy=self.numa_policy,
             numa_node=self.numa_node,
+            require_no_swap=self.require_no_swap,
         )
+        if swap_probe is not None:
+            self._record_swap_probe(swap_probe)
         return plan
 
     @property

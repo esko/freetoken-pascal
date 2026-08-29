@@ -106,12 +106,17 @@ def prepare_ftw_host_bank_policy(
     *,
     num_layers: int,
     policy,
+    swap_probe=None,
 ):
     """Preflight every FTW expert-bank allocation from index metadata only."""
     if policy is None:
         return None
     if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers <= 0:
         raise ValueError(f"num_layers must be a positive integer, got {num_layers}")
+    # Swap admission is intentionally before opening the index: an explicit
+    # no-swap policy must not inspect checkpoint metadata before it can fail.
+    if policy.require_no_swap:
+        swap_probe = policy.preflight_swap(probe=swap_probe)
     with open(os.path.join(path, INDEX_NAME), encoding="utf-8") as f:
         index = json.load(f)
     if index.get("format") != FORMAT_TAG:
@@ -193,7 +198,7 @@ def prepare_ftw_host_bank_policy(
             if expected != int(entry["nbytes"]):
                 raise ValueError(f"FTW bank {base!r} layer {layer_id} byte count is invalid")
             layer_bytes[layer_id] += max(ALIGN, _align_up(expected))
-    return policy.prepare_layer_bytes(layer_bytes)
+    return policy.prepare_layer_bytes(layer_bytes, swap_probe=swap_probe)
 
 
 def is_ftw_checkpoint(path: str) -> bool:
@@ -511,6 +516,7 @@ def load_ftw_banks(
     path: str, *, num_layers: int, workers: int = 8, chunk: int = _DEFAULT_CHUNK,
     layer_residency: list[str] | None = None,
     host_bank_policy=None,
+    swap_probe=None,
 ):
     """Reconstruct the offload :class:`ExpertBanks` from the FTW's ``experts_bank``
     entries, on the per-layer host bank contract (one ``[num_experts, ...]``
@@ -551,6 +557,7 @@ def load_ftw_banks(
             path,
             num_layers=num_layers,
             policy=host_bank_policy,
+            swap_probe=swap_probe,
         )
         residency = list(host_bank_policy.plan.layer_residency)
     else:

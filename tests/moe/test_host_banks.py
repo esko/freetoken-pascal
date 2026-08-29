@@ -11,6 +11,15 @@ def _specs() -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
     }
 
 
+def _swap_reader(*, vm_swap: str = "0 kB", total: str = "0 kB", free: str = "0 kB"):
+    files = {
+        "/proc/self/status": f"Name:\tworker\nVmSwap: {vm_swap}\n",
+        "/proc/meminfo": f"SwapTotal: {total}\nSwapFree: {free}\n",
+        "/proc/swaps": "Filename Type Size Used Priority\n",
+    }
+    return files.__getitem__
+
+
 def test_default_host_bank_policy_is_pageable_and_reports_per_layer_accounting():
     from freetoken.moe.host_banks import (
         HostBankPolicy,
@@ -38,6 +47,103 @@ def test_default_host_bank_policy_is_pageable_and_reports_per_layer_accounting()
     assert report["source_bytes"] == 3 * 2 * 4096
     assert report["pinned_bytes"] == 0
     assert report["layers"] == ["pageable", "pageable", "pageable"]
+
+
+def test_no_swap_preflight_reports_probe_and_allows_clear_system():
+    from freetoken.moe.host_banks import HostBankPolicy
+
+    policy = HostBankPolicy(
+        strategy="pageable",
+        require_no_swap=True,
+        swap_probe_reader=_swap_reader(),
+    )
+    policy.prepare(_specs(), num_layers=1)
+
+    report = policy.accounting.as_dict()
+    assert report["require_no_swap"] is True
+    assert report["swap_status"] == "clear"
+    assert report["no_swap_observed"] is True
+    assert report["swap_probe_source"] == "procfs"
+    assert report["vm_swap_bytes"] == 0
+
+
+def test_no_swap_preflight_fails_before_host_bank_allocation(monkeypatch):
+    from freetoken.moe.host_banks import HostBank, HostBankPolicy, alloc_layer_banks
+
+    policy = HostBankPolicy(
+        strategy="pageable",
+        require_no_swap=True,
+        swap_probe_reader=_swap_reader(total="1024 kB", free="1024 kB"),
+    )
+    called = False
+
+    def unexpected_init(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("swap failure must happen before HostBank allocation")
+
+    monkeypatch.setattr(HostBank, "__init__", unexpected_init)
+    with pytest.raises(ValueError, match=r"require_no_swap.*swap-active"):
+        alloc_layer_banks(_specs(), 1, policy=policy)
+    assert not called
+
+
+def test_default_swap_policy_does_not_probe_pressure():
+    from freetoken.moe.host_banks import HostBankPolicy
+
+    policy = HostBankPolicy(
+        strategy="pageable",
+        swap_probe_reader=lambda _path: (_ for _ in ()).throw(
+            AssertionError("default policy must not probe procfs")
+        ),
+    )
+    policy.prepare_layer_bytes([4096])
+
+    assert policy.accounting.swap_status == "not-requested"
+    assert policy.accounting.as_dict()["no_swap_observed"] is None
+
+
+def test_default_policy_does_not_probe_swap():
+    reads = []
+
+    def unexpected_read(path):
+        reads.append(path)
+        raise AssertionError("swap probing is opt-in")
+
+    from freetoken.moe.host_banks import HostBankPolicy
+
+    policy = HostBankPolicy(strategy="pageable", swap_probe_reader=unexpected_read)
+    policy.prepare_layer_bytes([4096])
+
+    assert reads == []
+    report = policy.accounting.as_dict()
+    assert report["swap_status"] == "not-requested"
+    assert report["no_swap_observed"] is None
+
+
+def test_no_swap_failure_invalidates_prior_plan_and_accounting():
+    from freetoken.moe.host_banks import HostBankPolicy
+
+    state = {"active": False}
+
+    def reader(path):
+        if path == "/proc/self/status":
+            return "VmSwap: 0 kB\n"
+        if path == "/proc/meminfo":
+            return f"SwapTotal: {'1' if state['active'] else '0'} kB\nSwapFree: 0 kB\n"
+        return "Filename Type Size Used Priority\n"
+
+    policy = HostBankPolicy(strategy="pageable", require_no_swap=True, swap_probe_reader=reader)
+    policy.prepare_layer_bytes([4096])
+    assert policy.plan.layer_bytes == (4096,)
+
+    state["active"] = True
+    with pytest.raises(ValueError, match=r"require_no_swap.*swap-active"):
+        policy.prepare_layer_bytes([4096])
+    with pytest.raises(RuntimeError, match="must be prepared"):
+        _ = policy.plan
+    assert policy.accounting.source_bytes == 0
+    assert policy.accounting.swap_status == "swap-active"
 
 
 def test_pinned_policy_rejects_budget_before_allocating_any_bank(monkeypatch):

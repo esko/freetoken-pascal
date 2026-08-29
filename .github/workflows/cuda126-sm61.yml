@@ -53,7 +53,7 @@ jobs:
       - name: Run Torch-dependent H0 integration tests
         run: |
           docker run --rm freetoken-pascal:cuda126 \
-            bash -lc 'PYTHONPATH=python pytest -q tests/engine/test_host_bank_policy_wiring.py tests/models/test_qwen4_exp_gguf_attach.py tests/server/test_host_bank_policy_args.py tests/moe/test_host_banks.py'
+            bash -lc 'PYTHONPATH=python pytest -q tests/engine/test_host_bank_policy_wiring.py tests/models/test_qwen4_exp_gguf_attach.py tests/server/test_host_bank_policy_args.py tests/moe/test_host_memory.py tests/moe/test_host_banks.py'
       - name: Upload toolchain evidence
         uses: actions/upload-artifact@v4
         with:
