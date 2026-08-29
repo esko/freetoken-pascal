@@ -44,6 +44,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 #14 → #38
 #21 + #38 → #22 → #23 → #24 → #25
 #14 + #20 + #24 + #25 → #26 → #27 → #28 → #29
+#13 → #25 + #26 + #28 + #29
 ```
 
 [#6](https://github.com/esko/freetoken-pascal/issues/6) and [#8](https://github.com/esko/freetoken-pascal/issues/8) support all phases. [#17](https://github.com/esko/freetoken-pascal/issues/17) is required for the selected 3-bit profile and any additional release-artifact bank types.

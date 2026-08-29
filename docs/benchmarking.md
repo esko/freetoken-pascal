@@ -48,6 +48,7 @@ Each result record contains:
 5. Best measured dual-P4 policy.
 6. llama.cpp Qwen4 Q4_K_XL reference.
 7. PXQ/llama reference when Qwen4 support is available.
+8. Explicitly experimental SSD expert execution, if implemented, reported separately from every release mode.
 
 Run the PLE suite separately for mmap and positional-read backends against the same dedicated shard bytes and row sequence. Cold-cache runs must begin from a recorded cache state and must never be mixed statistically with warm or steady-state samples. Warm-cache runs rely on ordinary Linux page-cache behavior rather than permanently pinning the full PLE. Report major faults and block-device reads for each phase; do not infer physical I/O solely from application-level read calls.
 
