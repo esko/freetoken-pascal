@@ -31,10 +31,11 @@ The critical path is now integration and hardware qualification:
 1. dedicated PLE serving artifact and optimized random-I/O implementation;
 2. serving-ready GGUF/host-expert integration rather than the current explicit H0 bridge;
 3. Pascal GPU expert kernels and the fused router;
-4. safe one-P4 placement and canary qualification;
-5. dual-P4 ownership/cache topology;
-6. static then dynamic expert caching and CPU/GPU co-execution;
-7. long-context, serving, deployment, soak, and release evidence.
+4. safe one-P4 placement and post-prefill canary qualification;
+5. QSA long-context workspace and synchronization optimization;
+6. dual-P4 ownership/cache topology;
+7. static then dynamic expert caching and CPU/GPU co-execution;
+8. long-context serving, deployment, soak, and release evidence.
 
 No real P4 execution result is present yet. That is the largest remaining uncertainty and must not be replaced by results from 3090/4090/5090, GB10, Apple unified memory, or other architectures.
 
@@ -47,15 +48,17 @@ No real P4 execution result is present yet. That is the largest remaining uncert
 | Qwen3.8 architecture | H0/H1 implemented | Text backbone and reference/state paths are present. H2 end-to-end validation remains. |
 | GGUF/K/I ingestion | Implemented | Safe shard/offset/stride handling and heterogeneous census are a project strength. |
 | PLE source mapping | Implemented reference path | Exact GGUF range mapping, IQ4_NL decode, warm modes, and telemetry exist. |
-| Dedicated PLE serving artifact | Planned, not complete | ADR 0010 and issue #13 now make it core v1; extraction, `pread`, vectorized planning, and prefetch remain. |
+| Dedicated PLE serving artifact | Planned, not complete | ADR 0010 and issue #13 make it core v1; extraction, `pread`, random advice, vectorized planning, physical-I/O telemetry, and prefetch remain. |
 | CPU expert ABI | Implemented | Model-neutral boundary and failure semantics are well designed. |
 | AVX2 experts | Substantial H0 implementation | Q4_K/Q5_K/Q5_1/Q8_0 direct packed paths and threading exist; complete real-artifact and target-host evidence remains. |
 | GGUF CPU serving integration | Partial | The explicit bundle/layer/model/eager bridges prove contracts but are deliberately not the final serving path. |
 | Pascal GPU experts | Planned | PXA/PXQ-derived `sm_61` work has not reached a validated P4 path. |
 | `topk=10` router | Planned | Correct Torch fallback exists; fused Pascal path remains issue #38. |
+| Placement safety | Planned | Issue #73 now requires post-load and post-first-large-prefill high-water, canary, backoff, and fail-readiness. |
+| QSA long-context path | Partial reference work | QSA is implemented, but context-scaling attribution, reusable workspace bounds, synchronization removal, and controlled OOM behavior remain issue #76. |
 | Static hot expert cache | Planned | Data structures and acceptance contract exist in issue #21. |
 | Dynamic cache / `q*` | Planned | Architecture is sound; no P4 locality/overlap evidence yet. |
-| Dual GPU | Planned | ADR 0010 now requires ownership-policy comparison rather than assuming TP. |
+| Dual GPU | Planned | ADR 0010 requires ownership-policy comparison rather than assuming TP. |
 | Long-context state | Partial reference work | Required H3/H4 state/save/restore evidence remains. |
 | Serving/operations | Upstream base plus downstream plans | Production cancellation, health, metrics, Compose, and fault qualification remain. |
 
@@ -93,14 +96,9 @@ The format matrix must distinguish:
 
 ### MTP exists but should not block v1
 
-Standalone and built-in Qwen3.8 MTP artifacts now exist, including low-bit heads. Current model cards and discussions also warn that several runtime/head layouts are incompatible and must not be mixed.
+Standalone and built-in Qwen3.8 MTP artifacts now exist, including low-bit heads. Current model cards and discussions warn that several runtime/head layouts are incompatible and must not be mixed.
 
-MTP is worth tracking after ordinary decode is correct, but it remains a post-v1 or optional experiment until:
-
-- one pinned runtime/head pair is defined;
-- state and verification semantics are proven;
-- P4 verification kernels are measured;
-- quality and fallback behavior are established.
+MTP is worth tracking after ordinary decode is correct, but it remains a post-v1 experiment until one pinned runtime/head pair, state semantics, P4 verification performance, quality, and fallback behavior are established.
 
 ### Pruned expert variants remain secondary
 
@@ -135,13 +133,7 @@ It does not prove the Haswell AVX2 path will be fast enough. The target-host CPU
 
 ### Exact context-derived speculation matches coding-agent work
 
-The pinned `sxuff/qwen38-flash-next-dgx-spark` paired sweep compared ordinary decode with `ngram-mod` using identical requests, model, sampling, and output hashes. It reported:
-
-- about 3.8× wall-clock improvement for copying Python;
-- about 2.6× for copying JSON;
-- about 1.9× for a structured transformation;
-- approximately neutral behavior for novel code with no usable drafts;
-- about 2.49× aggregate wall-clock improvement, with exact paired outputs.
+The pinned `sxuff/qwen38-flash-next-dgx-spark` paired sweep compared ordinary decode with `ngram-mod` using identical requests, model, sampling, and output hashes. It reported about 3.8× wall-clock improvement for copying Python, 2.6× for copying JSON, 1.9× for a structured transformation, approximately neutral behavior for novel code with no usable drafts, and about 2.49× aggregate wall-clock improvement with exact paired outputs.
 
 This is one machine and one sweep, not a universal benchmark. It nevertheless maps directly to coding-agent edits, patches, repeated tool output, JSON, and configuration transformations. ADR 0011 therefore permits it as an optional v1 profile without making it release-critical.
 
@@ -156,11 +148,17 @@ The exact result must be reproduced on the server's NVMe, but the implementation
 - physical block-device bytes must be compared with logical packed PLE bytes;
 - dedupe/sort/coalesce should be adaptive, not unconditional for tiny decode batches.
 
-### VRAM placement has a cliff, not a smooth curve
+### VRAM placement has a post-prefill cliff
 
-Hybrid model reports show severe throughput collapse when a placement change pushes the runtime beyond practical VRAM capacity, even if the model still starts and returns correct output. The project currently has strong memory accounting but no release-critical startup canary/backoff contract.
+Hybrid model reports show severe throughput collapse when a placement change pushes the runtime beyond practical VRAM capacity, even if the model still starts and returns correct output. Qwen3.8 reports additionally show post-load headroom shrinking after the first large prefill because selection/gather workspaces are retained, and a nearby configuration may abort on a top-k workspace OOM.
 
-Issue #73 closes this reliability gap.
+Issue #73 therefore measures both post-load and post-first-large-prefill high-water and refuses readiness when the canary cannot preserve the configured reserve.
+
+### QSA needs its own long-context workstream
+
+Several community measurements show Qwen3.8 decode falling materially as context grows even when the routed-expert policy is unchanged. Potential contributors include QSA score/top-k selection, compressed-index maintenance, gathered sparse attention, metadata transfer, host synchronization, workspace allocation, and graph/eager behavior.
+
+This is not evidence that one specific component is responsible on P4. Issue #76 isolates the phases, bounds workspaces, removes avoidable synchronization, integrates the post-prefill high-water into #73, and requires controlled failure instead of server abort.
 
 ## Architecture assessment
 
@@ -180,11 +178,12 @@ Issue #73 closes this reliability gap.
 
 1. **Expert residency must not imply a second full anonymous copy.** The complete expert bank may be an explicitly managed file-backed resident serving mapping or another measured representation. Memory accounting must prevent simultaneous duplicate expert copies plus uncontrolled page cache from exhausting 128 GB.
 2. **PLE gets a random-I/O contract.** Add random advice, read-amplification telemetry, adaptive vectorized planning, and an explicit row-codec boundary.
-3. **Placement gets a safety gate.** Plan and observe every VRAM category, reserve headroom, run a startup canary, and automatically back off optional placement/cache slots.
-4. **Q4 and Q3 become named profiles.** Q4 is the reference; the pinned Q3 is the whole-model throughput candidate. Q5/Q8 are evaluated at component scope where appropriate.
-5. **Static hot experts precede dynamic claims.** Cache-zero, static-hot, async dynamic, and current-step hybrid modes must be compared independently.
-6. **Dual-P4 policy stays evidence-driven.** Compare layer-owned, disjoint expert-owned, replicated, and trunk split/TP combinations. Do not force every layer's expert partials through cross-GPU traffic without measuring it.
-7. **Exact n-gram speculation is optional v1 work.** It cannot delay or destabilize the core release. MTP remains later.
+3. **Placement gets a post-prefill safety gate.** Plan and observe every VRAM category, reserve headroom, run a representative large-prefill/decode canary, and automatically back off optional cache, context, batch, or placement.
+4. **QSA gets an independent performance and workspace contract.** Profile each phase, bound and reuse scratch, eliminate avoidable host synchronization, and fail cleanly when the requested context cannot fit.
+5. **Q4 and Q3 become named profiles.** Q4 is the reference; the pinned Q3 is the whole-model throughput candidate. Q5/Q8 are evaluated at component scope where appropriate.
+6. **Static hot experts precede dynamic claims.** Cache-zero, static-hot, async dynamic, and current-step hybrid modes must be compared independently.
+7. **Dual-P4 policy stays evidence-driven.** Compare layer-owned, disjoint expert-owned, replicated, and trunk split/TP combinations. Do not force every layer's expert partials through cross-GPU traffic without measuring it.
+8. **Exact n-gram speculation is optional v1 work.** It cannot delay or destabilize the core release. MTP remains later.
 
 ## Recommended execution order
 
@@ -193,31 +192,34 @@ Issue #73 closes this reliability gap.
 1. Complete issue #13's dedicated PLE artifact, mmap/`pread`, random advice, adaptive dedupe/sort/coalesce, read-amplification telemetry, and codec boundary.
 2. Finish real Q4 and selected Q3 census/parity coverage through issue #17.
 3. Finish the serving-ready host-expert integration that replaces the current correctness-only blocking bridge.
-4. Implement the H0/H1 portions of issue #73: memory planner, placement profiles, canary schema, fallback state machine, and tests.
-5. Prepare static hot-profile import/simulation and persisted-heat formats for issues #21/#22.
-6. Keep the optional issue #74 independent so it cannot block the core path.
+4. Implement the H0/H1 portions of issue #73: memory planner, placement profiles, post-load/post-prefill canary schema, fallback state machine, and tests.
+5. Implement the H0/H1 portions of issue #76: QSA phase telemetry, workspace accounting/reuse, synchronization audit, controlled-OOM tests, and context-sweep harness.
+6. Prepare static hot-profile import/simulation and persisted-heat formats for issues #21/#22.
+7. Keep the optional issue #74 independent so it cannot block the core path.
 
 ### When the first P4 is installed
 
 1. Qualify airflow, power, clocks, PCIe link, and NUMA locality before model work.
 2. Run the smallest deterministic Qwen fixture and kernel parity suite.
-3. Establish cache-zero Q4 and Q3 placement envelopes with the new cliff guard.
-4. Benchmark format-specific Pascal kernels and fused `topk=10` before dynamic cache scheduling.
-5. Run static hot-expert placement and collect real routing locality.
+3. Establish cache-zero Q4 and Q3 placement envelopes through the first large prefill with #73.
+4. Measure QSA-only and end-to-end scaling across short, 32K, 64K and 128K contexts through #76.
+5. Benchmark format-specific Pascal kernels and fused `topk=10` before dynamic cache scheduling.
+6. Run static hot-expert placement and collect real routing locality.
 
 ### When both P4s are installed
 
 1. Compare layer-owned, disjoint expert-owned, replicated, and trunk split/TP policies.
 2. Enable asynchronous LFRU only after the static comparator is stable.
 3. Add current-step `q*` co-execution only after contended CPU/PCIe/GPU timings are available.
-4. Qualify long context, checkpoints, cancellation, serving, and deployment.
+4. Re-run #73/#76 with the selected two-card topology and qualify long context, checkpoints, cancellation, serving, and deployment.
 5. Run optional exact n-gram profiling only after ordinary state semantics are stable.
 
 ## Go/no-go criteria
 
 Reassess the design if any of the following are observed on real hardware:
 
-- the active trunk and required state cannot fit across the P4s with a safe reserve;
+- the active trunk and required state cannot fit across the P4s with a safe post-prefill reserve;
+- QSA selection/workspace/synchronization overhead makes the required 32K or 128K context operationally unusable and cannot be bounded or optimized safely;
 - the target Xeons cannot execute enough CPU misses to help any hybrid split;
 - realistic expert-cache sizes show negligible locality over the static baseline;
 - PCIe/merge overhead makes disjoint ownership slower than simple layer ownership;
