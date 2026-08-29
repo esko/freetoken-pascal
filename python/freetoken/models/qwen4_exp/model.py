@@ -101,7 +101,7 @@ class _SparseMoE(Qwen4ExpMoE):
             # Preserve the model-neutral adapter seam used by the GGUF CPU path.
             # Real Qwen modules take the fused weight path above; lightweight
             # adapters may expose only the ordinary module forward contract.
-            gate = torch.sigmoid(self.shared_expert_gate.forward(hidden_states))
+            gate = torch.sigmoid(self.shared_expert_gate.forward(hidden_states)).view(-1)
         kwargs: dict[str, object] = {}
         if debug_observer is not None:
             kwargs["debug_observer"] = debug_observer
