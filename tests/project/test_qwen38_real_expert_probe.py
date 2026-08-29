@@ -263,6 +263,70 @@ def test_range_fetcher_serves_a_valid_range_from_offline_cache(tmp_path: Path) -
     assert fetcher.cache_hits == 1
 
 
+def test_range_fetcher_online_recovers_failed_metadata_pair_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = _FakeTransport({(10, 13): b"abcd"}, total=100)
+    original_replace = real_artifact_probe.os.replace
+    failed = False
+
+    def fail_metadata_replace(source, destination):
+        nonlocal failed
+        if (
+            str(destination).endswith(".json")
+            and not str(destination).endswith(".json.tmp")
+            and not failed
+        ):
+            failed = True
+            raise OSError("simulated metadata rename failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(real_artifact_probe.os, "replace", fail_metadata_replace)
+    with pytest.raises(ArtifactProbeError, match="commit range cache"):
+        RangeFetcher(transport, cache_dir=tmp_path).fetch(
+            "https://example/model", 10, 4, expected_total=100
+        )
+    assert list(tmp_path.glob("*.bin")) == []
+    assert list(tmp_path.glob("*.json")) == []
+
+    response = RangeFetcher(transport, cache_dir=tmp_path).fetch(
+        "https://example/model", 10, 4, expected_total=100
+    )
+    assert response.body == b"abcd"
+    assert len(transport.requests) == 2
+
+
+def test_range_fetcher_offline_keeps_incomplete_pair_as_actionable_failure(
+    tmp_path: Path,
+) -> None:
+    transport = _FakeTransport({(10, 13): b"abcd"}, total=100)
+    fetcher = RangeFetcher(transport, cache_dir=tmp_path)
+    fetcher.fetch("https://example/model", 10, 4, expected_total=100)
+    metadata = next(tmp_path.glob("*.json"))
+    metadata.unlink()
+    with pytest.raises(ArtifactProbeError, match="incomplete"):
+        fetcher.fetch("https://example/model", 10, 4, expected_total=100, offline=True)
+
+
+def test_range_fetcher_cleans_only_its_orphaned_temporary_files(tmp_path: Path) -> None:
+    transport = _FakeTransport({(10, 13): b"abcd"}, total=100)
+    fetcher = RangeFetcher(transport, cache_dir=tmp_path)
+    stem = fetcher._cache_stem("https://example/model", 10, 4, 100)
+    orphan_body_actual = tmp_path / f".{stem}.randombody"
+    orphan_body = tmp_path / f".{stem}.orphan.tmp"
+    orphan_metadata = tmp_path / f".{stem}.json.tmp"
+    unrelated = tmp_path / ".unrelated.tmp"
+    orphan_body_actual.write_bytes(b"partial")
+    orphan_body.write_bytes(b"partial")
+    orphan_metadata.write_text("partial", encoding="utf-8")
+    unrelated.write_text("keep", encoding="utf-8")
+    RangeFetcher(transport, cache_dir=tmp_path)
+    assert not orphan_body_actual.exists()
+    assert not orphan_body.exists()
+    assert not orphan_metadata.exists()
+    assert unrelated.exists()
+
+
 def test_urllib_transport_rejects_ignored_range_before_reading_body() -> None:
     class _Response:
         def __init__(self) -> None:

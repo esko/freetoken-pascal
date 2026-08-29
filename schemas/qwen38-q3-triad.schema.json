@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esko/freetoken-pascal/schemas/qwen38-q3-triad.schema.json",
+  "title": "FreeToken-Pascal bounded Qwen3.8 Q3 reference triad",
+  "description": "Three selected Q3 expert byte ranges with reference-only CPU correctness evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_name", "schema_version", "evidence_status", "range_evidence",
+    "claim_status", "validation_class", "scope", "metadata", "source", "fetch",
+    "probes", "limitations"
+  ],
+  "properties": {
+    "schema_name": {"const": "qwen38-q3-triad.schema.json"},
+    "schema_version": {"const": 1},
+    "evidence_status": {"const": "artifact-metadata"},
+    "range_evidence": {"const": "measured/artifact-byte"},
+    "claim_status": {"const": "reference_only"},
+    "validation_class": {"const": "H0/no-P4"},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference_only", "performance_claim", "p4_claim", "full_shard_download"],
+      "properties": {
+        "reference_only": {"const": true},
+        "performance_claim": {"const": false},
+        "p4_claim": {"const": false},
+        "full_shard_download": {"const": false}
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit", "command", "host", "artifact", "census", "probe_count",
+        "seed", "repeats", "warmup", "checkpoint", "audit"
+      ],
+      "properties": {
+        "commit": {"$ref": "#/$defs/commit"},
+        "command": {"type": "string", "minLength": 1},
+        "host": {"type": "object", "minProperties": 1, "additionalProperties": true},
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+        "repository", "revision", "variant", "manifest_path", "manifest_sha256",
+            "model_sha256", "model_sha256_status", "shards"
+          ],
+          "properties": {
+            "repository": {"type": "string", "minLength": 1},
+            "revision": {"type": "string", "minLength": 1},
+            "variant": {"const": "UD-Q3_K_XL"},
+            "manifest_path": {"type": "string", "minLength": 1},
+            "manifest_sha256": {"$ref": "#/$defs/sha256"},
+            "model_sha256": {"$ref": "#/$defs/sha256"},
+            "model_sha256_status": {"const": "declared-per-shard"},
+            "shards": {
+              "type": "array",
+              "minItems": 3,
+              "items": {"$ref": "#/$defs/shard"}
+            }
+          }
+        },
+        "census": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path", "sha256", "evidence_status", "tensor_count", "total_bytes",
+            "quant_type_counts", "quant_type_bytes", "model_sha256"
+          ],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "evidence_status": {"const": "artifact-metadata"},
+            "tensor_count": {"type": "integer", "minimum": 1},
+            "total_bytes": {"type": "integer", "minimum": 1},
+            "quant_type_counts": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {"type": "integer", "minimum": 0}
+            },
+            "quant_type_bytes": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {"type": "integer", "minimum": 0}
+            },
+            "model_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "probe_count": {"const": 3},
+        "seed": {"type": "integer"},
+        "repeats": {"type": "integer", "minimum": 1},
+        "warmup": {"type": "integer", "minimum": 0},
+        "checkpoint": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "resumed", "path"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "resumed": {"type": "boolean"},
+            "path": {"type": ["string", "null"]}
+          }
+        },
+        "audit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["current", "history"],
+          "properties": {
+            "current": {"$ref": "#/$defs/invocation"},
+            "history": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"$ref": "#/$defs/invocation"}
+            }
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision", "variant", "base_url"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "minLength": 1},
+        "variant": {"const": "UD-Q3_K_XL"},
+        "base_url": {"type": "string", "minLength": 1}
+      }
+    },
+    "fetch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport", "offline", "cache_dir", "cache_hits", "cache_misses",
+        "range_count", "fetched_bytes", "full_shard_bytes", "ranges"
+      ],
+      "properties": {
+        "transport": {"const": "http-range"},
+        "offline": {"type": "boolean"},
+        "cache_dir": {"type": ["string", "null"]},
+        "cache_hits": {"type": "integer", "minimum": 0},
+        "cache_misses": {"type": "integer", "minimum": 0},
+        "range_count": {"const": 9},
+        "fetched_bytes": {"type": "integer", "minimum": 1},
+        "full_shard_bytes": {"const": 0},
+        "ranges": {
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "items": {"$ref": "#/$defs/range"}
+        }
+      }
+    },
+    "probes": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/probe"}
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 3,
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "host", "offline", "cache_dir"],
+      "properties": {
+        "command": {"type": "string", "minLength": 1},
+        "host": {"type": "object", "minProperties": 1, "additionalProperties": true},
+        "offline": {"type": "boolean"},
+        "cache_dir": {"type": ["string", "null"]}
+      }
+    },
+    "shard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "size", "sha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "size": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "projection", "url", "shard", "shard_size", "declared_shard_sha256",
+        "artifact_offset", "start", "end", "length", "sha256", "content_range", "cache"
+      ],
+      "properties": {
+        "projection": {"enum": ["gate", "up", "down"]},
+        "url": {"type": "string", "minLength": 1},
+        "shard": {"type": "string", "minLength": 1},
+        "shard_size": {"type": "integer", "minimum": 1},
+        "declared_shard_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact_offset": {"type": "integer", "minimum": 0},
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 0},
+        "length": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "content_range": {"type": "string", "minLength": 1},
+        "cache": {"enum": ["hit", "miss"]}
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probe_id", "layer", "expert", "seed", "commit", "command", "host",
+        "range_hashes", "ranges", "quant_names", "workload_hashes", "output_hashes",
+        "timing", "correctness", "kernel_census", "kernel_census_by_mode", "raw"
+      ],
+      "properties": {
+        "probe_id": {"type": "string", "pattern": "^layer-[0-9]{2}-expert-[0-9]{3}$"},
+        "layer": {"type": "integer", "minimum": 0},
+        "expert": {"type": "integer", "minimum": 0},
+        "seed": {"type": "integer"},
+        "commit": {"$ref": "#/$defs/commit"},
+        "command": {"type": "string", "minLength": 1},
+        "host": {"type": "object", "minProperties": 1, "additionalProperties": true},
+        "range_hashes": {"$ref": "#/$defs/projection_hashes"},
+        "ranges": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/range"}
+        },
+        "quant_names": {
+          "type": "object",
+          "required": ["gate", "up", "down"],
+          "additionalProperties": {"type": "string", "minLength": 1},
+          "properties": {
+            "gate": {"type": "string", "minLength": 1},
+            "up": {"type": "string", "minLength": 1},
+            "down": {"type": "string", "minLength": 1}
+          }
+        },
+        "workload_hashes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hidden_sha256", "expert_ids_sha256", "routing_weights_sha256"],
+          "properties": {
+            "hidden_sha256": {"$ref": "#/$defs/sha256"},
+            "expert_ids_sha256": {"$ref": "#/$defs/sha256"},
+            "routing_weights_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "output_hashes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["oracle", "scalar", "native"],
+          "properties": {
+            "oracle": {"$ref": "#/$defs/sha256"},
+            "scalar": {"$ref": "#/$defs/sha256"},
+            "native": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scalar_elapsed_ns", "native_elapsed_ns", "oracle_elapsed_ns"],
+          "properties": {
+            "scalar_elapsed_ns": {"type": "array", "minItems": 1, "items": {"type": "integer", "exclusiveMinimum": 0}},
+            "native_elapsed_ns": {"type": "array", "minItems": 1, "items": {"type": "integer", "exclusiveMinimum": 0}},
+            "oracle_elapsed_ns": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["dequantize", "dense_expert"],
+              "properties": {
+                "dequantize": {"type": "integer", "minimum": 0},
+                "dense_expert": {"type": "integer", "minimum": 0}
+              }
+            }
+          }
+        },
+        "correctness": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["passed", "finite", "rtol", "atol", "oracle_vs_scalar", "oracle_vs_native", "scalar_vs_native"],
+          "properties": {
+            "passed": {"const": true},
+            "finite": {"const": true},
+            "rtol": {"type": "number", "minimum": 0},
+            "atol": {"type": "number", "minimum": 0},
+            "oracle_vs_scalar": {"type": "object"},
+            "oracle_vs_native": {"type": "object"},
+            "scalar_vs_native": {"type": "object"}
+          }
+        },
+        "kernel_census": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "kernel_census_by_mode": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scalar", "native"],
+          "properties": {
+            "scalar": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+            "native": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+          }
+        },
+        "raw": {"type": "object", "minProperties": 1, "additionalProperties": true}
+      }
+    },
+    "projection_hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gate", "up", "down"],
+      "properties": {
+        "gate": {"$ref": "#/$defs/sha256"},
+        "up": {"$ref": "#/$defs/sha256"},
+        "down": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
