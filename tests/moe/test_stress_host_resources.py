@@ -149,6 +149,26 @@ def test_invalid_stress_arguments_fail_closed() -> None:
             raise AssertionError(f"accepted invalid stress arguments: {kwargs}")
 
 
+def test_cleanup_tolerates_baseline_worker_gc_but_rejects_new_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_worker = {"ident": 101, "name": "freetoken-mixed_0"}
+    current_workers: tuple[dict[str, object], ...] = ()
+    monkeypatch.setattr(stress_host_resources, "_live_buffer_ids", lambda: ())
+    monkeypatch.setattr(stress_host_resources, "_fd_count", lambda: None)
+    monkeypatch.setattr(
+        stress_host_resources,
+        "_thread_snapshot",
+        lambda: {"workers": current_workers},
+    )
+
+    stress_host_resources._cleanup_check((), (baseline_worker,), None)
+
+    current_workers = ({"ident": 202, "name": "freetoken-mixed_0"},)
+    with pytest.raises(RuntimeError, match="new freetoken-mixed workers leaked"):
+        stress_host_resources._cleanup_check((), (baseline_worker,), None)
+
+
 def test_threaded_failure_drains_and_restores_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     before_live = stress_host_resources._live_buffer_ids()
     before_workers = tuple(stress_host_resources._thread_snapshot()["workers"])
