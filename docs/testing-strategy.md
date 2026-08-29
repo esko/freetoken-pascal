@@ -149,7 +149,7 @@ CPU expert microbenchmarks retain every raw repeat and separately report the sup
 
 ### Router operation
 
-Compare the fused Pascal router with the permanent FP32 Torch reference using the same 512 logits. Expert IDs are exact on no-tie inputs. Selected probabilities use the softmax denominator across all experts, with separate tests for renormalized weights, padded rows, ties and NaN/Inf behavior. Performance evidence records router-only time separately from complete layer and token time.
+Adapt merged FreeToken PR #257's arbitrary-`K` fused router first, then compare it with the permanent FP32 Torch reference using the same 512 logits. Expert IDs are exact on no-tie inputs. Selected probabilities use the softmax denominator across all experts, with separate tests for renormalized weights, padded rows, ties and NaN/Inf behavior. H1 proves CUDA 12.6/`sm_61` build viability; H2 determines whether upstream Triton is usable and faster on P4. A bespoke CUDA implementation is required only if that evidence rejects Triton. Performance evidence records router-only time separately from complete layer and token time.
 
 ### Placement operation
 
@@ -182,6 +182,8 @@ The comparison artifact is a deterministic ZIP containing a strict JSON identity
 The H0 fixture suite validates this evidence protocol and the prompt materializer. It does not claim Qwen3.8 model parity. Issue #14 remains open until real-P4 H2 runs attach independent router, GDN, QSA, PLE, continuation-token, and selected-logit evidence for short, incremental, chunked, reset, checkpoint/restore, 32K, 128K, and 262K qualification cases.
 
 Every mixed-precision candidate preserves exact routed expert IDs on the fixed routing corpus and meets recorded output tolerances for long-context retrieval, tool-call selection/arguments, structured JSON and coding. These gates compare against the declared reference profile and are reported separately from token-level numerical tolerances.
+
+Converter fixtures independently check centered hyperconnection `1 + weight`, GDN fused-projection segmentation and value-head ordering, QSA/indexer projection splitting, PLE row scale interpretation, first/middle/last expert addressing, and tokenizer/chat-template identity. A community artifact that exposes a converter defect may serve as an oracle, but cannot become a release profile without immutable provenance and the complete artifact gates.
 
 ### Optional exact n-gram operation
 

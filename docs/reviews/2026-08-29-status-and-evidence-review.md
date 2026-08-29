@@ -96,6 +96,12 @@ The format matrix must distinguish:
 - router/control/shared/trunk formats;
 - PLE row codecs.
 
+### Candidate artifacts remain gated inputs
+
+The published AP-Q4_K_XL and AP-IQ4_XS artifacts at immutable Hugging Face revision `e041bbd9053967b91dce7dde492fd39b245dbe0c` are useful fit candidates, not replacements for the pinned profiles. Their reported sizes and perplexity motivate downstream census and quality runs, but selection still requires checksums, tokenizer/template identity, converter provenance, CPU/P4 kernel coverage, and the routing, retrieval, tool, JSON, and coding corpus. A reported static-IQ4_XS conversion and historical missing centered-hyperconnection `+1` defect remain unverified provenance context: the regression is required, but no oracle is pinned until its immutable source and conversion log are identified.
+
+PLE qualification now treats codec choice as a first-class axis under one storage interface. Primitive AI revision `9362999fce764fb2e67c084bedc39210d0e89089` provides immutable codec/schema references for FP8 per-row, INT4 group-16, and NVFP4-style group-16; its runtime overlay is Apache-2.0 while associated model payloads retain the Qwen Community License 1.0. The experiment matrix is BF16 mmap control, IQ4_NL reference, those three codecs, and near-lossless Q6/Q8. Published Blackwell results establish that row-only compression is viable, not which codec wins on Haswell plus P4. Each run therefore separates bytes read, CPU row decode, host-to-device transfer, and model quality.
+
 ### MTP exists but should not block v1
 
 Several standalone and built-in Qwen3.8 MTP artifacts now exist, including low-bit heads. Their model cards and discussions expose incompatible runtime/head layouts. MTP remains post-v1 until one pinned runtime/head pair, state semantics, P4 verification performance, quality, and fallback behavior are established.
@@ -111,6 +117,8 @@ REAP/MEP-style reduced-expert artifacts demonstrate storage reduction with modes
 PR #257 merged into FreeToken on August 28. It is now the primary upstream Qwen3.8 engine source, not merely a reference. It includes the text architecture, full QSA, PLE, CUDA graph decode, hybrid radix state, and MoE offload/hybrid execution. Its 4090/5090 results are useful proof that the architecture works on modern GPUs, not evidence of P4 speed.
 
 Issue #77 makes a clean upstream sync and semantic delta reconciliation the immediate priority. PR #232 becomes historical provenance only where downstream code remains distinct after that sync.
+
+The merged arbitrary-`K` router changes issue #38 from a greenfield-kernel task to an upstream-first Pascal qualification task. The project adapts and compiles that route for `sm_61`, benchmarks it on P4, and writes a bespoke CUDA fallback only if Triton is unsupported or loses the controlled comparison.
 
 ### FreeToken has a new mmap PLE branch
 

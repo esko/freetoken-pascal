@@ -23,6 +23,8 @@ FreeToken-Pascal defines independently reproducible profiles rather than one pre
 
 - `reference-q4`: the pinned `UD-Q4_K_XL` artifact, cache-zero and ordinary decode available, used as the principal quality and correctness reference.
 - `throughput-q3`: one pinned, checksummed Q3 artifact selected from a real tensor census and benchmarked as a whole-model fit candidate. It may become the operational default only after mixed-precision quality and P4 throughput gates pass.
+- `candidate-ap-q4`: Agention's `AP-Q4_K_XL` is an evidence candidate because its published artifact is smaller than the current Q4 reference while retaining standard llama.cpp tensor types. It does not replace `reference-q4` until its immutable identity, tensor census, tokenizer/template, converter provenance, quality, CPU cost, and P4 behavior pass downstream gates.
+- `candidate-ap-iq4`: Agention's `AP-IQ4_XS` is an aggressive fit candidate under the same gates. Published perplexity alone is not a selection criterion.
 - `coding-ngram`: an optional exact context-derived speculative profile layered on the winning base profile. It never blocks the core v1 release and automatically falls back to ordinary decode.
 
 Q5, Q8, and other high-precision formats are benchmarked for the tensors or components where they are plausible. The project does not require an impossible full-model Q8 profile to fit in 128 GB merely to satisfy the format matrix.
@@ -33,7 +35,7 @@ The dedicated PLE serving artifact remains pageable and independently addressed.
 
 The lookup planner may deduplicate, sort, and coalesce requests, but it must be adaptive. Tiny decode lookups may bypass sorting when planner overhead exceeds expected I/O benefit; wide prefill or speculative-verification batches use the vectorized path. The benchmark contract records logical bytes requested, unique packed bytes, application read bytes, block-device bytes, major faults, and read-amplification ratio.
 
-IQ4_NL remains the initial reference codec. The PLE interface identifies its row codec explicitly so near-lossless Q6/Q8 or other row formats can be evaluated without changing lookup semantics. No alternative becomes a default without PLE reconstruction and model-level quality gates.
+IQ4_NL remains the initial reference codec. One lookup contract must support the public experiment matrix: BF16 mmap as the precision control, FP8 per-row, INT4 group-16, NVFP4-style group-16, and near-lossless Q6/Q8 candidates. These names describe codecs to qualify, not accepted artifacts or Pascal winners. No alternative becomes a default without immutable provenance, byte/layout validation, PLE reconstruction, row-decode and transfer measurements, and model-level quality gates.
 
 ### Placement-cliff and QSA workspace safety
 
@@ -42,6 +44,12 @@ Every release-capable configuration has a per-GPU placement plan and a measured 
 Readiness requires observed allocation and selected-kernel telemetry to agree with the plan after both model load and a representative large-prefill canary. Unexpected fallback, managed-memory use, host spill, repeated allocation recovery, unbounded or unexplained retained workspace growth, or insufficient headroom causes automatic cache/context/batch/placement backoff and a repeated canary. The server fails readiness if no safe profile passes. Release defaults retain a measured margin below the post-prefill cliff rather than using the last configuration that merely loads or starts.
 
 QSA selection, gather, sparse-attention and state-update costs are measured separately across context tiers. Workspace exhaustion produces controlled backoff or request/readiness failure, not process abort. Reusable workspaces are bounded and may be captured/reused only where dynamic PLE/QSA state semantics remain correct.
+
+Merged FreeToken PR #257 is the first implementation donor for QSA scoring, exact block top-k, selected-row expansion/gather, sparse attention, and reusable scratch. Pascal qualification compares an upstream-derived Triton path, a small CUDA 12.6 path when needed, and the permanent Torch FP32 reference. QSA H0/H1 work and the first P4 context-depth sweep precede dynamic-cache performance qualification.
+
+### Router implementation order
+
+Merged FreeToken PR #257's arbitrary-`K` fused router is the first donor for Qwen's exact top-10-of-512 route. Issue #38 first adapts and validates that implementation for CUDA 12.6 and `sm_61`. A bespoke CUDA router is written only if Triton cannot support Pascal correctly or loses the controlled P4 benchmark. The permanent full-softmax Torch reference remains available and observable in every case.
 
 ### Expert-cache evidence sequence
 
@@ -66,9 +74,13 @@ Native MTP, external draft models, DFlash, and lossy speculative prefill remain 
 
 - Issue #13 gains random-access advice, read-amplification telemetry, adaptive vectorized lookup, and an explicit PLE codec boundary.
 - Issue #17 treats a named Q3 whole-model artifact as the throughput candidate while benchmarking Q5/Q8 at component scope where full-model fit is impossible.
+- Issue #17 adds AP-Q4_K_XL and AP-IQ4_XS as gated candidates. A reported static-IQ4_XS converter oracle remains excluded until its immutable source and conversion log are independently verified.
+- Converter regression coverage includes centered hyperconnection `1 + weight`, GDN fused-projection segmentation/head ordering, QSA/indexer projection splitting, PLE row scale interpretation, first/middle/last expert addressing, and tokenizer/chat-template identity.
+- Issue #38 adapts the merged upstream arbitrary-`K` router first and creates a Pascal CUDA fallback only when measured evidence requires it.
 - Issue #21 uses static hot-expert placement as a mandatory comparator and warm-start source before dynamic cache claims.
 - Issue #73 makes placement planning, post-load/post-prefill high-water accounting, canary execution, backoff, and fail-readiness release-critical.
 - Issue #76 makes QSA context scaling, workspace bounds, synchronization and controlled-OOM behavior explicit release work.
+- Issue #76 is P3 critical-path work and precedes dynamic-cache performance claims.
 - Issue #74 adds exact context-derived speculation as optional, output-preserving work that cannot block core v1.
 - Issue #29 reports placement cliffs, QSA context scaling, PLE read amplification, Q4/Q3 whole-model profiles, component-format tests, and all relevant fallbacks.
 - Field measurements from modern GPUs and unified-memory systems are evidence for what to test, not performance predictions for the P4 server.

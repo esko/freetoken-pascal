@@ -159,8 +159,8 @@ initial upstream import and provenance
   → serving-ready host-expert integration
   → placement planner/post-prefill canary/backoff
   → Pascal DP4A expert kernels
-  → fused topk=10 Pascal router
-  → QSA workspace/context-scaling qualification
+  → upstream arbitrary-K router adaptation and measured Pascal fallback decision
+  → QSA selected-row path + workspace/context-scaling qualification
   → static-hot cache and mixed merge
   → dual-P4 policy comparison
   → async cache
@@ -180,10 +180,10 @@ Issue #77 owns broad Qwen model/QSA/PLE/cache/state reconciliation and must be s
 - CUDA 12.6/H1 environment maintenance;
 - GGUF loader and quant-format work outside conflicting Qwen model files;
 - CPU expert ABI/kernels;
-- Q4/Q3 identity, census and mixed-precision quality fixtures;
+- Q4/Q3/AP candidate identity, census, converter-regression and mixed-precision quality fixtures;
 - placement planner and result-schema pure logic;
 - QSA benchmark/telemetry design that does not duplicate the upstream sync diff;
-- fused router reference/dispatch and `sm_61` compile work after its model-call boundary is stable;
+- merged-upstream arbitrary-K router adaptation/reference/dispatch and `sm_61` compile work after its model-call boundary is stable;
 - cache trace/static-hot simulation formats;
 - optional n-gram proposal/state fixtures, kept independent from core dependencies;
 - server/config/metrics contracts;

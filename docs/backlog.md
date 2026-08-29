@@ -25,12 +25,12 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 | P3 | [#73](https://github.com/esko/freetoken-pascal/issues/73) | VRAM placement-cliff guard and startup canary | H0-H3 |
 | P3 | [#20](https://github.com/esko/freetoken-pascal/issues/20) | Compare dual-P4 expert ownership and trunk policies | H0/H3 |
 | P3 | [#38](https://github.com/esko/freetoken-pascal/issues/38) | Fused Qwen3.8 `topk=10` Pascal router | H0-H2 |
+| P3 | [#76](https://github.com/esko/freetoken-pascal/issues/76) | QSA long-context overhead and workspace safety | H0-H3 |
 | P3 | [#21](https://github.com/esko/freetoken-pascal/issues/21) | Fixed cache, static-hot comparator and correct mixed partial merge | H0-H3 |
 | P3 | [#22](https://github.com/esko/freetoken-pascal/issues/22) | Async LFRU, persisted heat and telemetry | H0-H3 |
 | P4 | [#23](https://github.com/esko/freetoken-pascal/issues/23) | Concurrent current-step CPU/GPU misses | H0-H3 |
 | P4 | [#24](https://github.com/esko/freetoken-pascal/issues/24) | Contention-aware `q*` and fallback | H0-H3 |
 | P4 | [#25](https://github.com/esko/freetoken-pascal/issues/25) | Decode prefetch and prefill streaming | H0-H3 |
-| P4 | [#76](https://github.com/esko/freetoken-pascal/issues/76) | QSA long-context overhead and workspace safety | H0-H3 |
 | P5 | [#26](https://github.com/esko/freetoken-pascal/issues/26) | Long-context state and semantic checkpoints | H0/H3/H4 |
 | P5 | [#27](https://github.com/esko/freetoken-pascal/issues/27) | OpenAI serving, cancellation and observability | H0/H3/H4 |
 | P5 | [#28](https://github.com/esko/freetoken-pascal/issues/28) | Docker/Compose and production operations | H0/H3/H4 |
@@ -42,6 +42,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 ```text
 #5 → #6 → #77
           ├→ #13 → #14
+          ├→ #17
           ├→ #19
           ├→ #38
           ├→ #73
@@ -49,9 +50,10 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 #7 → #10
 #11 + #12 + #77 → #13 → #14
 #12 + #15 → #16 → #17/#18
+#77 + #12 + #16 → #17
 #12 + #19 + #77 → #73
 #9 + #11 + #13 + #73 → #20
-#16 + #19 + #20 + #73 → #21
+#16 + #19 + #20 + #73 + #76 → #21
 #14 + #38 → #22 → #23 → #24 → #25
 #11 + #14 + #73 + #77 → #76
 #25 + #76 → long-context portions of #26 → #27 → #28 → #29
@@ -77,9 +79,9 @@ The core v1 backlog includes explicit work and acceptance evidence for:
 - heterogeneous expert bank types resident in DDR4 and a dedicated NVMe PLE layout served through the Linux page cache;
 - mmap and positional-read PLE backends with random advice, adaptive deduplication/ordering, asynchronous prefetch and physical read-amplification evidence;
 - AVX2 CPU fallback and required low-bit formats;
-- named Q4 reference and Q3 whole-model throughput profiles plus component-level higher-precision tests;
+- named Q4 reference and Q3 whole-model throughput profiles, gated AP-Q4/AP-IQ4 candidates, converter oracles, and component-level higher-precision tests;
 - Pascal GPU kernel parity;
-- exact full-softmax `topk=10` router parity and fallback;
+- upstream-first exact full-softmax `topk=10` router adaptation, parity, and measured Pascal fallback decision;
 - placement planning, post-load/post-prefill high-water accounting, headroom, canary, automatic backoff and fail-readiness behavior;
 - bounded QSA score/top-k/gather workspaces, context-scaling telemetry, controlled OOM behavior and long-context performance evidence;
 - one-GPU bring-up and measured two-GPU ownership/trunk policies;
