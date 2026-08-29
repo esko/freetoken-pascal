@@ -68,8 +68,8 @@ For each shipping quant and shape, CPU expert output passes error tolerances aga
 
 ### Outcomes
 
-- per-GPU placement planner covering resident tensors, shared experts, recurrent/QSA/KV state, CUDA context, workspaces, transfer buffers and expert slots;
-- startup canary, explicit headroom, automatic cache/placement backoff and fail-readiness behavior under issue #73;
+- per-GPU placement planner covering resident tensors, shared experts, recurrent/QSA/KV state, persistent and transient QSA score/top-k/gather workspaces, CUDA context, generic workspaces, transfer buffers and expert slots;
+- post-load and post-first-large-prefill canary, explicit headroom, automatic cache/context/batch/placement backoff and fail-readiness behavior under issue #73;
 - Pascal DP4A low-bit GPU kernels and format-specific tuning, ahead of generic FP16/BF16/FP8 optimization;
 - fused Qwen3.8 `topk=10` router with a permanent Torch reference path;
 - fixed-address per-GPU expert slot pools;
@@ -81,9 +81,9 @@ For each shipping quant and shape, CPU expert output passes error tolerances aga
 
 ### Exit gate
 
-Single- and dual-P4 static-cache runs are correct and pass the placement canary with documented reserve. The static-hot profile has measured hit/throughput evidence. Async future-token fill cannot delay the current token and improves a locality-positive trace relative to the appropriate static control or remains disabled.
+Single- and dual-P4 static-cache runs are correct and pass the post-prefill placement canary with documented reserve. The static-hot profile has measured hit/throughput evidence. Async future-token fill cannot delay the current token and improves a locality-positive trace relative to the appropriate static control or remains disabled.
 
-## Phase 4 — adaptive hybrid execution
+## Phase 4 — adaptive hybrid execution and QSA scaling
 
 ### Outcomes
 
@@ -93,18 +93,22 @@ Single- and dual-P4 static-cache runs are correct and pass the placement canary 
 - adaptive policy with pure-CPU and fetch-all alternatives;
 - NUMA and per-rank worker tuning;
 - decode prefetch and copy batching;
-- safe interaction with the #73 reserve and ownership policy.
+- safe interaction with the #73 reserve and ownership policy;
+- issue #76 phase-level QSA telemetry for projection, compressed-index maintenance, scoring, top-k selection, row gather, sparse attention, state update, allocation and host synchronization;
+- bounded/reusable QSA score/top-k/gather workspaces with deterministic capacity checks;
+- safe context/chunk/backoff and controlled errors instead of process abort;
+- context-scaling benchmark harness from short context through 128K, with a 262K qualification attempt.
 
 ### Exit gate
 
-The scheduler never chooses an unsupported/unsafe path, exposes its decisions, and beats or safely falls back to the best pure/static policy on representative decode workloads.
+The scheduler never chooses an unsupported/unsafe path, exposes its decisions, and beats or safely falls back to the best pure/static policy on representative decode workloads. QSA workspaces are bounded, the first-large-prefill high-water is inside the #73 reserve, and 32K/128K context behavior has independent correctness and performance evidence.
 
 ## Phase 5 — prefill, long context, serving and optional coding profile
 
 ### Core outcomes
 
 - prefill expert grouping, chunked streaming and double buffering;
-- GDN/QSA/PLE state validation through long contexts;
+- GDN/QSA/PLE state validation through long contexts after issue #76 workspace/context qualification;
 - semantic state checkpoint/restore;
 - hardened OpenAI-compatible serving;
 - Docker/Compose operations, health and metrics.
@@ -115,7 +119,7 @@ Issue #74 may add exact context-derived n-gram speculation after ordinary state 
 
 ### Exit gate
 
-32K and 128K coding sessions run correctly with streaming, cancellation, restore and restart. Prefill does not thrash an undersized token-oriented cache. Optional #74 is either independently qualified or omitted from core release claims.
+32K and 128K coding sessions run correctly with streaming, cancellation, restore and restart. Prefill does not thrash an undersized token-oriented cache, QSA exhaustion is controlled rather than fatal, and long-context overhead is measured. Optional #74 is either independently qualified or omitted from core release claims.
 
 ## Phase 6 — hardware qualification and release
 
@@ -123,7 +127,8 @@ Issue #74 may add exact context-derived n-gram speculation after ordinary state 
 
 - actual P4/NUMA topology profile;
 - one- and two-P4 qualification;
-- #73 placement-cliff sweep and release safety margin;
+- #73 placement-cliff sweep and release safety margin through the first large prefill;
+- #76 QSA workspace, synchronization and context-scaling evidence;
 - whole-model `reference-q4` and `throughput-q3` comparison;
 - component-level Q5/Q8 and shipping CPU/GPU format comparison;
 - benchmark comparison with merged llama.cpp/PXQ;
@@ -146,14 +151,15 @@ upstream import
   → random-advised mmap/pread + adaptive PLE I/O/prefetch
   → AVX2 expert backend + named Q4/Q3 profiles
   → serving-ready host-expert integration
-  → placement planner/canary/backoff
+  → placement planner/post-prefill canary/backoff
   → Pascal DP4A expert kernels
   → fused topk=10 Pascal router
+  → QSA workspace/context-scaling qualification
   → static-hot cache and mixed merge
   → dual-P4 policy comparison
   → async cache
   → current-step q*
-  → prefill/long context
+  → prefill/long-context state
   → serving/package
   → release qualification
 
@@ -172,7 +178,8 @@ Before P4 arrival, independent workers can handle:
 - CPU expert ABI/kernels;
 - Q4/Q3 identity, census, quant conversion and mixed-precision correctness A/B tests;
 - serving-ready host expert integration;
-- placement planner/canary/backoff logic and result schemas;
+- placement planner/post-prefill canary/backoff logic and result schemas;
+- QSA phase telemetry, workspace accounting/reuse, synchronization audit and controlled-OOM tests;
 - fused router reference/dispatch and `sm_61` compile work;
 - cache trace/static-hot simulator;
 - optional n-gram proposal/state fixtures, kept independent from core dependencies;
@@ -187,8 +194,9 @@ Create or amend an ADR before continuing if:
 
 - FreeToken upstream merges equivalent work with a conflicting design;
 - neither Q4 nor the named Q3 profile fits the host operating envelope with safe headroom;
-- P4 lacks sufficient VRAM for the required always-active trunk and state after placement backoff;
+- P4 lacks sufficient VRAM for the required always-active trunk and state after post-prefill placement backoff;
 - placement canary evidence shows unavoidable spill/fallback cliffs below a useful configuration;
+- QSA selection/workspace/synchronization overhead makes required 32K or 128K operation unusable and cannot be bounded or optimized safely;
 - the dedicated PLE shard cannot provide stable random-I/O behavior without unrelated-weight coupling or unacceptable read amplification;
 - AVX2 CPU experts are so slow that current-step CPU work cannot help;
 - no realistic cache size beats the static-hot/control path;
