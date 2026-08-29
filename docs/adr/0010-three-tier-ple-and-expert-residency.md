@@ -19,6 +19,8 @@ FreeToken-Pascal v1 uses three explicit storage and execution tiers:
 2. DDR4 holds the complete quantized expert bank and provides the Linux page cache for frequently accessed PLE rows.
 3. The two P4 VRAM spaces hold dense latency-critical tensors, shared experts, runtime state, and bounded adaptive caches of hot routed experts.
 
+Here, N-gram/PLE names the model's required lookup table and its storage substrate. It does not add the n-gram speculative-decoding algorithm, which remains outside v1.
+
 The PLE table uses a dedicated contiguous file or shard set with an independently identifiable byte range and manifest entry.
 PLE mappings and reads must not include unrelated model-weight ranges, and PLE pinning must never implicitly pin those ranges.
 The v1 PLE path supports both mmap/page-fault and positional-read backends behind one lookup contract.
@@ -26,16 +28,16 @@ Lookup scheduling batches requests, removes duplicate row IDs, sorts physical re
 PLE buffers remain pageable by default, and the operating system may use spare DDR4 for its page cache; v1 does not permanently pin the full PLE table.
 
 PLE benchmarks report cold-cache, warm-cache, major-page-fault, and steady-state behavior independently.
-The complete expert bank remains in DDR4 for v1 execution, and SSD-backed expert execution is limited to startup or explicitly labeled experiments.
+The complete expert bank is loaded and pre-faulted into a DDR4 serving allocation, remains covered by the no-swap runtime policy, and is the only steady-state source for CPU execution and GPU cache fills. File-backed expert bytes may be used during startup, while SSD-backed expert execution is limited to explicitly labeled experiments.
 Pascal DP4A integer kernels and format-specific Q4, Q5, and Q8 tuning take priority over unmeasured FP16, BF16, or FP8 paths.
 Before P4 availability, quantization work may convert and compare candidates, but no final quantization recipe is selected until Q4, Q5, Q8, and CPU-format candidates are benchmarked on the actual P4s.
-Dual-P4 qualification first tests disjoint expert ownership and its correctness/transfer behavior before conventional tensor parallelism is considered.
+Dual-P4 qualification first tests disjoint expert ownership and its correctness/transfer behavior before conventional tensor parallelism is considered. H3 evidence must compare the candidates and record one reproducible release default; no default is selected before that gate. This policy-selection order supersedes ADR 0007's initial contiguous-layer default.
 
 ## Consequences
 
 The loader, manifest, cache, and benchmark harness must keep PLE identity, offsets, residency, and cache state separate from GGUF model weights.
 The PLE API must expose backend choice, batch deduplication, sorting, prefetch activity, page-fault counters, and cache temperature in logs and metrics.
-The host expert bank consumes DDR4 but is not a reason to reserve all remaining RAM for pinned pages.
+The host expert bank consumes DDR4 and requires startup/runtime residency and no-swap evidence, but it is not permanently pinned and is not a reason to reserve all remaining RAM for pinned pages.
 VRAM allocation must make dense tensors, shared experts, runtime state, and adaptive routed-expert slots observable independently.
 CPU and host simulation work can proceed at H0/H1, while DP4A tuning, disjoint ownership policy selection, and conventional tensor-parallel comparisons remain H2/H3 work.
 The decision adds file-format and benchmark work to the v1 critical path, but it prevents storage aliasing and produces evidence that can distinguish I/O, page-cache, PCIe, and compute costs.

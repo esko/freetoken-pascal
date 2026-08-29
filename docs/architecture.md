@@ -28,6 +28,7 @@ P4 #0 VRAM                            P4 #1 VRAM
 
 PLE is a normal v1 NVMe-backed input, not emergency backing, while the complete expert bank is a DDR4-resident source for CPU execution and cache fills.
 The P4s receive only dense latency-critical tensors, shared experts, runtime state, and bounded hot routed-expert cache entries.
+N-gram/PLE in this document names the required table and lookup substrate; it does not include speculative decoding, which remains outside v1.
 
 ## Model partition
 
@@ -44,7 +45,7 @@ The P4s receive only dense latency-critical tensors, shared experts, runtime sta
 - CPU reference and AVX2 expert execution;
 - bounded staging buffers and cache heat/telemetry state.
 
-The complete expert bank remains in DDR4 for v1; SSD-backed expert execution is startup backing or an explicitly labeled experiment only.
+The complete expert bank is loaded and pre-faulted into DDR4 for v1, is covered by the release no-swap policy, and supplies all steady-state CPU expert execution and GPU cache fills. SSD-backed expert reads are startup backing or an explicitly labeled experiment only.
 PLE mappings remain pageable by default so the OS can consume spare RAM dynamically, and the full PLE table is never permanently pinned.
 
 ### GPU tier
@@ -326,7 +327,7 @@ Each rank owns:
 
 Hardware qualification first tests disjoint expert ownership across the two P4s, including correctness, transfer, load balance, and recovery behavior.
 Conventional tensor parallelism is evaluated only after that policy has evidence and remains disabled until its communication cost is measured on the actual PCIe topology.
-TP and layer ownership must not require an expert to bounce between P4s. Graph/layer split alternatives can be benchmarked, but v1 chooses one reproducible default.
+No dual-P4 release default exists until H3 compares the candidates and records one reproducible choice. The ordering and selection gate supersede ADR 0007's initial contiguous-layer default. The selected policy must not require an expert to bounce between P4s.
 
 ## PLE design
 

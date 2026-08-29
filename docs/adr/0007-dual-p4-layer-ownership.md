@@ -1,6 +1,6 @@
 # ADR 0007: Dual P4 Layer Ownership
 
-- Status: Accepted
+- Status: Superseded by ADR 0010
 - Date: 2026-08-28
 
 ## Context
@@ -10,6 +10,8 @@ The P4s have no NVLink and only 8 GB each. A global coherent cache or cross-GPU 
 ## Decision
 
 Assign contiguous model-layer ranges to each P4 initially. Each GPU caches only experts for owned layers and uses host pages/workers associated with its local NUMA node where measured beneficial. No cross-GPU cache coherence in v1.
+
+ADR 0010 supersedes the ordering and default-selection portion of this decision. Disjoint routed-expert ownership is now qualified before conventional tensor parallelism, and no final dual-P4 default is selected until H3 evidence compares the candidates. The no-cross-GPU-cache-coherence constraint remains in force.
 
 ## Consequences
 

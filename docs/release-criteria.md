@@ -26,7 +26,7 @@ FreeToken-Pascal v1 is complete only when every required item is evidenced.
 
 - [ ] Cache-zero CPU-backed mode works.
 - [ ] AVX2 CPU expert backend passes parity.
-- [ ] The complete quantized expert bank resides in DDR4 during serving; SSD expert execution is not required for the release path.
+- [ ] The complete quantized expert bank is loaded and pre-faulted into DDR4, remains resident under the required no-swap policy, and is the only steady-state source for expert execution/cache fills.
 - [ ] Pascal DP4A/format-specific GPU expert backends pass parity.
 - [ ] The PLE uses dedicated NVMe shard files that contain no unrelated model tensors.
 - [ ] mmap and positional-read PLE backends pass identical row and failure-path tests.

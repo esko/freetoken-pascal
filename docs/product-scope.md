@@ -86,6 +86,8 @@ The product is not a generic inference platform. Its v1 purpose is to maximize r
 
 These may be added only after v1 release or by an accepted ADR that changes scope and backlog.
 
+The required N-gram/PLE table and lookup substrate described above are part of the base Qwen3.8 model path. The excluded item is the separate speculative-decoding algorithm, not PLE storage or lookup.
+
 ## Release success
 
 The project is successful when the release criteria in `release-criteria.md` pass on the target server and the full system can be rebuilt from a clean checkout using pinned sources and documented commands.

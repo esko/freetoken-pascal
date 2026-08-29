@@ -43,7 +43,7 @@ A tiny Qwen4 model passes CPU/reference tests. When the P4 arrives, a single P4 
 - additional Q2/Q3/IQ types selected from real model census;
 - gate/up activation/down fused at the right boundary;
 - bounded pinned-memory and NUMA-aware host bank;
-- keep the complete quantized expert bank in DDR4; SSD expert execution is startup backing or an explicitly gated experiment, not the serving design;
+- load and pre-fault the complete quantized expert bank into a no-swap DDR4 serving allocation; SSD expert reads are startup backing or an explicitly gated experiment, not the serving design;
 - parity and microbenchmark suite.
 
 The ABI slice precedes AVX2 kernels. It defines immutable heterogeneous expert-bank
