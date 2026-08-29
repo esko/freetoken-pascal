@@ -50,7 +50,11 @@ from freetoken.moe.cpu_abi import (
     _clear_output,
 )
 from freetoken.moe.cpu_topology import WorkerPlan
-from freetoken.moe.ggml_reference import BUILTIN_REFERENCE_DECODERS
+from freetoken.moe.ggml_reference import (
+    BUILTIN_REFERENCE_DECODERS,
+    canonical_quant_name,
+    canonical_reference_quant_name,
+)
 from freetoken.moe.mixed_gemv import _FORMATS as _MIXED_FORMATS
 from freetoken.moe.mixed_gemv import MixedGemvPrimitive, select_mixed_gemv_primitive
 
@@ -60,6 +64,16 @@ Q4K_SCALE_BYTES = 12
 Q4K_DATA_OFFSET = 16
 Q4K_MODE = Literal["auto", "scalar", "avx2"]
 _Q4K_TYPES = frozenset({12, "Q4_K", "q4_k"})
+_KNOWN_QUANT_IDS = {
+    7: "Q5_1",
+    8: "Q8_0",
+    12: "Q4_K",
+    13: "Q5_K",
+    18: "IQ3_XXS",
+    20: "IQ4_NL",
+    23: "IQ4_XS",
+}
+_KNOWN_QUANT_NAMES = frozenset(_KNOWN_QUANT_IDS.values())
 _AFFINITY_STARTUP_TIMEOUT_SECONDS = 5.0
 
 
@@ -106,6 +120,30 @@ def partition_q4_k_routes(route_count: int, thread_count: int) -> tuple[tuple[in
 
 def _is_q4_k_descriptor(descriptor: CpuExpertDescriptor) -> bool:
     return descriptor.quant_type in _Q4K_TYPES and descriptor.quant_name.upper() == "Q4_K"
+
+
+def _validate_quant_type_name_contract(descriptor: CpuExpertDescriptor) -> None:
+    """Reject known GGML type/name mismatches before decoder or census selection."""
+    name = descriptor.quant_name.upper()
+    type_name: str | None
+    try:
+        type_name = _KNOWN_QUANT_IDS.get(int(descriptor.quant_type))
+    except (TypeError, ValueError):
+        type_name = None
+    if type_name is None and str(descriptor.quant_type).upper() in _KNOWN_QUANT_NAMES:
+        type_name = str(descriptor.quant_type).upper()
+    if (type_name is not None or name in _KNOWN_QUANT_NAMES) and canonical_quant_name(
+        descriptor.quant_type, descriptor.quant_name
+    ) is None:
+        raise UnsupportedQuantType(
+            f"{descriptor.projection} quant type/name contract is inconsistent: "
+            f"{descriptor.quant_type!r}/{descriptor.quant_name!r}"
+        )
+
+
+def _reference_decoder_name(descriptor: CpuExpertDescriptor) -> str | None:
+    """Resolve a built-in reference name after canonical validation."""
+    return canonical_reference_quant_name(descriptor.quant_type, descriptor.quant_name)
 
 
 def _has_q4_k_geometry(descriptor: CpuExpertDescriptor) -> bool:
@@ -610,6 +648,8 @@ class Q4KExecutor:
         worker_plan: WorkerPlan | None = None,
     ) -> None:
         self.layout = layout
+        for descriptor in layout.descriptors:
+            _validate_quant_type_name_contract(descriptor)
         self.primitive = select_q4_k_primitive(mode)
         self.mixed_primitive = select_mixed_gemv_primitive(mode)
         self.requested_mode = str(mode).lower()
@@ -671,7 +711,11 @@ class Q4KExecutor:
                     capability_fallback_reason = (
                         capability_fallback_reason or "unsupported_alignment"
                     )
-            elif _mixed_format(descriptor) is not None and _has_mixed_geometry(descriptor):
+            elif (
+                self.mixed_primitive.isa == "avx2"
+                and _mixed_format(descriptor) is not None
+                and _has_mixed_geometry(descriptor)
+            ):
                 if descriptor.source_address is None or descriptor.source_address % alignment:
                     mixed_descriptors = frozenset(
                         key
@@ -684,7 +728,9 @@ class Q4KExecutor:
 
         if not q4_descriptors and not mixed_descriptors:
             for descriptor in layout.descriptors:
-                if not _is_q4_k_descriptor(descriptor):
+                if not _is_q4_k_descriptor(descriptor) and not (
+                    _packed_source(descriptor) and _reference_decoder_name(descriptor) is not None
+                ):
                     capability_fallback_reason = (
                         capability_fallback_reason or "unsupported_quant_type"
                     )
@@ -712,11 +758,7 @@ class Q4KExecutor:
             and len(self._direct_descriptors) != len(layout.descriptors)
             and reference_descriptors
             and all(
-                not _has_q4_k_marker(descriptor)
-                and (
-                    descriptor.quant_type in BUILTIN_REFERENCE_DECODERS
-                    or descriptor.quant_name in BUILTIN_REFERENCE_DECODERS
-                )
+                not _has_q4_k_marker(descriptor) and _reference_decoder_name(descriptor) is not None
                 for descriptor in reference_descriptors
             )
         ):
@@ -855,11 +897,8 @@ class Q4KExecutor:
             source = descriptor.source
             if isinstance(source, np.ndarray) or hasattr(source, "expert_dense"):
                 selected.add("reference")
-            elif (
-                descriptor.quant_type in BUILTIN_REFERENCE_DECODERS
-                or descriptor.quant_name in BUILTIN_REFERENCE_DECODERS
-            ):
-                selected.add(f"reference_{descriptor.quant_name.lower()}")
+            elif (reference_name := _reference_decoder_name(descriptor)) is not None:
+                selected.add(f"reference_{reference_name.lower()}")
             else:
                 selected.add("reference")
         return tuple(sorted(selected or {"reference"}))

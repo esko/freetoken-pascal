@@ -20,6 +20,7 @@ from freetoken.moe.real_artifact_probe import (
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "manifests/qwen38-gguf.json"
 CENSUS = ROOT / "tests/fixtures/results/qwen38-q4-census.metadata.json"
+CENSUS_Q3 = ROOT / "tests/fixtures/results/qwen38-q3-census.metadata.json"
 
 
 def _q8_row(codes: np.ndarray) -> bytes:
@@ -155,9 +156,11 @@ def test_probe_reports_oracle_mismatch_separately_from_scalar_native_ab(
     assert result["ab"]["correct"] is False
 
 
-def _metadata(*, layer: int = 0, expert: int = 0) -> tuple[dict, dict, dict]:
+def _metadata(
+    *, layer: int = 0, expert: int = 0, census_path: Path = CENSUS
+) -> tuple[dict, dict, dict]:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    census = json.loads(CENSUS.read_text(encoding="utf-8"))
+    census = json.loads(census_path.read_text(encoding="utf-8"))
     records = {
         record["name"]: record
         for record in census["tensors"]
@@ -199,6 +202,18 @@ def _ranges_for_layer(layer: int, *, expert: int = 0):
         start = int(record["offset"]) + expert * size
         payloads[(start, start + size - 1)] = bytes((index * 13) % 256 for index in range(size))
     return census, payloads, int(shard["size"])
+
+
+def _actual_q3_census_geometry(
+    *, layer: int
+) -> tuple[dict, dict, dict[str, bytes], dict[str, dict]]:
+    """Select actual Qwen Q3 census records while fetching one expert per bank."""
+    manifest, census, records = _metadata(layer=layer, census_path=CENSUS_Q3)
+    sources: dict[str, bytes] = {}
+    for projection in ("gate", "up", "down"):
+        record = records[f"blk.{layer}.ffn_{projection}_exps.weight"]
+        sources[projection] = bytes(int(record["shape"][1]) * int(record["row_bytes"]))
+    return manifest, census, sources, records
 
 
 def test_range_fetcher_requires_exact_content_range_and_length(tmp_path: Path) -> None:
@@ -344,6 +359,55 @@ def test_build_probe_layout_rejects_unknown_type_and_bad_offsets() -> None:
     )["shard_index"] = -1
     with pytest.raises(ArtifactProbeError, match="invalid shard index"):
         build_probe_layout(manifest, negative_shard, layer=0, expert=0, sources=sources)
+
+
+@pytest.mark.parametrize("layer", [0, 2, 4, 30, 46, 47])
+def test_probe_accepts_actual_qwen38_q3_census_records_without_full_expert_banks(
+    layer: int,
+) -> None:
+    manifest, census, sources, records = _actual_q3_census_geometry(layer=layer)
+    layout = build_probe_layout(
+        manifest,
+        census,
+        layer=layer,
+        expert=0,
+        sources=sources,
+        variant="UD-Q3_K_XL",
+    )
+    assert [item.num_experts for item in layout.descriptors] == [1, 1, 1]
+    for descriptor in layout.descriptors:
+        record = records[f"blk.{layer}.ffn_{descriptor.projection}_exps.weight"]
+        assert descriptor.input_dim == int(record["shape"][2])
+        assert descriptor.output_dim == int(record["shape"][1])
+        assert descriptor.row_stride_bytes == int(record["row_bytes"])
+        assert descriptor.quant_type == int(record["quant_type"])
+        assert descriptor.quant_name == record["quant_name"]
+    assert [item.quant_name for item in layout.descriptors] == {
+        0: ["IQ3_XXS", "IQ3_XXS", "IQ4_NL"],
+        2: ["IQ4_XS", "IQ4_XS", "Q8_0"],
+        4: ["IQ3_XXS", "IQ3_XXS", "Q8_0"],
+        30: ["IQ3_XXS", "IQ3_XXS", "Q8_0"],
+        46: ["IQ3_XXS", "IQ3_XXS", "Q8_0"],
+        47: ["IQ3_XXS", "IQ3_XXS", "Q8_0"],
+    }[layer]
+
+
+def test_probe_rejects_known_name_with_wrong_quant_type() -> None:
+    manifest, census, sources, _records = _actual_q3_census_geometry(layer=0)
+    census = json.loads(json.dumps(census))
+    gate = next(
+        record for record in census["tensors"] if record["name"] == "blk.0.ffn_gate_exps.weight"
+    )
+    gate["quant_type"] = 999
+    with pytest.raises(ArtifactProbeError, match="unsupported or inconsistent quant"):
+        build_probe_layout(
+            manifest,
+            census,
+            layer=0,
+            expert=0,
+            sources=sources,
+            variant="UD-Q3_K_XL",
+        )
 
 
 def test_probe_fetches_normal_and_promoted_layers_and_reports_ab(
