@@ -4,6 +4,7 @@
 
 - [Product scope](product-scope.md)
 - [System architecture](architecture.md)
+- [2026-08-29 status and evidence review](reviews/2026-08-29-status-and-evidence-review.md)
 - [Hardware target](hardware-target.md)
 - [Upstream integration map](upstream-map.md)
 - [Provenance and license review](provenance-review.md)
