@@ -1,5 +1,5 @@
 schema_version: 2
-updated: "2026-08-28"
+updated: "2026-08-29"
 policy:
   require_commit_sha: true
   require_license: true
@@ -261,6 +261,37 @@ sources:
     responsible_issue: 11
     notice_required: false
     imports: []
+  - id: llama-iq-reference
+    repository: https://github.com/ggml-org/llama.cpp
+    upstream_ref: refs/pull/27742/head
+    ref: eaf93765572e794b8e3754fe45adbe12d381e997
+    license: MIT
+    role: IQ3_XXS, IQ4_NL and IQ4_XS adapted scalar dequantization implementation
+    usage: imported
+    responsible_issue: 17
+    notice_required: true
+    imports:
+      - source_path: ggml/src/ggml-common.h
+        destination_path: python/freetoken/moe/ggml_reference.py
+        source_ref: eaf93765572e794b8e3754fe45adbe12d381e997
+        method: adapted
+        local_modifications:
+          - copy the IQ3_XXS grid and IQ4_NL codebook constants byte-for-byte from the pinned MIT source
+          - independently reimplement scalar block, row and bounded-workspace dequantization in Python
+          - retain the source commit and file attribution in this module and the complete MIT notice in NOTICE
+        license: MIT
+        header_policy: not applicable
+        responsible_issue: 17
+      - source_path: ggml/src/ggml-quants.c
+        destination_path: python/freetoken/moe/ggml_reference.py
+        source_ref: eaf93765572e794b8e3754fe45adbe12d381e997
+        method: adapted
+        local_modifications:
+          - translate the pinned IQ3_XXS, IQ4_NL and IQ4_XS dequantization arithmetic into the scalar reference path
+          - preserve the exact source commit and file attribution in this module and the complete MIT notice in NOTICE
+        license: MIT
+        header_policy: not applicable
+        responsible_issue: 17
   - id: pxq-llama
     repository: https://github.com/poisonxa16/pxq_llama.cpp
     upstream_ref: refs/heads/main

@@ -4,17 +4,21 @@
 
 This review covers the source tree after Issue #5 and the provenance schema introduced by Issue #6. The authoritative machine-readable ledger is `manifests/upstreams.yaml`; this document records the human review and reproducible verification procedure without duplicating every field.
 
-## Current imported source
+## Current imported sources
 
-Only `freetoken` has `usage: imported`. FreeToken commit `9ef3651309fe4058672f2cc92069238dea06be1b` entered through PR #30 as a complete unrelated-history merge. Its original commit graph, source paths, root Apache-2.0 license, and file contents remain reachable.
+`freetoken` and `llama-iq-reference` have `usage: imported`. FreeToken commit `9ef3651309fe4058672f2cc92069238dea06be1b` entered through PR #30 as a complete unrelated-history merge. Its original commit graph, source paths, root Apache-2.0 license, and file contents remain reachable.
 
-The full-tree `.` to `.` ledger entry is intentional: every current kernel, model, cache, server, test, benchmark, and asset imported in PR #30 comes from that one exact source tree. The root conflict decisions are enumerated in the manifest and `docs/upstream-map.md`. No later donor code has been copied or adapted yet.
+The full-tree `.` to `.` ledger entry is intentional: every current kernel, model, cache, server, test, benchmark, and asset imported in PR #30 comes from that one exact source tree. The root conflict decisions are enumerated in the manifest and `docs/upstream-map.md`.
+
+The Issue #17 `llama-iq-reference` entry pins llama.cpp commit `eaf93765572e794b8e3754fe45adbe12d381e997` and records adapted inputs from `ggml/src/ggml-common.h` and `ggml/src/ggml-quants.c` into `python/freetoken/moe/ggml_reference.py`. The IQ3_XXS grid and IQ4_NL codebook constants are byte-for-byte adaptations; the scalar decoder control flow is a downstream implementation.
 
 ## NOTICE reconciliation
 
-FreeToken did not contain an upstream `NOTICE` file at the pinned commit. Its Apache-2.0 `LICENSE` and copyright line are retained in the downstream root license. The downstream NOTICE lists only the imported `freetoken` source ID.
+FreeToken did not contain an upstream `NOTICE` file at the pinned commit. Its Apache-2.0 `LICENSE` and copyright line are retained in the downstream root license. The downstream NOTICE lists every imported source whose manifest entry has `notice_required: true`, including `llama-iq-reference`.
 
-The llama.cpp, PXQ, and vLLM entries are currently planned donors or reference-only correctness oracles. Their code is not present as a separate downstream import, so listing them as included products would be inaccurate. The validator rejects either a missing required NOTICE ID or a NOTICE ID whose manifest entry is not imported and notice-required.
+The llama.cpp Qwen4, PXQ, and vLLM entries remain planned donors or reference-only correctness oracles. Their code is not present as downstream imports, so listing those source IDs in NOTICE would be inaccurate. The validator rejects either a missing required NOTICE ID or a NOTICE ID whose manifest entry is not imported and notice-required.
+
+The complete llama.cpp MIT permission and warranty text, including `Copyright (c) 2023-2026 The ggml authors`, is reproduced under the `llama.cpp MIT License for the adapted IQ reference implementation` heading in `NOTICE`. The manifest's `llama-iq-reference` import entries and this review both point to that notice text.
 
 ## Source headers
 

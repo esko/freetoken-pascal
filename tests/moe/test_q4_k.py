@@ -17,6 +17,7 @@ from freetoken.moe.cpu_abi import (
     UnsupportedQuantType,
     UnsupportedShape,
 )
+from freetoken.moe.ggml_reference import Q5_1_BLOCK_BYTES
 from freetoken.moe.q4_k import (
     Q4K_BLOCK_BYTES,
     Q4K_BLOCK_ELEMENTS,
@@ -367,17 +368,8 @@ def test_q4_k_inconsistent_type_name_is_not_reinterpreted() -> None:
         (mismatched_gate, layout.descriptor(0, "up"), layout.descriptor(0, "down")),
         top_k=1,
     )
-    executor = Q4KExecutor(mismatched, mode="scalar")
-    executor.prepare(max_tokens=1, max_routes=1)
     with pytest.raises(UnsupportedQuantType, match="inconsistent"):
-        executor.execute(
-            0,
-            np.ones((1, Q4K_BLOCK_ELEMENTS), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.int32),
-            np.ones((1, 1), dtype=np.float32),
-        )
-    assert executor.last_telemetry is not None
-    assert executor.last_telemetry.fallback_reason == "unsupported_quant_type"
+        Q4KExecutor(mismatched, mode="scalar")
 
 
 def test_q4_k_unsupported_alignment_is_a_loud_scalar_fallback() -> None:
@@ -437,13 +429,15 @@ def test_q4_k_unsupported_format_falls_back_through_reference_abi() -> None:
 
 def test_q4_k_mixed_promoted_projection_uses_supplied_reference_decoder() -> None:
     layout, _ = _q4_layout(experts=1)
-    promoted = np.ones((1, Q4K_BLOCK_ELEMENTS, Q4K_BLOCK_ELEMENTS), dtype=np.float32)
-    promoted_packed = promoted.view(np.uint8).reshape(1, Q4K_BLOCK_ELEMENTS, -1)
+    promoted_packed = np.ones(
+        (1, Q4K_BLOCK_ELEMENTS, Q4K_BLOCK_ELEMENTS // 32 * Q5_1_BLOCK_BYTES),
+        dtype=np.uint8,
+    )
     promoted_source = _PackedSource(promoted_packed)
     up = layout.descriptor(0, "up")
     promoted_descriptor = replace(
         up,
-        quant_type=13,
+        quant_type=7,
         quant_name="Q5_1",
         row_stride_bytes=promoted_packed.shape[-1],
         expert_stride_bytes=promoted_packed.shape[1] * promoted_packed.shape[2],
@@ -457,10 +451,11 @@ def test_q4_k_mixed_promoted_projection_uses_supplied_reference_decoder() -> Non
     )
 
     def decode_q5(packed, descriptor, *, out):
-        np.copyto(out, packed.view(np.float32).reshape(descriptor.output_dim, descriptor.input_dim))
+        assert packed.shape == (descriptor.output_dim, descriptor.row_stride_bytes)
+        out.fill(1.0)
         return out
 
-    executor = Q4KExecutor(mixed, mode="scalar", reference_decoders={13: decode_q5})
+    executor = Q4KExecutor(mixed, mode="scalar", reference_decoders={7: decode_q5})
     executor.prepare(max_tokens=1, max_routes=1)
     result = executor.execute(
         0,

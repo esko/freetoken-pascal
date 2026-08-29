@@ -435,6 +435,19 @@ def _thread_snapshot() -> dict[str, object]:
     }
 
 
+def _unexpected_workers(
+    baseline_workers: Sequence[dict[str, object]],
+    current_workers: Sequence[dict[str, object]],
+) -> tuple[dict[str, object], ...]:
+    """Return current mixed workers that were not present at baseline.
+
+    An unrelated executor may be garbage-collected while the stress run is
+    active, so baseline workers are allowed to disappear.  New workers still
+    indicate a leaked executor and must fail cleanup.
+    """
+    return tuple(worker for worker in current_workers if worker not in baseline_workers)
+
+
 def _swap_probe(*, enabled: bool) -> dict[str, object]:
     if not enabled:
         return {"status": "not-requested", "source": None, "errors": []}
@@ -821,11 +834,13 @@ def _cleanup_check(
     if _live_buffer_ids() != baseline_live:
         errors.append("live host buffers were not restored")
     current_workers = _thread_snapshot()["workers"]
-    if current_workers != baseline_workers:
-        errors.append("freetoken-mixed worker identities were not restored")
+    assert isinstance(current_workers, tuple)
+    unexpected_workers = _unexpected_workers(baseline_workers, current_workers)
+    if unexpected_workers:
+        errors.append(f"new freetoken-mixed workers leaked: {unexpected_workers!r}")
     current_fds = _fd_count()
-    if baseline_fds is not None and current_fds is not None and current_fds != baseline_fds:
-        errors.append(f"file-descriptor count changed: {baseline_fds} -> {current_fds}")
+    if baseline_fds is not None and current_fds is not None and current_fds > baseline_fds:
+        errors.append(f"file-descriptor count increased: {baseline_fds} -> {current_fds}")
     if errors:
         raise RuntimeError("; ".join(errors))
 
@@ -987,13 +1002,13 @@ def run_stress(
             if baseline_fds is None or final_fds is None
             else final_fds - baseline_fds,
             "restored": (
-                None if baseline_fds is None or final_fds is None else baseline_fds == final_fds
+                None if baseline_fds is None or final_fds is None else final_fds <= baseline_fds
             ),
         },
         "thread_counts": {
             "before": baseline_threads,
             "after": final_threads,
-            "restored": final_threads == baseline_threads,
+            "restored": not _unexpected_workers(baseline_workers, tuple(final_threads["workers"])),
         },
         "rss_bytes": {
             "before": rss_before,

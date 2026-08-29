@@ -23,6 +23,7 @@ from freetoken.moe.cpu_abi import (
     cpu_layout_from_source_layout,
 )
 from freetoken.moe.cpu_topology import WorkerAffinityPolicy, WorkerPlan, discover_cpu_topology
+from freetoken.moe.ggml_reference import canonical_quant_name
 from freetoken.moe.q4_k import Q4KExecutor
 
 if TYPE_CHECKING:
@@ -37,7 +38,7 @@ class UnsupportedGGUFCpuConfiguration(ValueError):
     """A requested runtime mode is outside the decode-only bridge contract."""
 
 
-_SUPPORTED_QUANTS = frozenset({"Q4_K", "Q5_K", "Q5_1", "Q8_0"})
+_SUPPORTED_QUANTS = frozenset({"Q4_K", "Q5_K", "Q5_1", "Q8_0", "IQ3_XXS", "IQ4_NL", "IQ4_XS"})
 _UNSET = object()
 
 
@@ -313,9 +314,14 @@ class QwenGGUFCpuExpertBundle:
         )
         unsupported = sorted(
             {
-                descriptor.quant_name
+                (
+                    f"{descriptor.quant_type}/{descriptor.quant_name}"
+                    if str(descriptor.quant_name).upper() in _SUPPORTED_QUANTS
+                    else descriptor.quant_name
+                )
                 for descriptor in layout.descriptors
-                if descriptor.quant_name not in _SUPPORTED_QUANTS
+                if canonical_quant_name(descriptor.quant_type, descriptor.quant_name)
+                not in _SUPPORTED_QUANTS
             }
         )
         if unsupported:

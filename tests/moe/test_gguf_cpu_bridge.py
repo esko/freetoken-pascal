@@ -19,6 +19,9 @@ Q4_K = 12
 Q5_K = 13
 Q5_1 = 7
 Q8_0 = 8
+IQ3_XXS = 18
+IQ4_NL = 20
+IQ4_XS = 23
 
 
 @dataclass
@@ -75,8 +78,17 @@ def _descriptor(
     output_dim: int = 256,
     experts: int = 2,
 ) -> tuple[ExpertBankDescriptor, np.ndarray]:
-    block_bytes = {"Q4_K": 144, "Q5_K": 176, "Q5_1": 24, "Q8_0": 34}[quant_name]
-    block_elements = 256 if quant_name in {"Q4_K", "Q5_K"} else 32
+    block_bytes = {
+        "Q4_K": 144,
+        "Q5_K": 176,
+        "Q5_1": 24,
+        "Q8_0": 34,
+        "IQ3_XXS": 98,
+        "IQ4_NL": 18,
+        "IQ4_XS": 136,
+        "MYSTERY": 34,
+    }[quant_name]
+    block_elements = 256 if quant_name in {"Q4_K", "Q5_K", "IQ3_XXS", "IQ4_XS"} else 32
     row_bytes = input_dim // block_elements * block_bytes
     values = np.ascontiguousarray(
         np.arange(experts * output_dim * row_bytes, dtype=np.uint8).reshape(
@@ -153,6 +165,43 @@ def _geometry_host(*, promoted: bool) -> QwenGGUFHostWeights:
         slot_pools=(),
         num_layers=1,
         num_experts=2,
+    )
+    layout = QwenHostLayout(
+        experts=expert_layout,
+        ple=_Ple(),  # type: ignore[arg-type]
+        total_tensor_bytes=sum(item.tensor_bytes for item in descriptors),
+        shard_paths=("synthetic.gguf",),
+    )
+    return QwenGGUFHostWeights(layout, _Banks(expert_layout, banks), _Ple())  # type: ignore[arg-type]
+
+
+def _qwen_census_geometry_host(
+    *, layer: int, gate_up: tuple[int, str], down: tuple[int, str]
+) -> QwenGGUFHostWeights:
+    """Build one expert with the Qwen census geometry without a 512-expert bank."""
+    descriptors = []
+    banks = {}
+    for projection, (quant_type, quant_name) in (
+        ("gate", gate_up),
+        ("up", gate_up),
+        ("down", down),
+    ):
+        descriptor, values = _descriptor(
+            layer,
+            projection,
+            quant_type,
+            quant_name,
+            input_dim=2560 if projection != "down" else 640,
+            output_dim=640 if projection != "down" else 2560,
+            experts=1,
+        )
+        descriptors.append(descriptor)
+        banks[(layer, projection)] = _Bank(descriptor, values)
+    expert_layout = GGUFExpertLayout(
+        descriptors=tuple(descriptors),
+        slot_pools=(),
+        num_layers=layer + 1,
+        num_experts=1,
     )
     layout = QwenHostLayout(
         experts=expert_layout,
@@ -522,6 +571,154 @@ def test_bridge_preserves_nonsquare_qwen_geometry_and_real_packed_strides(
     assert [item.output_dim for item in bundle.layout.descriptors] == [640, 640, 2560]
     assert [item.row_stride_bytes for item in bundle.layout.descriptors] == list(expected_strides)
     bundle.close()
+
+
+@pytest.mark.parametrize(
+    ("layer", "gate_up", "down", "expected_strides", "expected_census"),
+    [
+        (
+            0,
+            (IQ3_XXS, "IQ3_XXS"),
+            (IQ4_NL, "IQ4_NL"),
+            (980, 980, 360),
+            ("reference_iq3_xxs", "reference_iq4_nl"),
+        ),
+        (
+            2,
+            (IQ4_XS, "IQ4_XS"),
+            (Q8_0, "Q8_0"),
+            (1360, 1360, 680),
+            ("reference_iq4_xs", "reference_q8_0"),
+        ),
+        (
+            4,
+            (IQ3_XXS, "IQ3_XXS"),
+            (Q8_0, "Q8_0"),
+            (980, 980, 680),
+            ("reference_iq3_xxs", "reference_q8_0"),
+        ),
+        (
+            30,
+            (IQ3_XXS, "IQ3_XXS"),
+            (Q8_0, "Q8_0"),
+            (980, 980, 680),
+            ("reference_iq3_xxs", "reference_q8_0"),
+        ),
+        (
+            46,
+            (IQ3_XXS, "IQ3_XXS"),
+            (Q8_0, "Q8_0"),
+            (980, 980, 680),
+            ("reference_iq3_xxs", "reference_q8_0"),
+        ),
+        (
+            47,
+            (IQ3_XXS, "IQ3_XXS"),
+            (Q8_0, "Q8_0"),
+            (980, 980, 680),
+            ("reference_iq3_xxs", "reference_q8_0"),
+        ),
+    ],
+)
+def test_bridge_accepts_one_expert_qwen38_q3_census_geometries(
+    layer: int,
+    gate_up: tuple[int, str],
+    down: tuple[int, str],
+    expected_strides: tuple[int, int, int],
+    expected_census: tuple[str, str],
+) -> None:
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    host = _qwen_census_geometry_host(layer=layer, gate_up=gate_up, down=down)
+    bundle = QwenGGUFCpuExpertBundle.from_host(
+        host,
+        top_k=1,
+        mode="scalar",
+        required_alignment=1,
+    )
+    try:
+        assert [item.num_experts for item in bundle.layout.descriptors] == [1, 1, 1]
+        assert [item.input_dim for item in bundle.layout.descriptors] == [2560, 2560, 640]
+        assert [item.output_dim for item in bundle.layout.descriptors] == [640, 640, 2560]
+        assert [item.row_stride_bytes for item in bundle.layout.descriptors] == list(
+            expected_strides
+        )
+        assert bundle.kernel_census_for_layer(layer) == expected_census
+    finally:
+        bundle.close()
+
+
+def test_bridge_rejects_unknown_quant_name_instead_of_claiming_reference_support() -> None:
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle, UnsupportedGGUFCpuConfiguration
+
+    descriptors = []
+    banks = {}
+    for projection in ("gate", "up", "down"):
+        descriptor, values = _descriptor(
+            0,
+            projection,
+            999,
+            "MYSTERY",
+            input_dim=256,
+            output_dim=256,
+            experts=1,
+        )
+        descriptors.append(descriptor)
+        banks[(0, projection)] = _Bank(descriptor, values)
+    expert_layout = GGUFExpertLayout(tuple(descriptors), (), 1, 1)
+    host_layout = QwenHostLayout(
+        expert_layout, _Ple(), sum(item.tensor_bytes for item in descriptors), ("synthetic.gguf",)
+    )
+    host = QwenGGUFHostWeights(host_layout, _Banks(expert_layout, banks), _Ple())  # type: ignore[arg-type]
+    with pytest.raises(UnsupportedGGUFCpuConfiguration, match="MYSTERY"):
+        QwenGGUFCpuExpertBundle.from_host(host, top_k=1, mode="scalar")
+    host.close()
+
+
+@pytest.mark.parametrize(
+    ("quant_type", "quant_name"),
+    [
+        (999, "Q8_0"),
+        (8, "MYSTERY"),
+        (7, "Q8_0"),
+        (13, "Q5_1"),
+        (7, "Q5_K"),
+        (13, "Q8_0"),
+    ],
+)
+def test_bridge_rejects_supported_name_with_noncanonical_quant_type(
+    quant_type: int, quant_name: str
+) -> None:
+    from freetoken.moe.gguf_cpu import (
+        QwenGGUFCpuExpertBundle,
+        UnsupportedGGUFCpuConfiguration,
+    )
+
+    descriptors = []
+    banks = {}
+    for projection in ("gate", "up", "down"):
+        descriptor, values = _descriptor(
+            0,
+            projection,
+            quant_type,
+            quant_name,
+            input_dim=256,
+            output_dim=256,
+            experts=1,
+        )
+        descriptors.append(descriptor)
+        banks[(0, projection)] = _Bank(descriptor, values)
+    expert_layout = GGUFExpertLayout(tuple(descriptors), (), 1, 1)
+    host_layout = QwenHostLayout(
+        expert_layout,
+        _Ple(),
+        sum(item.tensor_bytes for item in descriptors),
+        ("synthetic.gguf",),
+    )
+    host = QwenGGUFHostWeights(host_layout, _Banks(expert_layout, banks), _Ple())  # type: ignore[arg-type]
+    with pytest.raises(UnsupportedGGUFCpuConfiguration, match=quant_name):
+        QwenGGUFCpuExpertBundle.from_host(host, top_k=1, mode="scalar")
+    host.close()
 
 
 def test_failed_bundle_constructor_closes_executor_without_claiming_or_closing_host(
