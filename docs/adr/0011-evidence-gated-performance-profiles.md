@@ -5,12 +5,13 @@
 
 ## Context
 
-The three-tier storage decision in ADR 0010 establishes where PLE, routed experts, and hot computation belong. Recent Qwen3.8 field results add four constraints that are not fully captured by storage placement alone:
+The three-tier storage decision in ADR 0010 establishes where PLE, routed experts, and hot computation belong. Recent Qwen3.8 field results add five constraints that are not fully captured by storage placement alone:
 
 1. Sparse PLE reads can trigger severe kernel readahead and read amplification unless the runtime explicitly communicates random-access intent and measures physical I/O.
 2. Hybrid GPU placement can have a sharp cliff: one additional layer, workspace, context allocation, or cache increment can silently trigger fallback or spill and collapse throughput while outputs remain correct.
-3. Whole-model bit width does not predict speed. Q4 is the quality reference, a specific Q3 artifact is a serious whole-model throughput candidate, and Q5/Q8 are primarily component-level candidates for sensitive or continuously active tensors on this 128 GB host.
-4. Exact context-derived n-gram speculation has produced large, output-identical gains on copy-heavy code and structured transformations while remaining neutral on a novel-code control. Native MTP also exists, but its artifacts and runtime contracts are still fragmented and its value on Pascal is unproven.
+3. QSA selection and top-k/gather workspaces can grow or become retained during the first large prefill, so post-load free VRAM does not establish a safe serving envelope. Context-dependent host synchronization and selection cost can also dominate long-context decode.
+4. Whole-model bit width does not predict speed. Q4 is the quality reference, a specific Q3 artifact is a serious whole-model throughput candidate, and Q5/Q8 are primarily component-level candidates for sensitive or continuously active tensors on this 128 GB host.
+5. Exact context-derived n-gram speculation has produced large, output-identical gains on copy-heavy code and structured transformations while remaining neutral on a novel-code control. Native MTP also exists, but its artifacts and runtime contracts are still fragmented and its value on Pascal is unproven.
 
 The North Star remains a reliable, highly performant, full-model Qwen3.8-Flash-Next server on the dual-Xeon, dual-P4 target. No optimization may hide a slower fallback, change model topology, or become a release dependency without evidence from the actual hardware.
 
@@ -34,11 +35,13 @@ The lookup planner may deduplicate, sort, and coalesce requests, but it must be 
 
 IQ4_NL remains the initial reference codec. The PLE interface identifies its row codec explicitly so near-lossless Q6/Q8 or other row formats can be evaluated without changing lookup semantics. No alternative becomes a default without PLE reconstruction and model-level quality gates.
 
-### Placement-cliff safety
+### Placement-cliff and QSA workspace safety
 
-Every release-capable configuration has a per-GPU placement plan and a measured startup canary. The planner accounts separately for resident tensors, shared experts, recurrent/QSA/KV state, CUDA context, workspaces, transfer buffers, expert-cache slots, and a configurable safety reserve.
+Every release-capable configuration has a per-GPU placement plan and a measured startup canary. The planner accounts separately for resident tensors, shared experts, recurrent/QSA/KV state, persistent and transient QSA score/top-k/gather workspaces, CUDA context, generic workspaces, transfer buffers, expert-cache slots, and a configurable safety reserve.
 
-Readiness requires observed allocation and selected-kernel telemetry to agree with the plan. Unexpected fallback, managed-memory use, host spill, repeated allocation recovery, or insufficient headroom causes automatic cache/placement backoff and a repeated canary. The server fails readiness if no safe profile passes. Release defaults retain a measured margin rather than using the last configuration that merely starts.
+Readiness requires observed allocation and selected-kernel telemetry to agree with the plan after both model load and a representative large-prefill canary. Unexpected fallback, managed-memory use, host spill, repeated allocation recovery, unbounded or unexplained retained workspace growth, or insufficient headroom causes automatic cache/context/batch/placement backoff and a repeated canary. The server fails readiness if no safe profile passes. Release defaults retain a measured margin below the post-prefill cliff rather than using the last configuration that merely loads or starts.
+
+QSA selection, gather, sparse-attention and state-update costs are measured separately across context tiers. Workspace exhaustion produces controlled backoff or request/readiness failure, not process abort. Reusable workspaces are bounded and may be captured/reused only where dynamic PLE/QSA state semantics remain correct.
 
 ### Expert-cache evidence sequence
 
@@ -64,9 +67,10 @@ Native MTP, external draft models, DFlash, and lossy speculative prefill remain 
 - Issue #13 gains random-access advice, read-amplification telemetry, adaptive vectorized lookup, and an explicit PLE codec boundary.
 - Issue #17 treats a named Q3 whole-model artifact as the throughput candidate while benchmarking Q5/Q8 at component scope where full-model fit is impossible.
 - Issue #21 uses static hot-expert placement as a mandatory comparator and warm-start source before dynamic cache claims.
-- Issue #73 makes placement planning, canary execution, backoff, and fail-readiness release-critical.
+- Issue #73 makes placement planning, post-load/post-prefill high-water accounting, canary execution, backoff, and fail-readiness release-critical.
+- Issue #76 makes QSA context scaling, workspace bounds, synchronization and controlled-OOM behavior explicit release work.
 - Issue #74 adds exact context-derived speculation as optional, output-preserving work that cannot block core v1.
-- Issue #29 reports placement cliffs, PLE read amplification, Q4/Q3 whole-model profiles, component-format tests, and all relevant fallbacks.
+- Issue #29 reports placement cliffs, QSA context scaling, PLE read amplification, Q4/Q3 whole-model profiles, component-format tests, and all relevant fallbacks.
 - Field measurements from modern GPUs and unified-memory systems are evidence for what to test, not performance predictions for the P4 server.
 
 ## Alternatives considered
@@ -74,6 +78,8 @@ Native MTP, external draft models, DFlash, and lossy speculative prefill remain 
 Use the smallest quant as the default: rejected because decoder kernels and dequantization cost can reverse the apparent bit-width ordering.
 
 Fill VRAM until allocation fails: rejected because spill and fallback can occur before a visible OOM and may produce a healthy but unusably slow service.
+
+Trust post-load free VRAM: rejected because first-large-prefill QSA/top-k/gather workspaces can create a later high-water mark or OOM.
 
 Always sort PLE IDs: rejected because decode-width planner overhead can exceed its benefit; the policy is adaptive and measured.
 
