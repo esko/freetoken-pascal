@@ -239,6 +239,35 @@ sources:
     responsible_issue: 77
     notice_required: false
     imports: []
+  - id: freetoken-fp8-rowwise-safety
+    repository: https://github.com/FlashML-org/FreeToken
+    upstream_ref: refs/heads/main
+    ref: 58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6
+    license: Apache-2.0
+    role: row-wise FP8 scaled-mm safety probe and segmented fallback
+    usage: imported
+    responsible_issue: 77
+    notice_required: true
+    imports:
+      - source_path: python/freetoken/kernel/triton/fp8_pertensor_linear.py
+        destination_path: python/freetoken/kernel/triton/fp8_pertensor_linear.py
+        source_ref: 58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6
+        method: cherry-pick
+        local_modifications:
+          - guard the load-time probe behind native-FP8 capability so Pascal remains on W8A16
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 77
+      - source_path: tests/kernels/test_fp8_pertensor_linear.py
+        destination_path: tests/kernels/test_fp8_pertensor_linear.py
+        source_ref: 58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6
+        method: cherry-pick
+        local_modifications:
+          - preserve the upstream side-stream and segmented-scale regressions
+          - add a no-native-FP8 load regression for Pascal
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 77
   - id: freetoken-gguf-grid-z
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 131
