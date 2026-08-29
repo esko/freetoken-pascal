@@ -283,6 +283,45 @@ def test_middle_adapter_failure_rolls_back_without_partial_mutation(fake_adapter
     assert model.state_dict().keys() == before.keys()
 
 
+def test_state_dict_serializes_before_concurrent_attachment(fake_adapter, monkeypatch):
+    model, originals = _model()
+    entered = threading.Event()
+    release = threading.Event()
+    attach_finished = threading.Event()
+    captured = {}
+    base_state_dict = BaseOP.state_dict
+
+    def blocked_state_dict(owner, **kwargs):
+        if owner is model:
+            entered.set()
+            assert release.wait(timeout=2)
+        return base_state_dict(owner, **kwargs)
+
+    monkeypatch.setattr(BaseOP, "state_dict", blocked_state_dict)
+    state_thread = threading.Thread(
+        target=lambda: captured.setdefault("result", model.state_dict(prefix="snapshot"))
+    )
+    state_thread.start()
+    assert entered.wait(timeout=2)
+
+    attach_thread = threading.Thread(
+        target=lambda: (model.attach_gguf_cpu_expert_bundle(_bundle()), attach_finished.set())
+    )
+    attach_thread.start()
+    assert not attach_finished.wait(timeout=0.1)
+
+    release.set()
+    state_thread.join(timeout=2)
+    attach_thread.join(timeout=2)
+    assert not state_thread.is_alive()
+    assert not attach_thread.is_alive()
+    state = captured["result"]
+    for index, original in enumerate(originals):
+        assert state[f"snapshot.layers.{index}.mlp.experts.weights"] is original.weights
+    assert tuple(layer.mlp.experts for layer in model.layers.op_list) != originals
+    model.detach_gguf_cpu_expert_bundle()
+
+
 @pytest.mark.parametrize(
     ("bundle_kwargs", "message"),
     [

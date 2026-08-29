@@ -872,8 +872,11 @@ class Qwen4ExpModel(BaseOP):
         result: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Keep runtime expert attachment orthogonal to model weight serialization."""
-        result = super().state_dict(prefix=prefix, result=result)
-        return append_original_expert_state(self, result, prefix=prefix)
+        # Capture the graph and append resident expert state under the same lock as
+        # attach/detach. Otherwise a concurrent swap can produce a mixed snapshot.
+        with self._gguf_attachment_lock:
+            result = super().state_dict(prefix=prefix, result=result)
+            return append_original_expert_state(self, result, prefix=prefix)
 
     def load_state_dict(
         self,
