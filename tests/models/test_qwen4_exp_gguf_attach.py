@@ -445,7 +445,7 @@ def test_eager_detach_freezes_all_bridges_before_direct_request_can_start(
             request_thread.start()
             assert bridges[1].request_started.wait(timeout=2)
 
-    fake_eager_attachment.freeze_hook = start_request_between_freezes
+    fake_eager_attachment.freeze_hook = staticmethod(start_request_between_freezes)
 
     try:
         with pytest.raises(RuntimeError, match="busy"):
