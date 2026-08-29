@@ -559,6 +559,21 @@ def parse_args(
         default=None,
         help="Optional NUMA node metadata for host banks.",
     )
+    parser.add_argument(
+        "--host-bank-enforce-numa-placement",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt in to Linux x86_64 mbind for policy-owned FTW anonymous host-bank "
+            "mappings; bind fails closed and other placement failures are reported."
+        ),
+    )
+    parser.add_argument(
+        "--host-bank-numa-sample-residency",
+        action="store_true",
+        default=False,
+        help="Sample policy-owned FTW page locations with read-only move_pages after loading.",
+    )
 
     parser.add_argument(
         "--ple-warm-mode",
@@ -726,6 +741,8 @@ def parse_args(
     selected_layers = _parse_layers(kwargs.pop("host_bank_selected_layers"))
     numa_policy = kwargs.pop("host_bank_numa_policy")
     numa_node = kwargs.pop("host_bank_numa_node")
+    enforce_numa_placement = kwargs.pop("host_bank_enforce_numa_placement")
+    sample_numa_residency = kwargs.pop("host_bank_numa_sample_residency")
     require_no_swap = kwargs.pop("host_bank_require_no_swap")
     auxiliary_policy_values = (
         max_pinned is not None,
@@ -735,6 +752,8 @@ def parse_args(
         selected_layers is not None,
         numa_policy != "preferred",
         numa_node is not None,
+        enforce_numa_placement,
+        sample_numa_residency,
         require_no_swap,
     )
     if strategy is None:
@@ -760,6 +779,8 @@ def parse_args(
                 selected_layers=selected_layers,
                 numa_policy=numa_policy,
                 numa_node=numa_node,
+                enforce_numa_placement=enforce_numa_placement,
+                sample_numa_residency=sample_numa_residency,
                 require_no_swap=require_no_swap,
             )
             policy.validate_for_config()

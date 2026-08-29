@@ -30,7 +30,7 @@ PLE and model shards stay on NVMe. Benchmark results and cache heat must not be 
 
 1. Validate driver, GPU count and compute capability.
 2. Validate model checksum and tensor census.
-3. Validate available RAM, VRAM and pinned-memory budget. For an explicit host-bank policy, add `--host-bank-require-no-swap` to fail closed on active swap, process `VmSwap`, or an unavailable/ambiguous procfs probe; this is a point-in-time admission check and performs no host swap mutation.
+3. Validate available RAM, VRAM and pinned-memory budget. For an explicit host-bank policy, add `--host-bank-require-no-swap` to fail closed on active swap, process `VmSwap`, or an unavailable/ambiguous procfs probe; this is a point-in-time admission check and performs no host swap mutation. For NUMA placement, opt in separately with `--host-bank-enforce-numa-placement`; inspect `numa_status`, target/allowed nodes, applied mappings, and any fallback reason in startup accounting. This is mapping placement telemetry, not a complete residency or affinity guarantee.
 4. Read `--ple-warm-mode` and confirm the logged PLE source, mapping and warm policy.
 5. Run startup microbench/autotune or load a hardware-profile cache tied to exact checksums.
 6. Log selected CPU/GPU kernels, layer ownership, cache slots and NUMA policy.

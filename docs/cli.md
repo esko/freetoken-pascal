@@ -132,12 +132,14 @@ The explicit policy is preflighted from FTW metadata before host-bank allocation
 | `--host-bank-max-staging-bytes` | unset | Required finite bound for `bounded-staging` preflight |
 | `--host-bank-staging-bytes`, `--host-bank-staging-slots` | 0, 2 | Fixed staging-ring geometry for the preflight primitive; the serving transfer path is not wired in this slice |
 | `--host-bank-selected-layers` | all | Metadata accepted by the policy foundation, but Engine serving rejects selective pinned residency until per-layer routing is wired |
-| `--host-bank-numa-policy`, `--host-bank-numa-node` | `preferred`, unset | Record NUMA intent for telemetry; no physical binding or affinity claim is made |
+| `--host-bank-numa-policy`, `--host-bank-numa-node` | `preferred`, unset | Record NUMA intent; placement remains disabled unless `--host-bank-enforce-numa-placement` is set |
+| `--host-bank-enforce-numa-placement` | off | Opt in to Linux x86_64 `mbind` for policy-owned FTW anonymous mmap banks; `bind` fails closed, while preferred/interleave report fallback on unavailable placement |
 | `--host-bank-require-no-swap` | off | Require a clear read-only procfs swap probe before policy-owned FTW preparation; active/process swap or unavailable/ambiguous data fails closed |
 
 Pinned policy never honors `FREETOKEN_SKIP_BANK_PIN=1`; serving fails closed rather than reporting requested pinning as applied.
 Unsupported dummy, custom-provider, and non-FTW paths reject an explicit policy instead of silently falling back.
 `--host-bank-require-no-swap` is an explicit opt-in for any host-bank strategy. It reports `VmSwap`, `SwapTotal`, `SwapFree`, active swap devices, probe source/errors, raw `swap_status`, and `no_swap_observed` in host-bank accounting. The check is read-only and point-in-time; it does not disable swap or guarantee that later model execution cannot swap. Without this flag, policy preparation does not probe procfs and reports `swap_status=not-requested`.
+NUMA placement is likewise opt-in and only applies to policy-owned FTW mappings before their first touch; it does not bind threads, change system policy, or make a full-model residency claim. Enforced `bind` requires an allowed `--host-bank-numa-node`; enforced `preferred` with no node reports an explicit fallback without issuing `mbind`, while `interleave` without one targets all online allowed nodes. With `--host-bank-numa-sample-residency`, the bounded self-only `move_pages` sample reports observed node counts and `verified`, `partial`, or `unavailable` status.
 
 ### API behaviour
 

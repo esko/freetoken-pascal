@@ -17,6 +17,8 @@ The loader and cache must understand row stride and type per pool/layer. CPU and
 
 The explicit host-bank policy may opt into a read-only no-swap admission guard. Before policy-owned allocation or FTW metadata reads it parses process `VmSwap`, system `SwapTotal`/`SwapFree`, and active `/proc/swaps` rows. Active swap, process swap, or unavailable/ambiguous procfs data rejects the policy; no swapoff, sysctl, privilege escalation, or mmap/mlock inference is permitted. Accounting records raw status, `no_swap_observed`, and source/errors; without the opt-in the policy does not probe procfs. This remains a point-in-time admission check rather than a guarantee about the complete model's later residency.
 
+NUMA placement is a separate opt-in limited to policy-owned FTW anonymous mappings. It resolves online nodes against `Mems_allowed_list`, uses only `mbind` before first touch, and reports applied/fallback status. Bind failures roll back; preferred/interleave failures fall back with telemetry. No default engine path, worker affinity, migration, `set_mempolicy`, or full-residency claim is implied.
+
 ## Alternatives considered
 
 Safetensors FP8/BF16: too large. Convert everything to one custom PXQ format: poor CPU fallback and unnecessary quality risk. Prune experts: changes model capability and does not directly reduce active compute.
