@@ -465,10 +465,28 @@ class _HostNGramEmbedding(BaseOP):
                 ).__enter__()
                 handles[scale_filename] = scale_handle
             scale = scale_handle.get_tensor(scale_key)
-            if not scale.is_floating_point() or scale.numel() != 1:
+            if (
+                not scale.is_floating_point()
+                or scale.numel() != 1
+                or not math.isfinite(float(scale))
+                or float(scale) <= 0.0
+            ):
                 raise RuntimeError(
-                    f"Qwen4-Exp PLE {scale_key} must be one floating-point value, "
+                    f"Qwen4-Exp PLE {scale_key} must be one finite positive "
+                    "floating-point value, "
                     f"got {scale.dtype} with shape {tuple(scale.shape)}"
+                )
+
+            shard_ends = torch.tensor([shard.shape[0] for shard in shards]).cumsum(0)
+            host_constants = (
+                self.layer_multipliers.cpu(),
+                self.ngram_heads_vocab_sizes.cpu(),
+                self.ngram_heads_offsets.cpu(),
+            )
+            expected_rows = int(host_constants[1][-1] + host_constants[2][-1])
+            if int(shard_ends[-1]) < expected_rows:
+                raise RuntimeError(
+                    f"PLE table has {int(shard_ends[-1])} rows, needs {expected_rows}"
                 )
         except BaseException:
             for handle in reversed(tuple(handles.values())):
@@ -477,18 +495,9 @@ class _HostNGramEmbedding(BaseOP):
 
         self._handles = list(handles.values())
         self._shards = shards
-        self._shard_ends = torch.tensor([shard.shape[0] for shard in shards]).cumsum(0)
+        self._shard_ends = shard_ends
         self._scale = scale.reshape(())
-        self._host_constants = (
-            self.layer_multipliers.cpu(),
-            self.ngram_heads_vocab_sizes.cpu(),
-            self.ngram_heads_offsets.cpu(),
-        )
-        expected_rows = int(self._host_constants[1][-1] + self._host_constants[2][-1])
-        if int(self._shard_ends[-1]) < expected_rows:
-            raise RuntimeError(
-                f"PLE table has {int(self._shard_ends[-1])} rows, needs {expected_rows}"
-            )
+        self._host_constants = host_constants
 
     def _current_ngram_ids(self) -> torch.Tensor:
         if self._host_constants is None:

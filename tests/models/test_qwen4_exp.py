@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import freetoken.models.qwen4_exp as qwen4_exp
 import gguf
 import numpy as np
 import pytest
+import safetensors
 from safetensors.torch import save_file
 import torch
 from freetoken.layers.moe import MoELayer
@@ -481,22 +483,27 @@ def _write_ple_safetensors_fixture(
     shard_shapes: tuple[tuple[int, ...], ...] = ((2, 2), (2, 2)),
     include_scale: bool = True,
     scale_shape: tuple[int, ...] = (),
+    scale_value: float = 1.0,
+    shared_file: bool = False,
 ) -> None:
     prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
     weight_map: dict[str, str] = {}
+    tensors: dict[str, torch.Tensor] = {}
     for shard_id, shape in enumerate(shard_shapes):
         key = f"{prefix}.shard_{shard_id}.weight"
-        filename = f"ple-{shard_id:05d}.safetensors"
-        save_file(
-            {key: torch.zeros(shape, dtype=torch.float8_e4m3fn)},
-            str(folder / filename),
-        )
+        filename = "ple-shared.safetensors" if shared_file else f"ple-{shard_id:05d}.safetensors"
+        tensors[key] = torch.zeros(shape, dtype=torch.float8_e4m3fn)
         weight_map[key] = filename
     if include_scale:
         key = f"{prefix}.weight_scale"
-        filename = "ple-scale.safetensors"
-        save_file({key: torch.ones(scale_shape, dtype=torch.bfloat16)}, str(folder / filename))
+        filename = "ple-shared.safetensors" if shared_file else "ple-scale.safetensors"
+        tensors[key] = torch.full(scale_shape, scale_value, dtype=torch.bfloat16)
         weight_map[key] = filename
+    if shared_file:
+        save_file(tensors, str(folder / "ple-shared.safetensors"))
+    else:
+        for key, tensor in tensors.items():
+            save_file({key: tensor}, str(folder / weight_map[key]))
     (folder / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": weight_map}), encoding="utf-8"
     )
@@ -533,8 +540,65 @@ def test_safetensors_ple_rejects_nonuniform_shard_rows(tmp_path: Path) -> None:
 def test_safetensors_ple_rejects_non_scalar_weight_scale(tmp_path: Path) -> None:
     _write_ple_safetensors_fixture(tmp_path, scale_shape=(2,))
 
-    with pytest.raises(RuntimeError, match="must be one floating-point value"):
+    with pytest.raises(RuntimeError, match="must be one finite positive"):
         _tiny_safetensors_ple_embedding().load_host_weights(str(tmp_path))
+
+
+@pytest.mark.parametrize("scale_value", [0.0, -1.0, math.nan, math.inf, -math.inf])
+def test_safetensors_ple_rejects_non_positive_or_non_finite_scale(
+    tmp_path: Path, scale_value: float
+) -> None:
+    _write_ple_safetensors_fixture(tmp_path, scale_value=scale_value)
+
+    with pytest.raises(RuntimeError, match="must be one finite positive"):
+        _tiny_safetensors_ple_embedding().load_host_weights(str(tmp_path))
+
+
+def test_safetensors_ple_undersized_table_closes_open_handles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_ple_safetensors_fixture(tmp_path)
+    embedding = _tiny_safetensors_ple_embedding()
+    embedding.ngram_heads_vocab_sizes = torch.tensor([3, 3], dtype=torch.long)
+    embedding.ngram_heads_offsets = torch.tensor([0, 3], dtype=torch.long)
+    opened: list[object] = []
+    exited: list[object] = []
+    original_safe_open = safetensors.safe_open
+
+    class TrackedHandle:
+        def __init__(self, path: str, **kwargs: object) -> None:
+            self._inner = original_safe_open(path, **kwargs)
+
+        def __enter__(self):
+            handle = self._inner.__enter__()
+            opened.append(self)
+            return handle
+
+        def __exit__(self, *args: object) -> None:
+            exited.append(self)
+            self._inner.__exit__(*args)
+
+    monkeypatch.setattr(
+        "freetoken.models.qwen4_exp.model.safetensors.safe_open",
+        lambda path, **kwargs: TrackedHandle(path, **kwargs),
+    )
+    with pytest.raises(RuntimeError, match="has 4 rows, needs 6"):
+        embedding.load_host_weights(str(tmp_path))
+    assert opened
+    assert exited == opened
+
+
+def test_safetensors_ple_loads_shared_shard_and_scale_file(tmp_path: Path) -> None:
+    _write_ple_safetensors_fixture(tmp_path, shared_file=True)
+    embedding = _tiny_safetensors_ple_embedding()
+    embedding.load_host_weights(str(tmp_path))
+    embedding._current_ngram_ids = lambda: torch.tensor([[0, 3]], dtype=torch.long)
+
+    output = embedding.forward(torch.device("cpu"), torch.float32)
+
+    assert output.shape == (1, 4)
+    assert embedding._shard_ends.tolist() == [2, 4]
+    assert embedding._scale.item() == 1.0
 
 
 def test_qwen4_weight_names():
