@@ -93,10 +93,19 @@ def test_affinity_telemetry_distinguishes_plan_from_native_verification() -> Non
     assert verified["affinity_status"] == "verified"
     assert verified["native_affinity_status"] == "verified"
     assert verified["worker_observed_affinity_cpus"] == [8]
+    assert verified["flag_sync_applied"] is False
 
     failed = affinity_telemetry(selection, {"status": "failed", "reason": "EINVAL"})
     assert failed["affinity_status"] == "fallback"
     assert failed["fallback_reason"] == "EINVAL"
+
+    pending = affinity_telemetry(
+        resolve_cpu_moe_affinity(0, flag_sync=True, topology=_topology((8, 0), (13, 1))),
+        {"status": "pending", "reason": "coordinator affinity startup timed out"},
+    )
+    assert pending["affinity_status"] == "planned-unverified"
+    assert pending["flag_sync_applied"] is False
+    assert pending["fallback_reason"] == "coordinator affinity startup timed out"
 
 
 def test_affinity_fallback_reason_is_derived_from_native_error_fields() -> None:

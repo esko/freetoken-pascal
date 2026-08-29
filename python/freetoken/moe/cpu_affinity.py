@@ -117,6 +117,11 @@ def affinity_telemetry(
             "affinity_status": status,
             "planned_affinity_status": "planned-unverified",
             "native_affinity_status": native_status,
+            "flag_sync_applied": (
+                None
+                if native_report is None
+                else selection.flag_sync and native_status == "verified"
+            ),
         }
     )
     for key in (
@@ -133,7 +138,7 @@ def affinity_telemetry(
     ):
         if key in report:
             telemetry[key] = report[key]
-    if status == "fallback" and report.get("reason"):
+    if native_status != "verified" and report.get("reason"):
         telemetry["fallback_reason"] = report["reason"]
     if report.get("reason"):
         telemetry["native_affinity_reason"] = report["reason"]

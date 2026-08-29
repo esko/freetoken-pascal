@@ -261,6 +261,8 @@ class CpuMoeExecutor:
         native_report = getattr(self._ext, "affinity_report", None)
         if native_report is not None:
             self._native_affinity_report = dict(native_report())
+            if self._native_affinity_report.get("status") != "verified":
+                self._flag_sync = False
         self.affinity_topology = affinity_topology
         self.affinity_plan = affinity_selection.plan
         self.affinity_telemetry = affinity_telemetry(
@@ -311,6 +313,12 @@ class CpuMoeExecutor:
             )
             if native_report is not None:
                 self._native_affinity_report = dict(native_report())
+                if self._native_affinity_report.get("status") != "verified":
+                    # Do not submit flag doorbells until the native coordinator
+                    # has reported a completed startup verification.  A bounded
+                    # native wait may return pending while its thread publishes
+                    # later; host-function dispatch is the safe path meanwhile.
+                    self._flag_sync = False
                 self.affinity_telemetry = affinity_telemetry(
                     affinity_selection, self._native_affinity_report
                 )

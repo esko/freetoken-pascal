@@ -1307,9 +1307,9 @@ struct CpuMoeExecutor {
   std::vector<MoeTask*> owned_tasks;  // persistent task descriptors (graph-stable)
   std::vector<int> core_ids;          // worker tid -> logical CPU to pin to (may be empty)
 
-  // Affinity startup state is published before the constructor returns (workers) and
-  // before start_flag_coordinator returns (coordinator).  The Python wrapper treats
-  // this as verification data, never as a requested-plan success signal.
+  // Affinity startup state is normally published before the constructor/start call
+  // returns.  Bounded waits may leave it pending; the Python wrapper treats this as
+  // verification data, never as a requested-plan success signal.
   mutable std::mutex affinity_mtx;
   std::condition_variable affinity_cv;
   int worker_affinity_ready = 0;
@@ -1319,12 +1319,14 @@ struct CpuMoeExecutor {
   std::vector<uint8_t> worker_affinity_verified;
   std::vector<uint8_t> worker_affinity_published;
   bool worker_affinity_startup_failed = false;
+  bool worker_affinity_startup_timed_out = false;
   int coordinator_requested_cpu = -1;
   int coordinator_observed_affinity_cpu = -1;
   int coordinator_affinity_error = 0;
   bool coordinator_affinity_verified = false;
   bool coordinator_affinity_ready = false;
   bool coordinator_affinity_startup_failed = false;
+  bool coordinator_affinity_startup_timed_out = false;
   bool coordinator_started = false;
   std::string affinity_failure_reason;
 
@@ -1456,12 +1458,7 @@ struct CpuMoeExecutor {
     try {
       for (int t = 0; t < num_threads; ++t)
         workers.emplace_back([this, t] {
-          try {
-            worker_loop(t);
-          } catch (...) {
-            publish_worker_startup_failure(t);
-            stop_workers();
-          }
+          worker_loop(t);
         });
     } catch (...) {
       stop_workers();
@@ -1474,7 +1471,7 @@ struct CpuMoeExecutor {
           lk, std::chrono::seconds(5),
           [this] { return worker_affinity_ready == num_threads || worker_affinity_startup_failed; });
       if (!ready) {
-        worker_affinity_startup_failed = true;
+        worker_affinity_startup_timed_out = true;
         affinity_failure_reason = "worker affinity startup timed out";
       }
       if (worker_affinity_startup_failed) {
@@ -1799,7 +1796,9 @@ struct CpuMoeExecutor {
     const bool coordinator_verified =
         !coordinator_requested || coordinator_affinity_verified;
     const char* status = "not-requested";
-    if (!workers_ready || (coordinator_requested && !coordinator_affinity_ready)) {
+    if (worker_affinity_startup_timed_out || !workers_ready ||
+        coordinator_affinity_startup_timed_out ||
+        (coordinator_requested && !coordinator_affinity_ready)) {
       status = "pending";
     } else if (worker_affinity_startup_failed || workers_failed || !workers_verified ||
                coordinator_affinity_startup_failed || coordinator_failed ||
@@ -2123,7 +2122,13 @@ struct CpuMoeExecutor {
   }
 
   void worker_loop(int tid) {
-    pin_self(tid);
+    try {
+      pin_self(tid);
+    } catch (...) {
+      publish_worker_startup_failure(tid);
+      stop_workers();
+      return;
+    }
     uint64_t my_gen = 0;
     for (;;) {
       MoeTask* t;
@@ -2287,23 +2292,13 @@ struct CpuMoeExecutor {
           lk, std::chrono::seconds(5),
           [this] { return coordinator_affinity_ready; });
       if (!ready) {
-        lk.unlock();
-        coord_stop.store(true, std::memory_order_release);
-        if (coord_thread.joinable()) coord_thread.join();
-        lk.lock();
         coordinator_affinity_error = ETIMEDOUT;
-        coordinator_affinity_startup_failed = true;
-        coordinator_affinity_ready = true;
+        coordinator_affinity_startup_timed_out = true;
         affinity_failure_reason = "coordinator affinity startup timed out";
-        lk.unlock();
-        throw std::runtime_error("coordinator affinity startup timed out");
+        return;
       }
       if (coordinator_affinity_startup_failed) {
-        const std::string reason = affinity_failure_reason;
-        lk.unlock();
-        coord_stop.store(true, std::memory_order_release);
-        if (coord_thread.joinable()) coord_thread.join();
-        throw std::runtime_error(reason.empty() ? "coordinator thread startup failed" : reason);
+        return;
       }
     }
   }
