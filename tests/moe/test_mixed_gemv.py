@@ -301,6 +301,57 @@ def test_native_q5_1_expands_each_high_bit_to_its_matching_lane(
     )
 
 
+def test_native_q5_1_multi_block_gemv_preserves_block_reduction_order(
+    mixed_native_library: Path | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep one native float32 reduction per packed block on cancellation-heavy rows."""
+    if mixed_native_library is None:
+        pytest.skip("g++ unavailable")
+    monkeypatch.setenv("FREETOKEN_MIXED_GEMV_NATIVE_LIB", str(mixed_native_library))
+    primitive = select_mixed_gemv_primitive("forced_avx2")
+    if primitive.isa == "scalar":
+        pytest.skip("AVX2/FMA unavailable")
+    rows = _pack_rows("Q5_1", 2, 640, seed=313)
+    for row in range(rows.shape[0]):
+        for block in range(rows.shape[1] // Q5_1_BLOCK_BYTES):
+            qh = (0xAAAAAAAA, 0x55555555, 0xFFFFFFFF, 0x00000000)[block % 4]
+            begin = block * Q5_1_BLOCK_BYTES
+            rows[row, begin + 4 : begin + 8] = np.frombuffer(
+                np.uint32(qh).tobytes(), dtype=np.uint8
+            )
+    vector = np.linspace(-500.0, 500.0, 640, dtype=np.float32)
+    # The independent NumPy oracle intentionally has a different FMA/reduction
+    # order from the AVX2 dot primitive.  Build the expected GEMV result from
+    # that public per-block primitive so this test isolates the GEMV reduction
+    # contract rather than conflating it with ordinary SIMD rounding.
+    expected = np.zeros(rows.shape[0], dtype=np.float32)
+    for row in range(rows.shape[0]):
+        for block in range(640 // Q5_1_BLOCK_ELEMENTS):
+            block_begin = block * Q5_1_BLOCK_BYTES
+            input_begin = block * Q5_1_BLOCK_ELEMENTS
+            expected[row] = np.float32(
+                expected[row]
+                + primitive.dot(
+                    rows[row, block_begin : block_begin + Q5_1_BLOCK_BYTES],
+                    vector[input_begin : input_begin + Q5_1_BLOCK_ELEMENTS],
+                    quant_name="Q5_1",
+                )
+            )
+    actual = np.empty(rows.shape[0], dtype=np.float32)
+    primitive.gemv(rows, 640, vector, quant_name="Q5_1", out=actual)
+    np.testing.assert_array_equal(actual, expected)
+
+    canary = np.full(rows.nbytes + 64, 0xCD, dtype=np.uint8)
+    bounded_rows = canary[32:-32].reshape(rows.shape)
+    bounded_rows[:] = rows
+    bounded = np.empty(rows.shape[0], dtype=np.float32)
+    primitive.gemv(bounded_rows, 640, vector, quant_name="Q5_1", out=bounded)
+    np.testing.assert_array_equal(canary[:32], 0xCD)
+    np.testing.assert_array_equal(canary[-32:], 0xCD)
+    np.testing.assert_array_equal(bounded, actual)
+
+
 @pytest.mark.parametrize("name", ["Q5_1", "Q8_0", "Q5_K"])
 def test_exported_scalar_symbols_match_independent_oracle(
     name: str,
