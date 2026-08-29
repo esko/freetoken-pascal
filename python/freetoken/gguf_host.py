@@ -745,8 +745,9 @@ class MappedPLETable:
         self.backend = "mmap"
         self._pread_fd: int | None = None
         self._batch_calls = self._batch_requested_rows = self._batch_unique_rows = 0
-        self._batch_physical_reads = self._batch_duplicate_rows = 0
+        self._batch_positional_reads = self._batch_duplicate_rows = 0
         self._batch_sorted_rows = self._batch_bytes_read = 0
+        self._targeted_positional_warm_reads = 0
         self._short_reads = 0
 
     @classmethod
@@ -895,6 +896,7 @@ class MappedPLETable:
                 if len(os.pread(self._pread_fd, 1, int(row) * self.descriptor.row_bytes)) != 1:
                     self._short_reads += 1
                     raise ValueError("short PLE positional warm read")
+                self._targeted_positional_warm_reads += 1
         self._targeted_warm_rows += int(unique.size)
 
     def lookup(self, ids: np.ndarray) -> np.ndarray:
@@ -943,7 +945,8 @@ class MappedPLETable:
         self._batch_calls += 1
         self._batch_requested_rows += int(flat.size)
         self._batch_unique_rows += int(unique.size)
-        self._batch_physical_reads += int(unique.size)
+        if self.backend == "pread":
+            self._batch_positional_reads += int(unique.size)
         self._batch_duplicate_rows += int(flat.size - unique.size)
         self._batch_sorted_rows += int(unique.size)
         self._batch_bytes_read += int(unique.size) * self.descriptor.row_bytes
@@ -973,11 +976,12 @@ class MappedPLETable:
             "batch_calls": self._batch_calls,
             "batch_requested_rows": self._batch_requested_rows,
             "batch_unique_rows": self._batch_unique_rows,
-            "batch_physical_reads": self._batch_physical_reads,
+            "batch_positional_reads": self._batch_positional_reads,
             "batch_duplicate_rows": self._batch_duplicate_rows,
             "batch_sorted_rows": self._batch_sorted_rows,
             "batch_bytes_read": self._batch_bytes_read,
             "short_reads": self._short_reads,
+            "targeted_positional_warm_reads": self._targeted_positional_warm_reads,
         }
 
     def close(self) -> None:

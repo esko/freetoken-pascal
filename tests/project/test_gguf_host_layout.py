@@ -253,7 +253,7 @@ def test_dedicated_pread_batch_matches_mmap_and_deduplicates(tmp_path: Path) -> 
         assert pread_table.telemetry()["batch_unique_rows"] == 3
         assert pread_table.telemetry()["backend"] == "pread"
         assert pread_table.telemetry()["mapped_bytes"] == 0
-        assert pread_table.telemetry()["batch_physical_reads"] == 3
+        assert pread_table.telemetry()["batch_positional_reads"] == 3
         assert pread_table.telemetry()["batch_sorted_rows"] == 3
         assert pread_table.telemetry()["batch_bytes_read"] == 3 * 90
 
