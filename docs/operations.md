@@ -71,6 +71,17 @@ The release must document:
 - request body and output limits;
 - timeout and cancellation behavior.
 
+For H0 host-resource lifecycle diagnostics, run the bounded observation with an outer
+supervisor timeout, for example `timeout 60s make stress-host-resources`. The default
+requires Torch and the production HostBank path; CPU-only H0 jobs must opt in to the
+explicit test-only `--allow-fallback` argument. Keep the JSON artifact with the commit,
+seed, iteration/thread settings, fake kernel census, policy accounting, and before/after
+FD/thread/live-buffer observations. Its RSS field `sampled_max_after_iteration` is the
+maximum of samples taken after each iteration, not a live or process-lifetime peak. This
+is an `observation_only` cleanup and parity check; its RSS and swap fields do not establish
+capacity, no-swap safety, NUMA placement,
+staging behavior, throughput, or P4 support.
+
 ## Upgrade
 
 Upgrades use immutable image tags and pinned model checksums. A new image must pass the deterministic startup probe and can roll back without converting model state.
