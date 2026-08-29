@@ -236,8 +236,8 @@ def test_dedicated_full_warm_only_touches_artifact(
     monkeypatch.setattr(
         "freetoken.gguf_host._warm_model_files", lambda paths: touched.append(paths) or 1
     )
-    with MappedPLETable.open_from_artifact(artifact, warm_mode="full-ple-warm"):
-        pass
+    with MappedPLETable.open_from_artifact(artifact, warm_mode="full-ple-warm") as table:
+        assert table.telemetry()["mode"] == "full-ple-warm"
     assert touched == [(str(artifact / "ple.bin"),)]
 
 

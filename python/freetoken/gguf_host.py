@@ -717,7 +717,9 @@ def dequantize_iq4_nl(packed: np.ndarray) -> np.ndarray:
 
 
 class MappedPLETable:
-    _MODES = frozenset({"cold", "page-cache-warm", "targeted", "full-model-warm"})
+    _MODES = frozenset(
+        {"cold", "page-cache-warm", "targeted", "full-model-warm", "full-ple-warm"}
+    )
 
     def __init__(
         self,
@@ -773,6 +775,8 @@ class MappedPLETable:
             model_shard_paths=layout.shard_paths,
         )
         try:
+            if warm_mode == "full-ple-warm":
+                raise ValueError("GGUF warm mode is full-model-warm")
             table.set_warm_mode(warm_mode)
         except BaseException:
             table.close()
@@ -783,6 +787,8 @@ class MappedPLETable:
     def open_from_artifact(
         cls, path: str | Path, *, warm_mode: str = "cold", backend: str = "mmap"
     ) -> MappedPLETable:
+        if backend not in {"mmap", "pread"}:
+            raise ValueError(f"unknown PLE backend {backend!r}")
         root = Path(path)
         try:
             manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
@@ -830,8 +836,6 @@ class MappedPLETable:
             shard_path=str(payload),
             data_offset=0,
         )
-        if backend not in {"mmap", "pread"}:
-            raise ValueError(f"unknown PLE backend {backend!r}")
         mapping = None
         if backend == "mmap":
             mapping = MappedFileRange(
@@ -846,8 +850,6 @@ class MappedPLETable:
                 table._pread_fd = os.open(payload, os.O_RDONLY)
             if warm_mode == "full-model-warm":
                 raise ValueError("artifact warm mode is full-ple-warm")
-            if warm_mode == "full-ple-warm":
-                warm_mode = "full-model-warm"
             table.set_warm_mode(warm_mode)
         except BaseException:
             table.close()
@@ -868,7 +870,7 @@ class MappedPLETable:
                 self.mapping.advise(mmap.MADV_WILLNEED)
             elif hasattr(os, "posix_fadvise"):
                 os.posix_fadvise(self._pread_fd, 0, 0, os.POSIX_FADV_WILLNEED)
-        if mode == "full-model-warm":
+        if mode in {"full-model-warm", "full-ple-warm"}:
             # Explicitly touch every source shard, including ordinary tensors and
             # expert banks.  This is intentionally never the default.
             self._full_model_warm_bytes += _warm_model_files(self._model_shard_paths)

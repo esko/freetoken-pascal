@@ -382,6 +382,9 @@ class _HostNGramEmbedding(BaseOP):
             return
         from freetoken.models.gguf.reader import is_gguf_path
 
+        if ple_artifact_path is None and ple_backend != "mmap":
+            raise ValueError("PLE pread backend requires --ple-artifact-path")
+
         if ple_artifact_path is not None:
             from freetoken.gguf_host import MappedPLETable
 
@@ -389,8 +392,6 @@ class _HostNGramEmbedding(BaseOP):
                 ple_artifact_path, warm_mode=ple_warm_mode, backend=ple_backend
             )
         elif is_gguf_path(model_path):
-            if ple_backend != "mmap":
-                raise ValueError("PLE pread backend requires --ple-artifact-path")
             from freetoken.gguf_host import MappedPLETable
 
             self._gguf_ple = MappedPLETable.open_from_gguf(
