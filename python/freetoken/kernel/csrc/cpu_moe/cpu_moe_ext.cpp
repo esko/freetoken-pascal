@@ -41,6 +41,12 @@
 #define CPU_MOE_HAS_AFFINITY 0
 #endif
 
+#if defined(ENOTSUP)
+constexpr int CPU_MOE_AFFINITY_UNSUPPORTED = ENOTSUP;
+#else
+constexpr int CPU_MOE_AFFINITY_UNSUPPORTED = EINVAL;
+#endif
+
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #define CPU_MOE_X86 1
@@ -1283,7 +1289,7 @@ struct CpuMoeExecutor {
   std::mutex sync_mtx;
   std::condition_variable sync_cv;
 
-  bool stop = false;
+  std::atomic<bool> stop{false};
   uint64_t cur_gen = 0;
   MoeTask* cur_task = nullptr;
   std::atomic<uint64_t> submitted{0};
@@ -1308,14 +1314,19 @@ struct CpuMoeExecutor {
   std::condition_variable affinity_cv;
   int worker_affinity_ready = 0;
   std::vector<int> worker_requested_cpus;
-  std::vector<int> worker_actual_cpus;
+  std::vector<int> worker_observed_affinity_cpus;
   std::vector<int> worker_affinity_errors;
   std::vector<uint8_t> worker_affinity_verified;
+  std::vector<uint8_t> worker_affinity_published;
+  bool worker_affinity_startup_failed = false;
   int coordinator_requested_cpu = -1;
-  int coordinator_actual_cpu = -1;
+  int coordinator_observed_affinity_cpu = -1;
   int coordinator_affinity_error = 0;
   bool coordinator_affinity_verified = false;
   bool coordinator_affinity_ready = false;
+  bool coordinator_affinity_startup_failed = false;
+  bool coordinator_started = false;
+  std::string affinity_failure_reason;
 
   // ---- Flag-based GPU<->CPU handshake (replaces the per-layer cudaLaunchHostFunc pair) ----
   // A tiny GPU kernel bumps ready_flags[slot] at submit; this coordinator thread busy-polls
@@ -1438,14 +1449,40 @@ struct CpuMoeExecutor {
       gas_scratch.assign(static_cast<size_t>(max_tokens) * top_k * (I / 32), 0);
     }
     worker_requested_cpus.assign(num_threads, -1);
-    worker_actual_cpus.assign(num_threads, -1);
+    worker_observed_affinity_cpus.assign(num_threads, -1);
     worker_affinity_errors.assign(num_threads, 0);
     worker_affinity_verified.assign(num_threads, 0);
-    for (int t = 0; t < num_threads; ++t)
-      workers.emplace_back([this, t] { worker_loop(t); });
+    worker_affinity_published.assign(num_threads, 0);
+    try {
+      for (int t = 0; t < num_threads; ++t)
+        workers.emplace_back([this, t] {
+          try {
+            worker_loop(t);
+          } catch (...) {
+            publish_worker_startup_failure(t);
+            stop_workers();
+          }
+        });
+    } catch (...) {
+      stop_workers();
+      join_workers();
+      throw;
+    }
     {
       std::unique_lock<std::mutex> lk(affinity_mtx);
-      affinity_cv.wait(lk, [this] { return worker_affinity_ready == num_threads; });
+      const bool ready = affinity_cv.wait_for(
+          lk, std::chrono::seconds(5),
+          [this] { return worker_affinity_ready == num_threads || worker_affinity_startup_failed; });
+      if (!ready) {
+        worker_affinity_startup_failed = true;
+        affinity_failure_reason = "worker affinity startup timed out";
+      }
+      if (worker_affinity_startup_failed) {
+        lk.unlock();
+        stop_workers();
+        join_workers();
+        throw std::runtime_error(affinity_failure_reason);
+      }
     }
   }
 
@@ -1555,9 +1592,73 @@ struct CpuMoeExecutor {
   }
 #endif
 
+  static const char* affinity_error_name(int error) {
+    switch (error) {
+      case EINVAL:
+        return "EINVAL";
+      case ETIMEDOUT:
+        return "ETIMEDOUT";
+#if defined(ENOTSUP) && ENOTSUP != EINVAL
+      case ENOTSUP:
+        return "ENOTSUP";
+#endif
+      default:
+        return "unknown";
+    }
+  }
+
+  void note_affinity_error_locked(const char* subject, int error) {
+    if (error != 0 && affinity_failure_reason.empty()) {
+      affinity_failure_reason = std::string(subject) + " affinity error " +
+                                std::to_string(error) + " (" + affinity_error_name(error) + ")";
+    }
+  }
+
+  void publish_worker_affinity(int tid, int requested, int observed, int error,
+                               bool verified) {
+    {
+      std::lock_guard<std::mutex> lk(affinity_mtx);
+      worker_requested_cpus[tid] = requested;
+      worker_observed_affinity_cpus[tid] = observed;
+      worker_affinity_errors[tid] = error;
+      worker_affinity_verified[tid] = verified ? 1 : 0;
+      if (!worker_affinity_published[tid]) {
+        worker_affinity_published[tid] = 1;
+        ++worker_affinity_ready;
+      }
+      note_affinity_error_locked("worker", error);
+    }
+    affinity_cv.notify_all();
+  }
+
+  void publish_worker_startup_failure(int tid) noexcept {
+    try {
+      {
+        std::lock_guard<std::mutex> lk(affinity_mtx);
+        if (!worker_affinity_published[tid]) {
+          worker_requested_cpus[tid] = -1;
+          worker_observed_affinity_cpus[tid] = -1;
+          worker_affinity_errors[tid] = EFAULT;
+          worker_affinity_verified[tid] = 0;
+          worker_affinity_published[tid] = 1;
+          ++worker_affinity_ready;
+        }
+        worker_affinity_startup_failed = true;
+        if (affinity_failure_reason.empty())
+          affinity_failure_reason = "worker thread startup failed";
+      }
+      affinity_cv.notify_all();
+    } catch (...) {
+      // The constructor's bounded wait remains the final escape hatch if even
+      // failure publication cannot acquire its synchronization state.
+    }
+  }
+
   void pin_self(int tid) {
     const int requested =
-        (tid >= 0 && tid < static_cast<int>(core_ids.size())) ? core_ids[tid] : -1;
+        (tid >= 0 && !core_ids.empty())
+            ? core_ids[tid % static_cast<int>(core_ids.size())]
+            : -1;
     int actual = -1;
     int error = 0;
     bool verified = false;
@@ -1583,17 +1684,9 @@ struct CpuMoeExecutor {
       error = EINVAL;
     }
 #else
-    if (requested >= 0) error = ENOTSUP;
+    if (requested >= 0) error = CPU_MOE_AFFINITY_UNSUPPORTED;
 #endif
-    {
-      std::lock_guard<std::mutex> lk(affinity_mtx);
-      worker_requested_cpus[tid] = requested;
-      worker_actual_cpus[tid] = actual;
-      worker_affinity_errors[tid] = error;
-      worker_affinity_verified[tid] = verified ? 1 : 0;
-      ++worker_affinity_ready;
-    }
-    affinity_cv.notify_all();
+    publish_worker_affinity(tid, requested, actual, error, verified);
   }
 
   void pin_coordinator(int requested) {
@@ -1622,29 +1715,54 @@ struct CpuMoeExecutor {
       error = EINVAL;
     }
 #else
-    if (requested >= 0) error = ENOTSUP;
+    if (requested >= 0) error = CPU_MOE_AFFINITY_UNSUPPORTED;
 #endif
     {
       std::lock_guard<std::mutex> lk(affinity_mtx);
       coordinator_requested_cpu = requested;
-      coordinator_actual_cpu = actual;
+      coordinator_observed_affinity_cpu = actual;
       coordinator_affinity_error = error;
       coordinator_affinity_verified = verified;
       coordinator_affinity_ready = true;
+      note_affinity_error_locked("coordinator", error);
     }
     affinity_cv.notify_all();
   }
 
-  ~CpuMoeExecutor() {
-    coord_stop.store(true);
-    if (coord_thread.joinable()) coord_thread.join();
-    {
-      std::lock_guard<std::mutex> lk(task_mtx);
-      stop = true;
+  void publish_coordinator_startup_failure() noexcept {
+    try {
+      {
+        std::lock_guard<std::mutex> lk(affinity_mtx);
+        coordinator_affinity_error = EFAULT;
+        coordinator_affinity_startup_failed = true;
+        coordinator_affinity_ready = true;
+        if (affinity_failure_reason.empty())
+          affinity_failure_reason = "coordinator thread startup failed";
+      }
+      affinity_cv.notify_all();
+    } catch (...) {
     }
+  }
+
+  void stop_workers() {
+    stop.store(true, std::memory_order_release);
     task_cv.notify_all();
+    sync_cv.notify_all();
+  }
+
+  void join_workers() {
     for (auto& th : workers)
       if (th.joinable()) th.join();
+  }
+
+  ~CpuMoeExecutor() {
+    // A coordinator may be waiting in sync() for the worker pool.  Stop and
+    // notify workers first; sync() also observes stop so this ordering cannot
+    // leave the coordinator waiting for work that teardown intentionally drops.
+    stop_workers();
+    coord_stop.store(true, std::memory_order_release);
+    if (coord_thread.joinable()) coord_thread.join();
+    join_workers();
     for (MoeTask* t : owned_tasks) delete t;
   }
 
@@ -1683,7 +1801,8 @@ struct CpuMoeExecutor {
     const char* status = "not-requested";
     if (!workers_ready || (coordinator_requested && !coordinator_affinity_ready)) {
       status = "pending";
-    } else if (workers_failed || !workers_verified || coordinator_failed ||
+    } else if (worker_affinity_startup_failed || workers_failed || !workers_verified ||
+               coordinator_affinity_startup_failed || coordinator_failed ||
                !coordinator_verified) {
       status = "failed";
     } else if (workers_requested || coordinator_requested) {
@@ -1691,15 +1810,16 @@ struct CpuMoeExecutor {
     }
     report["status"] = status;
     report["worker_requested_cpus"] = worker_requested_cpus;
-    report["worker_actual_cpus"] = worker_actual_cpus;
+    report["worker_observed_affinity_cpus"] = worker_observed_affinity_cpus;
     report["worker_affinity_errors"] = worker_affinity_errors;
     report["worker_affinity_verified"] = worker_affinity_verified;
     report["workers_ready"] = workers_ready;
     report["coordinator_requested_cpu"] = coordinator_requested_cpu;
-    report["coordinator_actual_cpu"] = coordinator_actual_cpu;
+    report["coordinator_observed_affinity_cpu"] = coordinator_observed_affinity_cpu;
     report["coordinator_affinity_error"] = coordinator_affinity_error;
     report["coordinator_affinity_verified"] = coordinator_affinity_verified;
     report["coordinator_ready"] = coordinator_affinity_ready;
+    if (!affinity_failure_reason.empty()) report["reason"] = affinity_failure_reason;
     return report;
   }
 
@@ -2100,7 +2220,10 @@ struct CpuMoeExecutor {
   void sync() {
     const uint64_t target = submitted.load(std::memory_order_acquire);
     std::unique_lock<std::mutex> lk(sync_mtx);
-    sync_cv.wait(lk, [&] { return completed.load(std::memory_order_acquire) >= target; });
+    sync_cv.wait(lk, [&] {
+      return completed.load(std::memory_order_acquire) >= target ||
+             stop.load(std::memory_order_acquire);
+    });
   }
 
   void submit_with_cuda_stream(uintptr_t stream, uintptr_t task) {
@@ -2130,6 +2253,9 @@ struct CpuMoeExecutor {
   // polling never migrates onto / contends with a GEMV worker's core.
   void start_flag_coordinator(uintptr_t ready_ptr, uintptr_t done_ptr, int num_slots,
                               int pin_core) {
+    if (coordinator_started || coord_thread.joinable())
+      throw std::runtime_error("CPU MoE flag coordinator already started");
+    coordinator_started = true;
     ready_flags = reinterpret_cast<volatile int64_t*>(ready_ptr);
     done_flags = reinterpret_cast<volatile int64_t*>(done_ptr);
     coord_num_slots = num_slots;
@@ -2142,18 +2268,43 @@ struct CpuMoeExecutor {
     {
       std::lock_guard<std::mutex> lk(affinity_mtx);
       coordinator_requested_cpu = pin_core;
-      coordinator_actual_cpu = -1;
+      coordinator_observed_affinity_cpu = -1;
       coordinator_affinity_error = 0;
       coordinator_affinity_verified = false;
       coordinator_affinity_ready = false;
     }
     coord_thread = std::thread([this, pin_core] {
-      pin_coordinator(pin_core);
-      coordinator_loop();
+      try {
+        pin_coordinator(pin_core);
+        coordinator_loop();
+      } catch (...) {
+        publish_coordinator_startup_failure();
+      }
     });
     {
       std::unique_lock<std::mutex> lk(affinity_mtx);
-      affinity_cv.wait(lk, [this] { return coordinator_affinity_ready; });
+      const bool ready = affinity_cv.wait_for(
+          lk, std::chrono::seconds(5),
+          [this] { return coordinator_affinity_ready; });
+      if (!ready) {
+        lk.unlock();
+        coord_stop.store(true, std::memory_order_release);
+        if (coord_thread.joinable()) coord_thread.join();
+        lk.lock();
+        coordinator_affinity_error = ETIMEDOUT;
+        coordinator_affinity_startup_failed = true;
+        coordinator_affinity_ready = true;
+        affinity_failure_reason = "coordinator affinity startup timed out";
+        lk.unlock();
+        throw std::runtime_error("coordinator affinity startup timed out");
+      }
+      if (coordinator_affinity_startup_failed) {
+        const std::string reason = affinity_failure_reason;
+        lk.unlock();
+        coord_stop.store(true, std::memory_order_release);
+        if (coord_thread.joinable()) coord_thread.join();
+        throw std::runtime_error(reason.empty() ? "coordinator thread startup failed" : reason);
+      }
     }
   }
 

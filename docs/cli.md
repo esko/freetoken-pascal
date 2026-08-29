@@ -103,7 +103,9 @@ the visible physical-core capacity fail before the native pool is built. Flag-sy
 may reserve one additional visible core for its coordinator and falls back to the
 host-function path when no spare core exists. Startup telemetry distinguishes the
 planned CPU IDs from native `verified` or `fallback` results; it never reports
-successful affinity without an exact read-back.
+successful affinity without an exact read-back. With an explicit worker count,
+that reservation is intentional: the coordinator consumes one additional core
+and the requested worker count remains exact.
 
 ### Host expert-bank policy (Issue #18 H0/H1 slice)
 

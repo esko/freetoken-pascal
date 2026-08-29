@@ -82,7 +82,8 @@ python "${repo_root}/scripts/ci/compile_cuda_sources.py" \
 # and affinity startup report do not require a CUDA device, so exercise that
 # report after compilation while keeping kernel execution out of this gate.
 python setup.py build_ext --inplace
-PYTHONPATH=python python -m pytest -q tests/moe/test_cpu_moe_affinity_native.py
+timeout --kill-after=10s 60s \
+  env PYTHONPATH=python python -m pytest -q tests/moe/test_cpu_moe_affinity_native.py
 
 python "${repo_root}/scripts/write_toolchain_inventory.py" \
     --output "${artifact_dir}/inventory.json"

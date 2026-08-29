@@ -121,12 +121,12 @@ def affinity_telemetry(
     )
     for key in (
         "worker_requested_cpus",
-        "worker_actual_cpus",
+        "worker_observed_affinity_cpus",
         "worker_affinity_errors",
         "worker_affinity_verified",
         "workers_ready",
         "coordinator_requested_cpu",
-        "coordinator_actual_cpu",
+        "coordinator_observed_affinity_cpu",
         "coordinator_affinity_error",
         "coordinator_affinity_verified",
         "coordinator_ready",
@@ -135,6 +135,8 @@ def affinity_telemetry(
             telemetry[key] = report[key]
     if status == "fallback" and report.get("reason"):
         telemetry["fallback_reason"] = report["reason"]
+    if report.get("reason"):
+        telemetry["native_affinity_reason"] = report["reason"]
     return telemetry
 
 

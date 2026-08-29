@@ -86,14 +86,33 @@ def test_affinity_telemetry_distinguishes_plan_from_native_verification() -> Non
         selection,
         {
             "status": "verified",
-            "worker_actual_cpus": [8],
+            "worker_observed_affinity_cpus": [8],
             "worker_affinity_errors": [0],
         },
     )
     assert verified["affinity_status"] == "verified"
     assert verified["native_affinity_status"] == "verified"
-    assert verified["worker_actual_cpus"] == [8]
+    assert verified["worker_observed_affinity_cpus"] == [8]
 
     failed = affinity_telemetry(selection, {"status": "failed", "reason": "EINVAL"})
     assert failed["affinity_status"] == "fallback"
     assert failed["fallback_reason"] == "EINVAL"
+
+
+def test_affinity_fallback_reason_is_derived_from_native_error_fields() -> None:
+    selection = resolve_cpu_moe_affinity(
+        1,
+        flag_sync=False,
+        topology=_topology((8, 0)),
+    )
+
+    failed = affinity_telemetry(
+        selection,
+        {
+            "status": "failed",
+            "worker_affinity_errors": [22],
+            "reason": "worker affinity error 22 (EINVAL)",
+        },
+    )
+    assert failed["affinity_status"] == "fallback"
+    assert failed["fallback_reason"] == "worker affinity error 22 (EINVAL)"

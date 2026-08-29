@@ -230,6 +230,7 @@ class CpuMoeExecutor:
             flag_sync=self._flag_sync,
             topology=affinity_topology,
         )
+        self._flag_sync = affinity_selection.flag_sync
         self._affinity_selection = affinity_selection
         nthreads = affinity_selection.plan.effective_threads
         core_ids = list(affinity_selection.plan.worker_cpus)
