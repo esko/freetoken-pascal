@@ -424,42 +424,80 @@ class _HostNGramEmbedding(BaseOP):
 
         handles = {}
         shards = []
-        for key in shard_keys:
-            filename = weight_map[key]
-            handle = handles.get(filename)
-            if handle is None:
-                handle = safetensors.safe_open(
-                    os.path.join(folder, filename), framework="pt", device="cpu"
-                ).__enter__()
-                handles[filename] = handle
-            shard = handle.get_tensor(key)
-            if shard.dtype != torch.float8_e4m3fn or shard.shape[1] != self.head_dim:
-                raise RuntimeError(
-                    f"Unexpected PLE shard {key}: {shard.dtype} {tuple(shard.shape)}"
-                )
-            shards.append(shard.view(torch.uint8))
         scale_key = prefix + ".weight_scale"
-        scale_handle = handles.get(weight_map[scale_key])
-        if scale_handle is None:
-            scale_handle = safetensors.safe_open(
-                os.path.join(folder, weight_map[scale_key]), framework="pt", device="cpu"
-            ).__enter__()
-            handles[weight_map[scale_key]] = scale_handle
+        if scale_key not in weight_map:
+            raise RuntimeError(f"Qwen4-Exp PLE is missing {scale_key}")
+        try:
+            shard_shape = None
+            for key in shard_keys:
+                filename = weight_map[key]
+                handle = handles.get(filename)
+                if handle is None:
+                    handle = safetensors.safe_open(
+                        os.path.join(folder, filename), framework="pt", device="cpu"
+                    ).__enter__()
+                    handles[filename] = handle
+                shard = handle.get_tensor(key)
+                if (
+                    shard.dtype != torch.float8_e4m3fn
+                    or shard.ndim != 2
+                    or shard.shape[0] <= 0
+                    or shard.shape[1] != self.head_dim
+                ):
+                    raise RuntimeError(
+                        f"Unexpected PLE shard {key}: {shard.dtype} {tuple(shard.shape)}; "
+                        f"expected a non-empty [rows, {self.head_dim}] float8 tensor"
+                    )
+                if shard_shape is None:
+                    shard_shape = tuple(shard.shape)
+                elif tuple(shard.shape) != shard_shape:
+                    raise RuntimeError(
+                        f"PLE table shard {key} shape {tuple(shard.shape)} disagrees with "
+                        f"the first shard {shard_shape}"
+                    )
+                shards.append(shard.view(torch.uint8))
+
+            scale_filename = weight_map[scale_key]
+            scale_handle = handles.get(scale_filename)
+            if scale_handle is None:
+                scale_handle = safetensors.safe_open(
+                    os.path.join(folder, scale_filename), framework="pt", device="cpu"
+                ).__enter__()
+                handles[scale_filename] = scale_handle
+            scale = scale_handle.get_tensor(scale_key)
+            if (
+                not scale.is_floating_point()
+                or scale.numel() != 1
+                or not math.isfinite(float(scale))
+                or float(scale) <= 0.0
+            ):
+                raise RuntimeError(
+                    f"Qwen4-Exp PLE {scale_key} must be one finite positive "
+                    "floating-point value, "
+                    f"got {scale.dtype} with shape {tuple(scale.shape)}"
+                )
+
+            shard_ends = torch.tensor([shard.shape[0] for shard in shards]).cumsum(0)
+            host_constants = (
+                self.layer_multipliers.cpu(),
+                self.ngram_heads_vocab_sizes.cpu(),
+                self.ngram_heads_offsets.cpu(),
+            )
+            expected_rows = int(host_constants[1][-1] + host_constants[2][-1])
+            if int(shard_ends[-1]) < expected_rows:
+                raise RuntimeError(
+                    f"PLE table has {int(shard_ends[-1])} rows, needs {expected_rows}"
+                )
+        except BaseException:
+            for handle in reversed(tuple(handles.values())):
+                handle.__exit__(None, None, None)
+            raise
 
         self._handles = list(handles.values())
         self._shards = shards
-        self._shard_ends = torch.tensor([shard.shape[0] for shard in shards]).cumsum(0)
-        self._scale = scale_handle.get_tensor(scale_key).reshape(())
-        self._host_constants = (
-            self.layer_multipliers.cpu(),
-            self.ngram_heads_vocab_sizes.cpu(),
-            self.ngram_heads_offsets.cpu(),
-        )
-        expected_rows = int(self._host_constants[1][-1] + self._host_constants[2][-1])
-        if int(self._shard_ends[-1]) < expected_rows:
-            raise RuntimeError(
-                f"PLE table has {int(self._shard_ends[-1])} rows, needs {expected_rows}"
-            )
+        self._shard_ends = shard_ends
+        self._scale = scale.reshape(())
+        self._host_constants = host_constants
 
     def _current_ngram_ids(self) -> torch.Tensor:
         if self._host_constants is None:

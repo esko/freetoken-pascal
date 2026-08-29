@@ -42,6 +42,11 @@ remaining llama.cpp entries stay reference-only and add no NOTICE entry.
 | expert cache policy concepts | FreeToken / flashlib | vLLM #37190; Colibrì |
 | transfer/prefetch design | FreeToken | vLLM #29941/#51710 |
 
+FreeToken PR #257 was reviewed at head `e3b6d7bdc74da8c9f88d182415ec4e8dfbb967c3` and merge `bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40`.
+Its `python/freetoken/models/qwen4_exp/weight.py` PLE loader is a reference for exact shard-set, equal-row-shape, scalar-scale, and padded-storage validation.
+The file-backed downstream loader semantically adopts those fail-closed checks without copying donor code or changing the pageable GGUF mmap contract.
+The reference pin is recorded as `freetoken-qwen4-pr257-ple-reference` in `manifests/upstreams.yaml` and remains Apache-2.0 reference-only, so it adds no NOTICE entry.
+
 ## Integration method
 
 FreeToken commit `9ef3651309fe4058672f2cc92069238dea06be1b` is the initial downstream base. It was merged once with `--allow-unrelated-histories`, using the project-bootstrap history as the other parent. Both histories are therefore ancestors of the integration merge.

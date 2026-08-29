@@ -228,6 +228,17 @@ sources:
         header_policy: preserved
         responsible_issue: 12
         responsible_pull_request: 36
+  - id: freetoken-qwen4-pr257-ple-reference
+    repository: https://github.com/FlashML-org/FreeToken
+    pull_request: 257
+    upstream_ref: refs/pull/257/head
+    ref: e3b6d7bdc74da8c9f88d182415ec4e8dfbb967c3
+    license: Apache-2.0
+    role: PLE shard and scalar-scale validation reference
+    usage: reference
+    responsible_issue: 13
+    notice_required: false
+    imports: []
   - id: freetoken-gguf-grid-z
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 131
