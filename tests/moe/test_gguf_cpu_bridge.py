@@ -13,6 +13,7 @@ from freetoken.gguf_host import (
     QwenGGUFHostWeights,
     QwenHostLayout,
 )
+from freetoken.moe.cpu_topology import CpuTopology, PhysicalCore
 
 Q4_K = 12
 Q5_K = 13
@@ -222,6 +223,35 @@ def test_bundle_rejects_thread_request_above_visible_physical_capacity(
     monkeypatch.setattr(bridge, "_affinity_visible_physical_core_count", lambda: 2)
     with pytest.raises(ValueError, match="affinity-visible physical-core capacity of 2"):
         bridge.QwenGGUFCpuExpertBundle.from_host(_host(), top_k=1, mode="scalar", num_threads=3)
+
+
+def test_positive_bridge_threads_resolve_shared_worker_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freetoken.moe.gguf_cpu as bridge
+
+    topology = CpuTopology(
+        allowed_cpus=(40, 42),
+        cores=tuple(
+            PhysicalCore(
+                key=f"core-{cpu}",
+                representative=cpu,
+                logical_cpus=(cpu,),
+                siblings=(cpu,),
+            )
+            for cpu in (40, 42)
+        ),
+        confidence="full",
+        source="synthetic",
+    )
+    monkeypatch.setattr(bridge, "discover_cpu_topology", lambda: topology)
+    monkeypatch.setattr(bridge, "_affinity_visible_physical_core_count", lambda: 2)
+    requested, effective, plan = bridge._resolve_bridge_worker_plan(2)
+    assert requested == 2
+    assert effective == 2
+    assert plan is not None
+    assert plan.worker_cpus == (40, 42)
+    assert plan.affinity_status == "planned-unverified"
 
 
 @pytest.mark.parametrize("num_threads", [-1, True, 1.5, "2"])

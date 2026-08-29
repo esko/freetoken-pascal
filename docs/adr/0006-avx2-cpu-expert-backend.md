@@ -24,6 +24,13 @@ sysfs-derived physical-core plan. Positive worker counts are rejected when they
 exceed visible physical-core capacity before native construction; native startup
 must read back exact singleton masks before reporting verification. A flag-sync
 coordinator is optional and uses a spare planned core only when capacity allows.
+The standalone Q4 GGUF bridge reuses the same immutable plan for positive
+`num_threads` requests. Its internally owned Python pool applies and reads back
+one singleton mask per participating worker; a failure drains the request and
+reruns the serial reference executor. Direct Q4 callers without a plan and
+caller-supplied pools retain their existing behavior, while explicit plans with
+external pools are rejected. The report distinguishes planned, verified, and
+fallback affinity state and never changes the owner process mask.
 
 ## Consequences
 

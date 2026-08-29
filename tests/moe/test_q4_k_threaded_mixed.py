@@ -18,6 +18,7 @@ from freetoken.moe.cpu_abi import (
     ExecutionFailed,
     InvalidRequest,
 )
+from freetoken.moe.cpu_topology import CpuTopology, PhysicalCore, WorkerAffinityPolicy
 from freetoken.moe.ggml_reference import (
     Q5_1_BLOCK_BYTES,
     Q5_K_BLOCK_BYTES,
@@ -145,6 +146,97 @@ def _inputs(tokens: int = 2, routes: int = 10):
     )[:tokens, :routes]
     weights = np.linspace(-0.4, 0.7, ids.size, dtype=np.float32).reshape(ids.shape)
     return hidden, ids, weights
+
+
+def _worker_plan(thread_count: int = 2):
+    topology = CpuTopology(
+        allowed_cpus=tuple(range(100, 100 + thread_count)),
+        cores=tuple(
+            PhysicalCore(
+                key=f"core-{cpu}",
+                representative=cpu,
+                logical_cpus=(cpu,),
+                siblings=(cpu,),
+            )
+            for cpu in range(100, 100 + thread_count)
+        ),
+        confidence="full",
+        source="test",
+    )
+    return WorkerAffinityPolicy(requested_threads=thread_count).plan(topology)
+
+
+def test_q4_worker_plan_verifies_distinct_worker_masks_without_changing_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_native(monkeypatch)
+    plan = _worker_plan()
+    owner_mask = frozenset({7, 9})
+    masks: dict[int, frozenset[int]] = {}
+
+    def set_affinity(_pid: int, cpus: set[int]) -> None:
+        masks[threading.get_ident()] = frozenset(cpus)
+
+    def get_affinity(_pid: int) -> frozenset[int]:
+        return masks.get(threading.get_ident(), owner_mask)
+
+    monkeypatch.setattr(q4_k.os, "sched_setaffinity", set_affinity)
+    monkeypatch.setattr(q4_k.os, "sched_getaffinity", get_affinity)
+    executor = Q4KExecutor(
+        _layout(), mode="avx2", num_threads=2, worker_plan=plan, required_alignment=1
+    )
+    executor.prepare(1, 2)
+    hidden, ids, weights = _inputs(tokens=1, routes=2)
+    result = executor.execute(0, hidden, ids, weights)
+    report = executor.affinity_telemetry
+    assert result.telemetry.thread_count == 2
+    assert report["affinity_status"] == "verified"
+    assert report["verification_status"] == "verified"
+    assert report["requested_worker_cpus"] == [100, 101]
+    assert report["worker_requested_cpus"] == [100, 101]
+    assert report["observed_worker_cpus"] == [100, 101]
+    assert report["worker_observed_affinity_cpus"] == [100, 101]
+    assert report["affinity_errors"] == []
+    assert frozenset(get_affinity(0)) == owner_mask
+    executor.close()
+
+
+def test_q4_worker_affinity_failure_drains_and_falls_back_serial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_native(monkeypatch)
+    plan = _worker_plan()
+
+    def fail_affinity(_pid: int, _cpus: set[int]) -> None:
+        raise OSError("affinity denied")
+
+    monkeypatch.setattr(q4_k.os, "sched_setaffinity", fail_affinity)
+    executor = Q4KExecutor(
+        _layout(), mode="avx2", num_threads=2, worker_plan=plan, required_alignment=1
+    )
+    executor.prepare(1, 2)
+    hidden, ids, weights = _inputs(tokens=1, routes=2)
+    result = executor.execute(0, hidden, ids, weights)
+    assert result.telemetry.thread_count == 1
+    report = executor.affinity_telemetry
+    assert report["affinity_status"] == "fallback"
+    assert report["verification_status"] == "fallback"
+    assert "affinity denied" in report["fallback_reason"]
+    assert report["affinity_errors"]
+    executor.close()
+
+
+def test_q4_explicit_worker_plan_rejects_external_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_native(monkeypatch)
+    with pytest.raises(InvalidRequest, match="internally owned"):
+        Q4KExecutor(
+            _layout(),
+            mode="avx2",
+            num_threads=2,
+            worker_plan=_worker_plan(),
+            thread_pool=_ImmediatePool(),
+            required_alignment=1,
+        )
 
 
 def test_partition_is_balanced_and_index_ordered() -> None:
