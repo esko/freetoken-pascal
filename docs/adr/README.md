@@ -14,3 +14,4 @@ ADRs are immutable after acceptance except for status and explicit supersession 
 | [0008](0008-hardware-gated-ci.md) | Separate hosted, compile and self-hosted hardware gates | Accepted |
 | [0009](0009-text-only-qwen38-v1.md) | Limit v1 to text-only Qwen3.8-Flash-Next | Accepted |
 | [0010](0010-three-tier-ple-and-expert-residency.md) | Separate NVMe PLE, DDR4 experts/page cache, and dual-P4 hot compute | Accepted |
+| [0011](0011-evidence-gated-performance-profiles.md) | Use evidence-gated quant, placement, cache, and optional speculation profiles | Accepted |

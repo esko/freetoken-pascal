@@ -16,36 +16,44 @@ Each source has one usage state:
 
 Only `imported` sources declare destination paths. Changing a source to `imported` requires the responsible issue/PR, exact source and destination paths, import method, local differences, license, and header policy in the same commit.
 
-Issue #16 pins FreeToken commit
-`6f6c8640145eeca9df013e383ff51bf6bbff22f9` as the Q4_K W4A16 arithmetic oracle.
-The pinned llama.cpp `eaf93765572e794b8e3754fe45adbe12d381e997` and PXQ
-`066a37e9540a1ca21375fdeb377836fe69ecb729` implementations confirm the packed
-Q4_K, Q5_K, Q5_1, Q8_0, IQ3_XXS, IQ4_NL and IQ4_XS layouts. Their AVX2
-vector-dot paths require Q8_K activations and are not copied into this backend.
-The IQ3_XXS grid and IQ4_NL codebook constants are adapted byte-for-byte from
-the MIT-licensed llama.cpp files and are recorded as an imported source in the
-manifest and NOTICE. The scalar decoder control flow, bounded workspace bridge,
-and downstream AVX2 W4A16/mixed GEMV paths are local implementations; the
-remaining llama.cpp entries stay reference-only and add no NOTICE entry.
+Issue #16 pins FreeToken commit `6f6c8640145eeca9df013e383ff51bf6bbff22f9` as the Q4_K W4A16 arithmetic oracle. The pinned llama.cpp `eaf93765572e794b8e3754fe45adbe12d381e997` and PXQ `066a37e9540a1ca21375fdeb377836fe69ecb729` implementations confirm the packed Q4_K, Q5_K, Q5_1, Q8_0, IQ3_XXS, IQ4_NL and IQ4_XS layouts. Their AVX2 vector-dot paths require Q8_K activations and are not copied into this backend.
+
+The IQ3_XXS grid and IQ4_NL codebook constants are adapted byte-for-byte from the MIT-licensed llama.cpp files and are recorded as an imported source in the manifest and NOTICE. The scalar decoder control flow, bounded workspace bridge, and downstream AVX2 W4A16/mixed GEMV paths are local implementations; the remaining llama.cpp entries stay reference-only and add no NOTICE entry.
+
+## Current source status
+
+- FreeToken PR #257 merged on 2026-08-28 at merge commit `bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40`. Current upstream `main` was observed at immutable commit `58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6`, which contains that Qwen3.8 implementation.
+- The current downstream tree still descends from its earlier pinned FreeToken base and includes adaptations sourced partly from closed, unmerged PR #232. Issue #77 is therefore the next broad sync: merge the exact `58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6` revision, compare every Qwen model/QSA/PLE/cache/state path, and retain #232 provenance only for code that remains materially distinct.
+- FreeToken PR #279 is open and adds an mmap PLE backend. Its observed head `feaeaa31c0cea385a1c9ee107d4b1053f83b35db` is not yet a downstream dependency. Issue #77 or #13 must record an immutable `planned` or `reference` entry before any code is copied; a moving PR head must never be merged implicitly.
+- llama.cpp PR #27742 merged into upstream llama.cpp on 2026-08-27. The existing pinned PR-head SHA remains a valid byte-level oracle for imported/reference work, while deployment comparisons use a separately pinned current merged llama.cpp revision.
+- vLLM Qwen3.8 and PLE-offload PRs remain model/TP/MTP/offload references rather than Pascal runtime dependencies.
+- PXA/PXQ has no downstream-consumed Qwen3.8 implementation at the current pin; issue #19 uses it as a Pascal kernel donor/reference, not as a ready runtime.
 
 ## Primary upstreams
 
 | Capability | Primary source | Secondary oracle |
 |---|---|---|
-| Hybrid MoE engine and q-star scheduling | FreeToken | FreeToken paper / Colibrì |
+| Hybrid MoE engine and q-star scheduling | current FreeToken after issue #77 sync | FreeToken paper / Colibrì |
 | Pascal compile/runtime fallbacks | FreeToken PR #19 + #26 | uaysk/ampir vLLM Pascal work |
-| Qwen3.8/Qwen4, QSA, PLE | FreeToken PR #232 | vLLM #53896/#53899; llama.cpp #27742 |
-| GGUF K/I types and Qwen MoE loader | FreeToken PR #131 | llama.cpp; humanjesse/vllm-v100 |
-| Qwen MoE TP patterns | FreeToken PR #104 | vLLM Qwen3.8 TP |
+| Qwen3.8/Qwen4, QSA, PLE and state | merged FreeToken PR #257 through issue #77 | merged llama.cpp Qwen3.8; vLLM Qwen3.8/PLE work |
+| Historical downstream Qwen delta | closed PR #232 only where still distinct after issue #77 | pre-sync downstream tests and provenance ledger |
+| PLE mmap donor/reference | open FreeToken PR #279 after immutable pin | downstream issue #13; merged llama.cpp PLE behavior |
+| GGUF K/I types and Qwen MoE loader | FreeToken PR #131 plus downstream GGUF work | merged llama.cpp; humanjesse/vllm-v100 |
+| Qwen MoE TP patterns | FreeToken PR #104 | merged PR #257 / vLLM Qwen3.8 TP |
 | low-bit Pascal GPU kernels | PXA/PXQ llama | llama.cpp CPU reference |
 | AVX2 low-bit CPU kernels | downstream implementation using FreeToken `6f6c8640` W4A16 semantics | llama.cpp/PXQ Q4_K layout and dequantize + dense reference |
-| expert cache policy concepts | FreeToken / flashlib | vLLM #37190; Colibrì |
-| transfer/prefetch design | FreeToken | vLLM #29941/#51710 |
+| expert cache policy concepts | FreeToken / flashlib | vLLM expert cache; Colibrì |
+| static hot-expert comparator | downstream issue #21 | `timadinorth/llama.cpp` PR #1 |
+| transfer/prefetch design | FreeToken | vLLM weight-prefetch/offload work |
+| exact context-derived speculation evidence | downstream optional issue #74 | `sxuff/qwen38-flash-next-dgx-spark` paired llama.cpp benchmark |
+| placement-cliff safety | downstream issue #73 | community hybrid-placement reports, reproduced only on target hardware |
+| QSA context/workspace safety | downstream issue #76 | merged FreeToken PR #257, merged llama.cpp Qwen3.8, current vLLM work |
 
-FreeToken PR #257 was reviewed at head `e3b6d7bdc74da8c9f88d182415ec4e8dfbb967c3` and merge `bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40`.
-Its `python/freetoken/models/qwen4_exp/weight.py` PLE loader is a reference for exact shard-set, equal-row-shape, scalar-scale, and padded-storage validation.
-The file-backed downstream loader semantically adopts those fail-closed checks without copying donor code or changing the pageable GGUF mmap contract.
-The reference pin is recorded as `freetoken-qwen4-pr257-ple-reference` in `manifests/upstreams.yaml` and remains Apache-2.0 reference-only, so it adds no NOTICE entry.
+The static-residency and n-gram repositories above are reference-only unless exact code is later imported. Any copied file or adapted implementation requires a new pinned manifest entry, license review, responsible issue/PR, and NOTICE update where required.
+
+FreeToken PR #257 was previously recorded as a reference at head `e3b6d7bdc74da8c9f88d182415ec4e8dfbb967c3` and merge `bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40`. After issue #77 it becomes part of the primary upstream base rather than only a PLE-loader oracle. The sync must reconcile its Qwen model, QSA backend, PLE implementation, CUDA-graph/radix state, hybrid MoE and server contracts with downstream changes.
+
+The file-backed downstream loader currently semantically adopts fail-closed PLE checks without copying donor code or changing the pageable GGUF mmap contract. Issue #77 must preserve those downstream-only safety/storage contracts while eliminating duplicate architecture code.
 
 ## Integration method
 
@@ -55,7 +63,7 @@ From that point:
 
 - the canonical remote is named `upstream` and its fetched mainline is `upstream/main`;
 - a temporary local `upstream/freetoken` branch may be used to inspect a pinned source commit, but downstream commits never land on it;
-- feature PRs are imported or semantically replayed as focused commits;
+- focused feature PRs are imported or semantically replayed only when absent from the selected upstream base;
 - local changes live in reviewable downstream commits;
 - no moving PR head is referenced without recording its SHA;
 - each copied file retains license headers;
@@ -83,6 +91,45 @@ The conflict decisions were:
 - combine upstream ignore rules with downstream model, CUDA, trace, and private-result rules;
 - preserve all downstream `.github`, ADR, manifest, testing, release, and governance files.
 
+## Immediate issue #77 sync
+
+Use the exact upstream commit selected by issue #77 rather than a moving `main` ref:
+
+```bash
+git remote get-url upstream || \
+  git remote add upstream https://github.com/FlashML-org/FreeToken.git
+git fetch --prune upstream main
+git cat-file -e 58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6^{commit}
+git switch main
+git pull --ff-only origin main
+git switch -c sync/freetoken-qwen38-257
+git branch --force upstream/freetoken \
+  58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6
+git merge --no-commit \
+  58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6
+```
+
+The sync PR must contain a file-by-file Qwen delta ledger. Do not resolve model/QSA/PLE conflicts by choosing one repository side wholesale. Preserve upstream engine contracts where valid and reapply downstream-only Pascal, GGUF, CPU-expert, storage-tier, placement and evidence requirements as focused commits.
+
+Before committing:
+
+```bash
+git diff --name-only --diff-filter=U
+git diff --check
+python scripts/check_upstream_manifest.py
+python scripts/validate_docs.py
+```
+
+Complete the sync and prove ancestry:
+
+```bash
+git add <resolved-paths> manifests/upstreams.yaml docs/upstream-map.md NOTICE
+git commit
+git merge-base --is-ancestor \
+  58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6 HEAD
+make check
+```
+
 ## Future FreeToken sync
 
 Start every broad sync from a clean, current downstream `main`. Never use an unpinned moving branch as the merge operand:
@@ -93,7 +140,6 @@ git remote get-url upstream
 git remote add upstream https://github.com/FlashML-org/FreeToken.git
 git fetch --prune upstream main
 git log --oneline --left-right main...upstream/main
-git diff --stat 9ef3651309fe4058672f2cc92069238dea06be1b..upstream/main
 git rev-parse upstream/main
 ```
 
@@ -107,27 +153,9 @@ git branch --force upstream/freetoken <new-sha>
 git merge --no-commit <new-sha>
 ```
 
-Resolve conflicts by preserving downstream product scope and identity while retaining upstream engine contracts. Inspect every conflict and never use a repository-wide `ours` or `theirs` resolution. Before committing:
+Resolve conflicts by preserving downstream product scope and identity while retaining upstream engine contracts. Inspect every conflict and never use a repository-wide `ours` or `theirs` resolution. Update the `freetoken` manifest `ref`, import ledger, and any changed notices in the same sync commit.
 
-```bash
-git diff --name-only --diff-filter=U
-git diff --check
-python scripts/check_upstream_manifest.py
-python scripts/validate_docs.py
-```
-
-Update the `freetoken` manifest `ref`, import ledger, and any changed notices in the same sync commit. Complete the merge, validate it, and prove reachability:
-
-```bash
-git add <resolved-paths> manifests/upstreams.yaml docs/upstream-map.md NOTICE
-git commit
-git merge-base HEAD <new-sha>
-git merge-base --is-ancestor <new-sha> HEAD
-git merge-base --is-ancestor origin/main HEAD
-make check
-```
-
-If the selected upstream range touches kernels, model graphs, cache maps, quant loaders, or tensor parallelism, the sync PR remains open until the applicable H2/H3 gates can run. Do not claim hardware validation from H0 or H1 results.
+If the selected upstream range touches kernels, model graphs, cache maps, quant loaders, or tensor parallelism, the sync PR remains open until the applicable H0/H1 gates pass and all hardware-dependent validation is explicitly deferred. Do not claim P4 validation from H0 or H1 results.
 
 ## Focused upstream PR imports
 
@@ -140,24 +168,25 @@ git switch -c import/freetoken-pr-<number>-<short-name> main
 git cherry-pick --no-commit <pinned-pr-sha>
 ```
 
-Record the exact PR SHA and source/destination paths in `manifests/upstreams.yaml`. Adapt only the issue-scoped files, preserve source headers, and document semantic reimplementations as local modifications.
+Before importing, verify that the selected upstream base does not already contain equivalent work. Record the exact PR SHA and source/destination paths in `manifests/upstreams.yaml`. Adapt only the issue-scoped files, preserve source headers, and document semantic reimplementations as local modifications.
 
 ## Conflict policy
 
 When sources disagree:
 
 1. Transformers/model-author implementation defines high-level model semantics.
-2. Current upstream FreeToken defines engine contracts.
-3. llama.cpp/vLLM serve as independent correctness oracles.
+2. Current pinned upstream FreeToken defines engine contracts.
+3. Merged llama.cpp and current vLLM serve as independent correctness/operational oracles.
 4. PXA defines its quant format and Pascal kernel arithmetic.
 5. Downstream performance changes may alter reduction order only with quantified tolerance and model-level validation.
+6. Community measurements define experiments, not defaults or target-hardware claims.
 
 ## Upstream sync cadence
 
 - check FreeToken and selected PRs before starting each phase;
 - pin a new baseline only in a dedicated sync PR;
-- rerun hosted correctness after every sync;
-- rerun H2/H3 gates for changes touching kernels, model graphs, cache maps, quant loaders or TP;
+- rerun hosted correctness and H1 `sm_61` compilation after every sync;
+- rerun H2/H3 gates for changes touching kernels, model graphs, cache maps, quant loaders or TP once P4 hardware exists;
 - do not mix a broad upstream sync with a downstream optimization.
 
 ## Upstream change report
