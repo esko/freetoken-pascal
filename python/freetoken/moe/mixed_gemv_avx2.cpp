@@ -146,13 +146,20 @@ freetoken_mixed_q8_0_dot_avx2_impl(const uint8_t* block, const float* input) {
 #if defined(__x86_64__) || defined(__i386__)
   const float d = half_to_float(load_u16(block));
   __m256 accumulator = _mm256_setzero_ps();
-  alignas(32) float values[8];
+  const __m256 scale = _mm256_set1_ps(d);
   for (int lane = 0; lane < 32; lane += 8) {
-    for (int j = 0; j < 8; ++j) {
-      values[j] = static_cast<float>(static_cast<int8_t>(block[2 + lane + j])) * d;
-    }
+    // Q8_0 stores signed int8 codes immediately after the fp16 scale.  Load
+    // eight adjacent bytes and sign-extend them directly to AVX2 lanes so the
+    // hot promoted down projection does not round-trip through scalar float
+    // temporaries.  The per-block accumulator and final scalar lane reduction
+    // are intentionally unchanged: packed GEMV adds one complete dot result
+    // per block in the established reference order.
+    const __m128i packed = _mm_loadl_epi64(
+        reinterpret_cast<const __m128i*>(block + 2 + lane));
+    const __m256i codes = _mm256_cvtepi8_epi32(packed);
     accumulator = _mm256_fmadd_ps(
-        _mm256_load_ps(values), _mm256_loadu_ps(input + lane), accumulator);
+        _mm256_mul_ps(_mm256_cvtepi32_ps(codes), scale),
+        _mm256_loadu_ps(input + lane), accumulator);
   }
   alignas(32) float reduced[8];
   _mm256_store_ps(reduced, accumulator);
@@ -172,12 +179,13 @@ extern "C" FREETOKEN_AVX2_TARGET __attribute__((visibility("default"))) void
 freetoken_mixed_q8_0_decode_avx2_impl(const uint8_t* block, float* output) {
 #if defined(__x86_64__) || defined(__i386__)
   const float d = half_to_float(load_u16(block));
-  alignas(32) float values[8];
+  const __m256 scale = _mm256_set1_ps(d);
   for (int lane = 0; lane < 32; lane += 8) {
-    for (int j = 0; j < 8; ++j) {
-      values[j] = static_cast<float>(static_cast<int8_t>(block[2 + lane + j])) * d;
-    }
-    _mm256_storeu_ps(output + lane, _mm256_load_ps(values));
+    const __m128i packed = _mm_loadl_epi64(
+        reinterpret_cast<const __m128i*>(block + 2 + lane));
+    const __m256i codes = _mm256_cvtepi8_epi32(packed);
+    _mm256_storeu_ps(output + lane,
+                     _mm256_mul_ps(_mm256_cvtepi32_ps(codes), scale));
   }
 #else
   (void)block;
