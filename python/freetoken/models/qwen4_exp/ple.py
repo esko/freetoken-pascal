@@ -415,6 +415,29 @@ class NGramEmbedding(BaseOP):
         self.layer_multipliers = torch.empty(args.ngram_size, dtype=torch.int64)
         self.ngram_heads_vocab_sizes = torch.empty(self.num_heads, dtype=torch.int64)
         self.ngram_heads_offsets = torch.empty(self.num_heads, dtype=torch.int64)
+        constants = (
+            args.ple_layer_multipliers,
+            args.ple_head_vocab_sizes,
+            args.ple_head_offsets,
+        )
+        if any(value is not None for value in constants):
+            if any(value is None for value in constants):
+                raise ValueError("PLE hash constants must be provided as a complete GGUF set")
+            multipliers, vocab_sizes, offsets = constants
+            assert multipliers is not None and vocab_sizes is not None and offsets is not None
+            if len(multipliers) != args.ngram_size:
+                raise ValueError(
+                    "PLE layer multiplier constants do not match ngram_size: "
+                    f"{len(multipliers)} != {args.ngram_size}"
+                )
+            if len(vocab_sizes) != self.num_heads or len(offsets) != self.num_heads:
+                raise ValueError(
+                    "PLE head hash constants do not match num_ngram_heads: "
+                    f"{len(vocab_sizes)}, {len(offsets)} != {self.num_heads}"
+                )
+            self.layer_multipliers.copy_(torch.tensor(multipliers, dtype=torch.int64))
+            self.ngram_heads_vocab_sizes.copy_(torch.tensor(vocab_sizes, dtype=torch.int64))
+            self.ngram_heads_offsets.copy_(torch.tensor(offsets, dtype=torch.int64))
         self._table = table
 
     def attach_table(self, table: PLETableBackend) -> None:

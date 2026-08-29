@@ -111,6 +111,22 @@ def iter_gguf_weights(
     linear_group = config.linear_attention_group()
     if linear_group is None:
         raise ValueError("Qwen4-Exp GGUF has no linear-attention group")
+    args = config.qwen4_args
+    ple_constants = (
+        args.ple_layer_multipliers,
+        args.ple_head_vocab_sizes,
+        args.ple_head_offsets,
+    )
+    if args.ple_layer_ids and any(value is None for value in ple_constants):
+        raise ValueError("Qwen4-Exp GGUF is missing parsed PLE hash constants")
+    if args.ple_layer_ids:
+        multipliers, vocab_sizes, offsets = ple_constants
+        assert multipliers is not None and vocab_sizes is not None and offsets is not None
+        for layer_id in args.ple_layer_ids:
+            prefix = f"model.layers.{layer_id}.ple.ple_embedding"
+            yield f"{prefix}.layer_multipliers", torch.tensor(multipliers, dtype=torch.int64)
+            yield f"{prefix}.ngram_heads_vocab_sizes", torch.tensor(vocab_sizes, dtype=torch.int64)
+            yield f"{prefix}.ngram_heads_offsets", torch.tensor(offsets, dtype=torch.int64)
     values_per_key = linear_group.num_value_heads // linear_group.num_key_heads
     qk_rows = 2 * linear_group.num_key_heads * linear_group.key_head_dim
     value_rows = linear_group.num_value_heads * linear_group.value_head_dim

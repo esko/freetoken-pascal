@@ -111,15 +111,46 @@ class _MappedPLETable(PLETableBackend):
     """Adapter from the downstream CPU/NVMe PLE table to the upstream PLE backend contract."""
 
     def __init__(self, table, head_dim: int):
+        try:
+            descriptor = table.descriptor
+            rows = int(descriptor.rows)
+            elements_per_row = int(descriptor.elements_per_row)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise TypeError("mapped PLE table must expose a valid descriptor geometry") from error
+        if rows <= 0 or head_dim <= 0 or elements_per_row != int(head_dim):
+            raise ValueError(
+                "mapped PLE table geometry does not match the model: "
+                f"rows={rows}, elements_per_row={elements_per_row}, head_dim={head_dim}"
+            )
         self._table = table
-        self.num_rows = int(table.descriptor.rows)
+        self.num_rows = rows
         self.head_dim = int(head_dim)
         self.dtype = torch.bfloat16
 
     def lookup(self, row_ids: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
-        values = self._table.lookup(row_ids.detach().cpu().numpy()).astype(np.float32, copy=False)
+        if not isinstance(row_ids, torch.Tensor) or row_ids.ndim != 2:
+            raise ValueError(
+                "PLE row ids must have shape [tokens, heads], "
+                f"got {getattr(row_ids, 'shape', None)}"
+            )
+        if row_ids.dtype == torch.bool or row_ids.is_floating_point() or row_ids.is_complex():
+            raise TypeError(f"PLE row ids must be integer, got {row_ids.dtype}")
+        ids = row_ids.detach().cpu().numpy()
+        values = np.asarray(self._table.lookup(ids)).astype(np.float32, copy=False)
+        expected = (*ids.shape, self.head_dim)
+        if values.shape != expected:
+            raise ValueError(
+                "mapped PLE table returned invalid row geometry: "
+                f"got {values.shape}, expected {expected}"
+            )
         result = torch.as_tensor(values, dtype=torch.bfloat16, device=row_ids.device)
+        result = result.reshape(*row_ids.shape[:-1], row_ids.shape[-1] * self.head_dim)
         if out is not None:
+            if out.shape != result.shape:
+                raise ValueError(
+                    "mapped PLE output geometry does not match the flattened backend contract: "
+                    f"got {tuple(out.shape)}, expected {tuple(result.shape)}"
+                )
             out.copy_(result)
             return out
         return result
@@ -293,17 +324,33 @@ class Qwen4ExpModel(BaseOP):
             from .ple import derive_ngram_hash_constants
 
             for layer in self._ple:
-                mult, sizes, offsets = derive_ngram_hash_constants(
-                    vocab_size=self._config.vocab_size,
-                    ngram_size=args.ngram_size,
-                    num_ngram_heads=args.num_ngram_heads,
-                    ngram_vocab_size_base=args.ngram_vocab_size_base,
-                    ple_layer_index=layer.ple_index,
+                if (
+                    args.ple_layer_multipliers is not None
+                    and args.ple_head_vocab_sizes is not None
+                    and args.ple_head_offsets is not None
+                ):
+                    mult = args.ple_layer_multipliers
+                    sizes = args.ple_head_vocab_sizes
+                    offsets = args.ple_head_offsets
+                else:
+                    mult, sizes, offsets = derive_ngram_hash_constants(
+                        vocab_size=self._config.vocab_size,
+                        ngram_size=args.ngram_size,
+                        num_ngram_heads=args.num_ngram_heads,
+                        ngram_vocab_size_base=args.ngram_vocab_size_base,
+                        ple_layer_index=layer.ple_index,
                 )
                 layer.ple_embedding.layer_multipliers.copy_(torch.tensor(mult, dtype=torch.int64))
-                layer.ple_embedding.ngram_heads_vocab_sizes.copy_(torch.tensor(sizes, dtype=torch.int64))
-                layer.ple_embedding.ngram_heads_offsets.copy_(torch.tensor(offsets, dtype=torch.int64))
-            rows = int(layer.ple_embedding.ngram_heads_offsets[-1] + layer.ple_embedding.ngram_heads_vocab_sizes[-1])
+                layer.ple_embedding.ngram_heads_vocab_sizes.copy_(
+                    torch.tensor(sizes, dtype=torch.int64)
+                )
+                layer.ple_embedding.ngram_heads_offsets.copy_(
+                    torch.tensor(offsets, dtype=torch.int64)
+                )
+            rows = int(
+                layer.ple_embedding.ngram_heads_offsets[-1]
+                + layer.ple_embedding.ngram_heads_vocab_sizes[-1]
+            )
             self._attach_ple_table(ZeroTable(rows, args.ngram_head_dim))
             return 0
 
@@ -420,6 +467,10 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
                 tie_word_embeddings=config.tie_word_embeddings,
                 tied_embedding=self.model.embed_tokens if config.tie_word_embeddings else None,
             )
+        if config.gguf_model_path is not None:
+            from .gguf import convert_qwen4_to_gguf
+
+            convert_qwen4_to_gguf(self, config, model_path=config.gguf_model_path)
         self._debug_hook: Callable[[dict[str, object]], None] | None = None
         self._debug_events: dict[str, list[dict[str, object]]] = {}
         super().__init__()

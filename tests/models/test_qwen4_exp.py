@@ -24,7 +24,8 @@ from freetoken.models.qwen4_exp.gguf import (
     _grouped_to_tiled_indices,
     _ungroup_v,
 )
-from freetoken.models.qwen4_exp.model import Qwen4ExpForCausalLM
+from freetoken.models.qwen4_exp.model import Qwen4ExpForCausalLM, _MappedPLETable
+from freetoken.models.qwen4_exp.ple import NGramEmbedding
 from tests.models.qwen4_exp.legacy_downstream import (
     _HostNGramEmbedding,
     _ple_request_tokens,
@@ -325,6 +326,42 @@ def test_qwen4_gguf_config_uses_exact_artifact_geometry():
     assert not config.is_linear_layer(3)
     assert config.attention_group_for_layer(3).index_ratio == 4
     assert config.qwen4_args.index_compress_ratio == config.qwen4_args.index_ratio == 4
+
+
+def test_qwen4_gguf_ple_metadata_seeds_current_embedding_buffers():
+    args = parse_gguf_config(_gguf_shim()).qwen4_args
+    embedding = NGramEmbedding(args)
+
+    assert torch.equal(
+        embedding.layer_multipliers,
+        torch.tensor(args.ple_layer_multipliers, dtype=torch.int64),
+    )
+    assert torch.equal(
+        embedding.ngram_heads_vocab_sizes,
+        torch.tensor(args.ple_head_vocab_sizes, dtype=torch.int64),
+    )
+    assert torch.equal(
+        embedding.ngram_heads_offsets,
+        torch.tensor(args.ple_head_offsets, dtype=torch.int64),
+    )
+
+
+def test_qwen4_mapped_ple_table_flattens_rows_and_checks_geometry():
+    class Table:
+        descriptor = SimpleNamespace(rows=8, elements_per_row=2)
+
+        @staticmethod
+        def lookup(ids):
+            return np.arange(ids.size * 2, dtype=np.float32).reshape(*ids.shape, 2)
+
+    table = _MappedPLETable(Table(), head_dim=2)
+    row_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int64)
+    output = table.lookup(row_ids)
+
+    assert output.shape == (2, 4)
+    torch.testing.assert_close(output.float(), torch.arange(8).reshape(2, 4).float())
+    with pytest.raises(ValueError, match="geometry"):
+        _MappedPLETable(Table(), head_dim=3)
 
 
 @pytest.mark.parametrize(
