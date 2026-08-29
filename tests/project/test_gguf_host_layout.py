@@ -256,6 +256,22 @@ def test_dedicated_pread_batch_matches_mmap_and_deduplicates(tmp_path: Path) -> 
         assert pread_table.telemetry()["batch_positional_reads"] == 3
         assert pread_table.telemetry()["batch_sorted_rows"] == 3
         assert pread_table.telemetry()["batch_bytes_read"] == 3 * 90
+        assert pread_table.telemetry()["advice"] == "posix-fadv-random"
+        assert pread_table.telemetry()["advice_applied"] is True
+
+
+def test_dedicated_pread_full_warm_never_mmaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    monkeypatch.setattr(
+        "freetoken.gguf_host.mmap.mmap",
+        lambda *_args, **_kwargs: pytest.fail("unexpected mmap"),
+    )
+    with MappedPLETable.open_from_artifact(
+        artifact, backend="pread", warm_mode="full-ple-warm"
+    ) as table:
+        assert table.telemetry()["full_model_warm_bytes"] == table.descriptor.tensor_bytes
 
 
 def test_dedicated_pread_batch_fails_closed_on_short_read(

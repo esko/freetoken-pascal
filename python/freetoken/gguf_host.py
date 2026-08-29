@@ -72,6 +72,17 @@ def _warm_model_files(paths: tuple[str, ...]) -> int:
     return warmed
 
 
+def _warm_pread_file(fd: int, size: int, chunk_size: int = 8 << 20) -> int:
+    offset = 0
+    while offset < size:
+        requested = min(chunk_size, size - offset)
+        chunk = os.pread(fd, requested, offset)
+        if len(chunk) != requested:
+            raise ValueError("short PLE positional warm read")
+        offset += requested
+    return offset
+
+
 def _publish_directory_noreplace(staging: Path, output: Path) -> None:
     """Atomically publish a directory without replacing a concurrent destination."""
     renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
@@ -749,6 +760,24 @@ class MappedPLETable:
         self._batch_sorted_rows = self._batch_bytes_read = 0
         self._targeted_positional_warm_reads = 0
         self._short_reads = 0
+        self._advice = "not-requested"
+        self._advice_applied = False
+        self._advice_error: str | None = None
+
+    def _apply_random_advice(self) -> None:
+        try:
+            if self.mapping is not None and hasattr(mmap, "MADV_RANDOM"):
+                self._advice = "madv-random"
+                self.mapping.advise(mmap.MADV_RANDOM)
+            elif self._pread_fd is not None and hasattr(os, "POSIX_FADV_RANDOM"):
+                self._advice = "posix-fadv-random"
+                os.posix_fadvise(self._pread_fd, 0, 0, os.POSIX_FADV_RANDOM)
+            else:
+                self._advice = "unsupported"
+                return
+            self._advice_applied = True
+        except OSError as error:
+            self._advice_error = f"{type(error).__name__}: {error}"
 
     @classmethod
     def open_from_gguf(
@@ -849,6 +878,7 @@ class MappedPLETable:
             table.backend = backend
             if backend == "pread":
                 table._pread_fd = os.open(payload, os.O_RDONLY)
+            table._apply_random_advice()
             if warm_mode == "full-model-warm":
                 raise ValueError("artifact warm mode is full-ple-warm")
             table.set_warm_mode(warm_mode)
@@ -874,7 +904,12 @@ class MappedPLETable:
         if mode in {"full-model-warm", "full-ple-warm"}:
             # Explicitly touch every source shard, including ordinary tensors and
             # expert banks.  This is intentionally never the default.
-            self._full_model_warm_bytes += _warm_model_files(self._model_shard_paths)
+            if self.mapping is None:
+                self._full_model_warm_bytes += _warm_pread_file(
+                    self._pread_fd, self.descriptor.tensor_bytes
+                )
+            else:
+                self._full_model_warm_bytes += _warm_model_files(self._model_shard_paths)
 
     def _validate_ids(self, ids: np.ndarray) -> np.ndarray:
         values = np.asarray(ids)
@@ -982,6 +1017,9 @@ class MappedPLETable:
             "batch_bytes_read": self._batch_bytes_read,
             "short_reads": self._short_reads,
             "targeted_positional_warm_reads": self._targeted_positional_warm_reads,
+            "advice": self._advice,
+            "advice_applied": self._advice_applied,
+            "advice_error": self._advice_error,
         }
 
     def close(self) -> None:
