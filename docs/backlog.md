@@ -6,10 +6,11 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 
 | Phase | Issue | Outcome | Gate |
 |---|---:|---|---|
-| P0 | [#5](https://github.com/esko/freetoken-pascal/issues/5) | Import upstream FreeToken history and downstream sync | H0 |
+| P0 | [#5](https://github.com/esko/freetoken-pascal/issues/5) | Import upstream FreeToken history and downstream sync model | H0 |
 | P0 | [#6](https://github.com/esko/freetoken-pascal/issues/6) | Pin provenance and licensing | H0 |
 | P0 | [#7](https://github.com/esko/freetoken-pascal/issues/7) | CUDA 12.6/Python 3.12 environments | H0/H1 |
 | P0 | [#8](https://github.com/esko/freetoken-pascal/issues/8) | Fixtures, schemas, hosted and `sm_61` compile CI | H0/H1 |
+| P0 | [#77](https://github.com/esko/freetoken-pascal/issues/77) | Sync merged FreeToken Qwen3.8 support and reconcile downstream delta | H0/H1 |
 | P0 | [#9](https://github.com/esko/freetoken-pascal/issues/9) | Install/qualify P4s and self-hosted runner | H2/H3, hardware blocked |
 | P1 | [#10](https://github.com/esko/freetoken-pascal/issues/10) | FreeToken Pascal/CUDA 12.6 support | H1/H2 |
 | P1 | [#11](https://github.com/esko/freetoken-pascal/issues/11) | Qwen3.8/Qwen4 text architecture | H0-H2 |
@@ -39,35 +40,40 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 ## Critical dependency chain
 
 ```text
-#5 → #7 → #10 → #11 → #12 → #13 → #14
-                    └→ #15 → #16 → #18
-                         #12 → #19
-#11 + #13 + #19 → #73
+#5 → #6 → #77
+          ├→ #13 → #14
+          ├→ #19
+          ├→ #38
+          ├→ #73
+          └→ #76
+#7 → #10
+#11 + #12 + #77 → #13 → #14
+#12 + #15 → #16 → #17/#18
+#12 + #19 + #77 → #73
 #9 + #11 + #13 + #73 → #20
 #16 + #19 + #20 + #73 → #21
-#14 → #38
-#21 + #38 → #22 → #23 → #24 → #25
-#11 + #14 + #73 → #76
+#14 + #38 → #22 → #23 → #24 → #25
+#11 + #14 + #73 + #77 → #76
 #25 + #76 → long-context portions of #26 → #27 → #28 → #29
 #13 → #25 + #26 + #28 + #29
 #13 + #14 + #25 + #26 + #27 → #74  (optional; does not block #29)
 ```
 
-[#6](https://github.com/esko/freetoken-pascal/issues/6) and [#8](https://github.com/esko/freetoken-pascal/issues/8) support all phases. [#17](https://github.com/esko/freetoken-pascal/issues/17) is required for the selected Q3 profile and any additional release-artifact bank types.
+[#8](https://github.com/esko/freetoken-pascal/issues/8) supports all phases. [#17](https://github.com/esko/freetoken-pascal/issues/17) is required for the selected Q3 profile and any additional release-artifact bank types.
 
 ## Work possible before P4 arrival
 
-The orchestrator should prioritize H0/H1 portions of #5–#8, #10–#19, #38, #73 and #76, plus the pure logic/tests in #20–#25 and #74. This includes the PLE file format, random-access advice, mmap/`pread`, adaptive batching, read-amplification telemetry, CPU expert execution, Q4/Q3 census and quality fixtures, routing simulation, placement planning/canary logic, QSA workspace accounting and host-synchronization profiling, quant conversion, metrics and correctness A/B tests. Issues #9 and #29 are explicitly blocked. DP4A tuning, placement-cliff measurement, context-scaling measurements, dual-P4 policy selection and final quant/profile selection remain H2/H3 work, and other issues remain open until their required hardware evidence is attached.
+The orchestrator should execute #77 first, then prioritize H0/H1 portions of #13–#19, #38, #73 and #76, plus the pure logic/tests in #20–#25 and #74. This includes upstream Qwen delta reconciliation, the PLE file format, random-access advice, mmap/`pread`, adaptive batching, read-amplification telemetry, CPU expert execution, Q4/Q3 census and quality fixtures, routing simulation, placement planning/canary logic, QSA workspace accounting and host-synchronization profiling, quant conversion, metrics and correctness A/B tests. Issues #9 and #29 are explicitly blocked. DP4A tuning, placement-cliff measurement, context-scaling measurements, dual-P4 policy selection and final quant/profile selection remain H2/H3 work, and other issues remain open until their required hardware evidence is attached.
 
 ## Completeness audit
 
 The core v1 backlog includes explicit work and acceptance evidence for:
 
-- source import, provenance and licensing;
+- source import, merged-upstream Qwen reconciliation, provenance and licensing;
 - reproducible CUDA/Python toolchains;
 - hosted, compile and hardware CI;
 - loader/converter and malformed-file correctness;
-- Qwen4 GDN/QSA/hyperconnection/PLE semantics;
+- one authoritative Qwen4 GDN/QSA/hyperconnection/PLE implementation after #77;
 - heterogeneous expert bank types resident in DDR4 and a dedicated NVMe PLE layout served through the Linux page cache;
 - mmap and positional-read PLE backends with random advice, adaptive deduplication/ordering, asynchronous prefetch and physical read-amplification evidence;
 - AVX2 CPU fallback and required low-bit formats;
