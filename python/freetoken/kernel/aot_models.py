@@ -140,6 +140,7 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         moe_intermediate_size=640,
         expert_formats=("nvfp4",),
         aliases=("RadixArk/Qwen3.8-Flash-Next-NVFP4",),
+        arch_aliases=("Qwen4ExpGGUFForCausalLM",),
     ),
     AotModel(
         name="Qwen/Qwen3-30B-A3B",
