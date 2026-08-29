@@ -80,7 +80,13 @@ class _SparseMoE(Qwen4ExpMoE):
         eager = bool(getattr(self.experts, "requires_moe_execution_context", False))
         if execution_context is not None:
             _validate_eager_moe_context(execution_context)
-        if not eager and execution_context is None and debug_observer is None:
+        shared_gate_weight = getattr(self.shared_expert_gate, "weight", None)
+        if (
+            not eager
+            and execution_context is None
+            and debug_observer is None
+            and shared_gate_weight is not None
+        ):
             return super().forward(hidden_states)
 
         from freetoken.kernel.triton.moe_shared_gate import shared_gate_mul_add, shared_gate_sigmoid
@@ -89,7 +95,13 @@ class _SparseMoE(Qwen4ExpMoE):
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate.forward(hidden_states)
         shared = self.shared_expert.forward(hidden_states)
-        gate = shared_gate_sigmoid(hidden_states, self.shared_expert_gate.weight.view(-1))
+        if shared_gate_weight is not None:
+            gate = shared_gate_sigmoid(hidden_states, shared_gate_weight.view(-1))
+        else:
+            # Preserve the model-neutral adapter seam used by the GGUF CPU path.
+            # Real Qwen modules take the fused weight path above; lightweight
+            # adapters may expose only the ordinary module forward contract.
+            gate = torch.sigmoid(self.shared_expert_gate.forward(hidden_states))
         kwargs: dict[str, object] = {}
         if debug_observer is not None:
             kwargs["debug_observer"] = debug_observer
@@ -292,6 +304,10 @@ class Qwen4ExpModel(BaseOP):
                 close()
         self._ple_tables.clear()
 
+    def _has_eager_gguf_attachment(self) -> bool:
+        attachment = getattr(self, "_gguf_cpu_attachment", None)
+        return attachment is not None and attachment.mode == "eager"
+
     def _attach_ple_table(self, table: PLETableBackend) -> None:
         self._close_ple_tables()
         for layer in self._ple:
@@ -420,32 +436,45 @@ class Qwen4ExpModel(BaseOP):
         _validate_eager_moe_context(context)
         return context
 
-    def forward(self, input_ids: torch.Tensor, batch: Batch | None = None) -> torch.Tensor:
+    def _forward_impl(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        eager: bool,
+        batch: Batch | None = None,
+    ) -> torch.Tensor:
         batch = batch if batch is not None else get_global_ctx().batch
+        execution_context = self._eager_execution_context(batch) if eager else None
+        hidden = self.embed_tokens.forward(input_ids)
+        if getattr(batch, "mm_embeds", None) is not None or (
+            self._image_token_id is not None and bool((input_ids == self._image_token_id).any())
+        ):
+            raise RuntimeError("Qwen3.8 vision inputs are outside FreeToken-Pascal v1; use text-only prompts")
+        hidden = hidden.repeat(1, self.hc_count)
+        meta = None
+        if self._ple:
+            meta = build_ple_metadata(batch, self._ple[0].args, input_ids.device)
+            for layer in self._ple:
+                layer.start_prefetch(batch, meta)
+        for layer in self.layers.op_list:
+            hidden = layer.forward(
+                hidden,
+                batch,
+                self._debug_observer,
+                execution_context=execution_context,
+            )
+        if meta is not None:
+            commit_ngram_context(meta, getattr(batch, "fla_metadata", None))
+        return self.hyper_connection_mixer.mix(hidden)[0]
+
+    def forward(self, input_ids: torch.Tensor, batch: Batch | None = None) -> torch.Tensor:
+        # Attachment mode and dispatch share the attach/detach lock so the expert
+        # graph cannot change between the decision and execution.
         with self._gguf_attachment_lock:
-            attachment = getattr(self, "_gguf_cpu_attachment", None)
-            execution_context = self._eager_execution_context(batch) if attachment and attachment.mode == "eager" else None
-            hidden = self.embed_tokens.forward(input_ids)
-            if getattr(batch, "mm_embeds", None) is not None or (
-                self._image_token_id is not None and bool((input_ids == self._image_token_id).any())
-            ):
-                raise RuntimeError("Qwen3.8 vision inputs are outside FreeToken-Pascal v1; use text-only prompts")
-            hidden = hidden.repeat(1, self.hc_count)
-            meta = None
-            if self._ple:
-                meta = build_ple_metadata(batch, self._ple[0].args, input_ids.device)
-                for layer in self._ple:
-                    layer.start_prefetch(batch, meta)
-            for layer in self.layers.op_list:
-                hidden = layer.forward(
-                    hidden,
-                    batch,
-                    self._debug_observer,
-                    execution_context=execution_context,
-                )
-            if meta is not None:
-                commit_ngram_context(meta, getattr(batch, "fla_metadata", None))
-            return self.hyper_connection_mixer.mix(hidden)[0]
+            eager = self._has_eager_gguf_attachment()
+            if batch is None:
+                return self._forward_impl(input_ids, eager=eager)
+            return self._forward_impl(input_ids, eager=eager, batch=batch)
 
 
 class Qwen4ExpForCausalLM(BaseLLMModel):
