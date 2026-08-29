@@ -104,6 +104,7 @@ class KVCacheGroupSpec:
     # per-token slab). The pool factory and the cost model divide by the same value.
     index_ratio: int = 1
     index_token_budget: int = 0
+    index_token_budget: int = 0
     # Attention-type taxonomy value for this group; drives the backend capability
     # matrix and (with the pool factory) selects the KV pool family.
     attn_type: AttnType = AttnType.FULL

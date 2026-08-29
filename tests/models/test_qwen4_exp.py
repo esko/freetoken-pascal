@@ -843,6 +843,7 @@ def test_qwen4_debug_hook_is_opt_in_and_captures_logits_and_state(monkeypatch) -
     model.model = SimpleNamespace(
         forward=lambda input_ids, batch=None: input_ids.float().unsqueeze(-1),
         debug_state=lambda: {1: {7: torch.tensor([3.0])}},
+        set_debug_observer=lambda observer: None,
     )
     model.lm_head = SimpleNamespace(forward=lambda hidden: torch.cat((hidden, -hidden), dim=-1))
     model._debug_hook = None
