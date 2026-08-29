@@ -100,7 +100,7 @@ def test_default_swap_policy_does_not_probe_pressure():
     policy.prepare_layer_bytes([4096])
 
     assert policy.accounting.swap_status == "not-requested"
-    assert policy.accounting.as_dict()["no_swap_observed"] is False
+    assert policy.accounting.as_dict()["no_swap_observed"] is None
 
 
 def test_default_policy_does_not_probe_swap():
