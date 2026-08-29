@@ -128,6 +128,7 @@ def test_native_coordinator_shutdown_is_idempotent() -> None:
     before = executor.affinity_report()
     executor.stop_flag_coordinator()
     executor.stop_flag_coordinator()
+    assert flags[0] == 0
     assert executor.affinity_report() == before
     del executor
     del torch

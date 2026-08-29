@@ -101,7 +101,10 @@ Worker startup timeout is terminal: the native pool reports `timed-out`, rejects
 later workload submission before task/barrier entry, and the Python serving wrapper
 fails construction. Affinity errors that complete startup remain usable via the
 unpinned host-function fallback. Runtime task exception handling is unchanged by
-this slice and is not an affinity guarantee.
+this slice and is not an affinity guarantee. The native five-second wait bounds
+startup-readiness reporting only; teardown still joins native threads, with the
+H1 process timeout providing the outer protection. Teardown leaves completion
+flags unchanged so incomplete output is never advertised as ready.
 
 The H0 CPU topology foundation is the Torch-free `freetoken.moe.cpu_topology` module.
 `discover_cpu_topology()` reads the process affinity mask and injectable Linux sysfs

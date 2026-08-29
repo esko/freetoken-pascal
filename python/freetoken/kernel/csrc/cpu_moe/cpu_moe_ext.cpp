@@ -1341,6 +1341,8 @@ struct CpuMoeExecutor {
   // the same pointers are used by the GPU kernels and by this thread).
   std::thread coord_thread;
   std::atomic<bool> coord_stop{false};
+  std::mutex admission_mtx;
+  bool admission_stopped = false;
   volatile int64_t* ready_flags = nullptr;  // GPU increments, this thread polls
   volatile int64_t* done_flags = nullptr;   // this thread sets, GPU spin-waits
   int coord_num_slots = 0;
@@ -1757,6 +1759,11 @@ struct CpuMoeExecutor {
     }
   }
 
+  void begin_admission_stop() {
+    std::lock_guard<std::mutex> lk(admission_mtx);
+    admission_stopped = true;
+  }
+
   void stop_workers() {
     stop.store(true, std::memory_order_release);
     task_cv.notify_all();
@@ -1772,6 +1779,7 @@ struct CpuMoeExecutor {
     // A coordinator may be waiting in sync() for the worker pool.  Stop and
     // notify workers first; sync() also observes stop so this ordering cannot
     // leave the coordinator waiting for work that teardown intentionally drops.
+    begin_admission_stop();
     stop_workers();
     stop_flag_coordinator();
     join_workers();
@@ -2297,6 +2305,10 @@ struct CpuMoeExecutor {
     flag_served.assign(num_slots, 0);
     coord_stop.store(false);
     {
+      std::lock_guard<std::mutex> lk(admission_mtx);
+      admission_stopped = false;
+    }
+    {
       std::lock_guard<std::mutex> lk(affinity_mtx);
       coordinator_requested_cpu = pin_core;
       coordinator_observed_affinity_cpu = -1;
@@ -2335,6 +2347,7 @@ struct CpuMoeExecutor {
   }
 
   void stop_flag_coordinator() {
+    begin_admission_stop();
     coord_stop.store(true, std::memory_order_release);
     if (coord_thread.joinable()) coord_thread.join();
   }
@@ -2376,7 +2389,12 @@ struct CpuMoeExecutor {
             sync();
           }
           // Release: the workers' y stores are visible before the GPU sees done.
-          flag_store_release(&done_flags[L], 1);
+          // Admission-stop is synchronized with this write so teardown can never
+          // advertise an incomplete task as complete.
+          {
+            std::lock_guard<std::mutex> lk(admission_mtx);
+            if (!admission_stopped) flag_store_release(&done_flags[L], 1);
+          }
           if (L < static_cast<int>(flag_served.size())) ++flag_served[L];
           any = true;
         }
@@ -2406,13 +2424,9 @@ struct CpuMoeExecutor {
       std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
       sleep_us = std::min<int64_t>(sleep_us * 2, kSleepCapUs);
     }
-    // Teardown: release any in-flight (or future) spin-wait immediately so a replay
-    // caught mid-shutdown exits its sync kernel now instead of owning the watchdog
-    // stall. Runs before the destructor's join() returns, while the flag arrays are
-    // still alive on the Python side.
-    for (int L = 0; L < coord_num_slots; ++L) {
-      flag_store_release(&done_flags[L], INT64_MAX);
-    }
+    // Teardown intentionally leaves done_flags unchanged: an incomplete task must never
+    // be advertised as complete. The owner is responsible for quiescing the CUDA stream
+    // before destruction; stop_flag_coordinator() joins this thread before buffers die.
   }
 
   // Eager (non-graph) path: run one task to completion on the pool.

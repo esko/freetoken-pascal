@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from freetoken.moe.cpu_affinity import (
     affinity_telemetry,
+    native_flag_sync_supported,
     resolve_cpu_moe_affinity,
 )
 from freetoken.moe.cpu_topology import CpuTopology, PhysicalCore
@@ -69,6 +70,23 @@ def test_flag_sync_falls_back_to_host_func_when_no_spare_core_exists() -> None:
     assert selection.plan.coordinator_cpu is None
     assert selection.fallback_reason is not None
     assert "coordinator" in selection.fallback_reason
+
+
+def test_stale_native_extension_cannot_enable_flag_sync_without_shutdown_hook() -> None:
+    class StaleExtension:
+        def affinity_report(self):
+            return {}
+
+    class CurrentExtension:
+        def affinity_report(self):
+            return {}
+
+        def stop_flag_coordinator(self):
+            return None
+
+    assert native_flag_sync_supported(StaleExtension) is False
+    assert native_flag_sync_supported(CurrentExtension) is True
+    assert native_flag_sync_supported(None) is False
 
 
 def test_affinity_telemetry_distinguishes_plan_from_native_verification() -> None:

@@ -20,6 +20,19 @@ from freetoken.moe.cpu_topology import (
 )
 
 
+def native_flag_sync_supported(native_executor_type: object | None) -> bool:
+    """Whether a native executor can stop a coordinator before fallback.
+
+    Older extensions may expose the coordinator/report API without the matching
+    shutdown hook. They must stay on the host-function path so Python never drops
+    buffers while an unmanaged native poller can still access them.
+    """
+    return native_executor_type is not None and all(
+        callable(getattr(native_executor_type, name, None))
+        for name in ("affinity_report", "stop_flag_coordinator")
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CpuMoeAffinitySelection:
     """Validated worker plan plus the selected synchronization mode."""
@@ -95,6 +108,8 @@ def resolve_cpu_moe_affinity(
 def affinity_telemetry(
     selection: CpuMoeAffinitySelection,
     native_report: Mapping[str, object] | None = None,
+    *,
+    requested_flag_sync: bool | None = None,
 ) -> dict[str, object]:
     """Combine the planned selection with optional native startup verification.
 
@@ -112,18 +127,23 @@ def affinity_telemetry(
         status = "planned-unverified"
 
     telemetry = selection.as_dict()
+    flag_sync_requested = (
+        selection.flag_sync if requested_flag_sync is None else requested_flag_sync
+    )
+    if not isinstance(flag_sync_requested, bool):
+        raise ValueError("requested_flag_sync must be a bool")
     coordinator_applied = not selection.flag_sync or (
         native_status == "verified"
         and int(report.get("coordinator_requested_cpu", -1)) >= 0
         and bool(report.get("coordinator_ready", False))
     )
-    flag_sync_applied = bool(selection.flag_sync and coordinator_applied)
+    flag_sync_applied = bool(flag_sync_requested and selection.flag_sync and coordinator_applied)
     telemetry.update(
         {
             "affinity_status": status,
             "planned_affinity_status": "planned-unverified",
             "native_affinity_status": native_status,
-            "flag_sync_requested": selection.flag_sync,
+            "flag_sync_requested": flag_sync_requested,
             "flag_sync": flag_sync_applied,
             "flag_sync_applied": flag_sync_applied,
         }
@@ -155,5 +175,6 @@ def affinity_telemetry(
 __all__ = [
     "CpuMoeAffinitySelection",
     "affinity_telemetry",
+    "native_flag_sync_supported",
     "resolve_cpu_moe_affinity",
 ]

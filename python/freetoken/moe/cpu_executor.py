@@ -25,7 +25,11 @@ import weakref
 import torch
 
 from freetoken.kernel.pinned import alloc_pinned_tensor
-from freetoken.moe.cpu_affinity import affinity_telemetry, resolve_cpu_moe_affinity
+from freetoken.moe.cpu_affinity import (
+    affinity_telemetry,
+    native_flag_sync_supported,
+    resolve_cpu_moe_affinity,
+)
 from freetoken.moe.cpu_topology import discover_cpu_topology
 from freetoken.utils import init_logger
 
@@ -210,7 +214,10 @@ class CpuMoeExecutor:
         # probe): its coordinator needs a core of its own, which the auto thread sizing
         # below reserves (a coordinator time-slicing against the GEMV workers measurably
         # destabilizes throughput on fully-subscribed boxes).
-        self._flag_sync = _FLAG_SYNC and device.type == "cuda"
+        native_executor_type = getattr(_cpu_moe, "CpuMoeExecutor", None)
+        coordinator_lifecycle_supported = native_flag_sync_supported(native_executor_type)
+        requested_flag_sync = _FLAG_SYNC and device.type == "cuda"
+        self._flag_sync = requested_flag_sync and coordinator_lifecycle_supported
         self._cpu_moe = _cpu_moe  # module ref for the decode-path memop calls
         if self._flag_sync:
             probe_scratch = alloc_pinned_tensor(1, dtype=torch.int64)
@@ -280,7 +287,9 @@ class CpuMoeExecutor:
         self.affinity_topology = affinity_topology
         self.affinity_plan = affinity_selection.plan
         self.affinity_telemetry = affinity_telemetry(
-            affinity_selection, self._native_affinity_report
+            affinity_selection,
+            self._native_affinity_report,
+            requested_flag_sync=requested_flag_sync,
         )
 
         spare = (
@@ -338,23 +347,26 @@ class CpuMoeExecutor:
                     self._ready = self._done = self._err = None
                     self._native_affinity_report = dict(native_report())
                 self.affinity_telemetry = affinity_telemetry(
-                    affinity_selection, self._native_affinity_report
+                    affinity_selection,
+                    self._native_affinity_report,
+                    requested_flag_sync=requested_flag_sync,
                 )
-            self._watchdog_stop = False
-            # The thread target holds a WEAKREF and re-derefs it each tick: a bound
-            # method would strong-reference the executor forever (the loop never ends
-            # on its own), pinning the C++ worker pool and the pinned banks against GC
-            # in build-many-engines scenarios. NB: the stop flag / weakref death is
-            # observed only between 2 s sleeps, so teardown of the THREAD can lag up to
-            # ~2 s -- it is a daemon, so neither GC of the executor (weakref breaks the
-            # cycle) nor process exit waits on it.
-            self._watchdog = threading.Thread(
-                target=_watchdog_main,
-                args=(weakref.ref(self),),
-                name="cpu-moe-flag-watchdog",
-                daemon=True,
-            )
-            self._watchdog.start()
+            if self._flag_sync:
+                self._watchdog_stop = False
+                # The thread target holds a WEAKREF and re-derefs it each tick: a bound
+                # method would strong-reference the executor forever (the loop never ends
+                # on its own), pinning the C++ worker pool and the pinned banks against GC
+                # in build-many-engines scenarios. NB: the stop flag / weakref death is
+                # observed only between 2 s sleeps, so teardown of the THREAD can lag up to
+                # ~2 s -- it is a daemon, so neither GC of the executor (weakref breaks the
+                # cycle) nor process exit waits on it.
+                self._watchdog = threading.Thread(
+                    target=_watchdog_main,
+                    args=(weakref.ref(self),),
+                    name="cpu-moe-flag-watchdog",
+                    daemon=True,
+                )
+                self._watchdog.start()
 
         # ds_fp4: the reference FP8 activation round-trip is a scalar per-element chain
         # that the C++ side runs single-threaded on the CUDA host-callback thread --

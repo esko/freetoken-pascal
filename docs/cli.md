@@ -110,7 +110,9 @@ and the requested worker count remains exact. The `flag_sync_requested` and
 native-applied mode; a missing, failed, or timed-out coordinator is stopped and
 the host-function path is used. If worker affinity startup itself times out,
 the worker pool is terminally unusable and serving construction fails rather
-than submitting work to an unready pool.
+than submitting work to an unready pool. The native five-second wait bounds
+startup reporting only; teardown joins native threads and the H1 process timeout
+is the outer protection. Teardown never marks incomplete flag work complete.
 
 ### Host expert-bank policy (Issue #18 H0/H1 slice)
 
