@@ -150,6 +150,36 @@ def _close_bridges(bridges: tuple[object, ...]) -> None:
             close()
 
 
+def _freeze_bridges(bridges: tuple[object, ...]) -> tuple[object, ...]:
+    frozen: list[object] = []
+    try:
+        for bridge in bridges:
+            freeze = getattr(bridge, "freeze_admission", None)
+            if freeze is None:
+                raise RuntimeError("eager bridge does not support transactional admission freeze")
+            freeze()
+            frozen.append(bridge)
+    except BaseException:
+        _unfreeze_bridges(tuple(frozen))
+        raise
+    return tuple(frozen)
+
+
+def _unfreeze_bridges(bridges: tuple[object, ...]) -> None:
+    for bridge in reversed(bridges):
+        unfreeze = getattr(bridge, "unfreeze_admission", None)
+        if unfreeze is not None:
+            unfreeze()
+
+
+def _rollback_closed_bridges(bridges: tuple[object, ...]) -> None:
+    for bridge in reversed(bridges):
+        rollback = getattr(bridge, "rollback_close", None)
+        if rollback is None:
+            raise RuntimeError("eager bridge cannot roll back a transactional close")
+        rollback()
+
+
 def _build_cpu_adapter(model: Any, bundle: QwenGGUFCpuExpertBundle, layer_id: int) -> object:
     config = model._config
     return QwenGGUFCpuMoELayer(
@@ -253,19 +283,29 @@ def detach_gguf_cpu_expert_bundle(model: Any) -> None:
                     "Qwen GGUF CPU expert attachment was modified outside its lifecycle"
                 )
 
-        # Quiescence is a separate preflight so a busy bridge cannot leave an earlier
-        # bridge closed while the model graph still points at all of them.
-        for bridge in attachment.owned_bridges:
-            ensure_quiescent = getattr(bridge, "ensure_quiescent", None)
-            if ensure_quiescent is not None:
-                ensure_quiescent()
-
-        try:
-            _close_bridges(attachment.owned_bridges)
-        except BaseException:
-            # No graph mutation occurs until every owned bridge has closed. The
-            # attachment remains installed and the caller can retry after quiescing.
-            raise
+        if not attachment.owned_bridges:
+            frozen = ()
+            closed = ()
+        else:
+            frozen = _freeze_bridges(attachment.owned_bridges)
+            closed: list[object] = []
+            try:
+                for bridge in attachment.owned_bridges:
+                    close = getattr(bridge, "close", None)
+                    if close is None:
+                        raise RuntimeError("eager bridge cannot close during detach")
+                    close()
+                    closed.append(bridge)
+            except BaseException:
+                # A failed close leaves the model graph installed. Re-open any bridge
+                # that did close, then release the admission freeze for a retry.
+                failed = bridge
+                if bool(getattr(failed, "closed", False)) and failed not in closed:
+                    closed.append(failed)
+                _rollback_closed_bridges(tuple(closed))
+                _unfreeze_bridges(frozen)
+                raise
+            closed = tuple(closed)
 
         try:
             for _layer, mlp, original, _installed in attachment.replacements:
@@ -274,6 +314,9 @@ def detach_gguf_cpu_expert_bundle(model: Any) -> None:
         except BaseException:
             for _layer, mlp, _original, installed in reversed(attachment.replacements):
                 mlp.experts = installed
+            if closed:
+                _rollback_closed_bridges(closed)
+                _unfreeze_bridges(frozen)
             raise
 
 

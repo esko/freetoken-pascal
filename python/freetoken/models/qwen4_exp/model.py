@@ -875,6 +875,22 @@ class Qwen4ExpModel(BaseOP):
         result = super().state_dict(prefix=prefix, result=result)
         return append_original_expert_state(self, result, prefix=prefix)
 
+    def load_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        *,
+        prefix: str = "",
+        _internal: bool = False,
+    ) -> None:
+        # Serialize loading with attach/detach so a concurrent attach cannot become
+        # active after this check and mutate the graph while BaseOP walks it.
+        with self._gguf_attachment_lock:
+            if getattr(self, "_gguf_cpu_attachment", None) is not None:
+                raise RuntimeError(
+                    "detach the GGUF CPU expert attachment before load_state_dict"
+                )
+            super().load_state_dict(state_dict, prefix=prefix, _internal=_internal)
+
     def load_host_weights(
         self,
         model_path: str,
@@ -979,10 +995,13 @@ class Qwen4ExpModel(BaseOP):
         return self.hyper_connection_mixer.forward(hidden)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        if self._has_eager_gguf_attachment():
-            with self._gguf_attachment_lock:
+        # The mode decision must be made while holding the same lock as attach and
+        # detach; otherwise a concurrent attachment can change the expert object
+        # between the check and the dispatch.
+        with self._gguf_attachment_lock:
+            if self._has_eager_gguf_attachment():
                 return self._forward_impl(input_ids, eager=True)
-        return self._forward_impl(input_ids, eager=False)
+            return self._forward_impl(input_ids, eager=False)
 
 
 class Qwen4ExpForCausalLM(BaseLLMModel):

@@ -207,6 +207,7 @@ class GGUFCpuEagerBridge:
         self._next_generation = 0
         self._committed_generation = 0
         self._closed = False
+        self._frozen = False
         self._last_telemetry: GGUFEagerBridgeTelemetry | None = None
         self._last_error_telemetry: GGUFEagerBridgeTelemetry | None = None
 
@@ -347,6 +348,8 @@ class GGUFCpuEagerBridge:
                 # request validated before close() must not execute after close() wins.
                 if self._closed:
                     raise RuntimeError("GGUF eager bridge is closed")
+                if self._frozen:
+                    raise GGUFEagerBridgeBusy("GGUF eager bridge admission is frozen")
                 output, telemetry = self._execute_locked(
                     hidden_states,
                     route_inputs,
@@ -705,8 +708,37 @@ class GGUFCpuEagerBridge:
             raise GGUFEagerBridgeBusy("cannot close GGUF eager bridge while a request is in flight")
         try:
             self._closed = True
+            self._frozen = True
         finally:
             self._lock.release()
+
+    def freeze_admission(self) -> None:
+        """Freeze new requests without closing the bridge or wrapped layer."""
+        if self._closed:
+            raise RuntimeError("GGUF eager bridge is closed")
+        if not self._lock.acquire(blocking=False):
+            raise GGUFEagerBridgeBusy(
+                "cannot freeze GGUF eager bridge while a request is in flight"
+            )
+        try:
+            if self._closed:
+                raise RuntimeError("GGUF eager bridge is closed")
+            self._frozen = True
+        finally:
+            self._lock.release()
+
+    def unfreeze_admission(self) -> None:
+        """Undo a freeze after a multi-bridge lifecycle transaction aborts."""
+        with self._lock:
+            if not self._closed:
+                self._frozen = False
+
+    def rollback_close(self) -> None:
+        """Restore an attached bridge after a later close in a transaction fails."""
+        with self._lock:
+            if self._closed:
+                self._closed = False
+            self._frozen = True
 
     def ensure_quiescent(self) -> None:
         """Fail if a request is in flight without changing admission state."""

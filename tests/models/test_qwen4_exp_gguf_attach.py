@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -132,6 +133,7 @@ def _model(config=None):
     model._config = config
     originals = tuple(_FakeExperts(float(index)) for index in range(config.num_layers))
     model.layers = OPList([_FakeLayer(index, experts) for index, experts in enumerate(originals)])
+    model._gguf_attachment_lock = threading.RLock()
     return model, originals
 
 
@@ -155,6 +157,8 @@ class _FakeBridge:
     created: ClassVar[list[_FakeBridge]] = []
     fail_layer: int | None = None
     busy_layer: int | None = None
+    fail_close_layer: int | None = None
+    freeze_hook: ClassVar[object | None] = None
 
     def __init__(self, layer, *, transfer=None, cache_size=0, tp_size=1):
         del cache_size, tp_size
@@ -165,15 +169,48 @@ class _FakeBridge:
         self.layer_id = layer_id
         self.transfer = transfer
         self.closed = False
+        self.frozen = False
+        self._request_lock = threading.Lock()
+        self.request_started = threading.Event()
+        self.request_release = threading.Event()
+        self.request_error = None
         self.created.append(self)
 
-    def ensure_quiescent(self):
-        if self.layer_id == self.busy_layer:
+    def freeze_admission(self):
+        if self.layer_id == self.busy_layer or self.frozen:
             raise RuntimeError("eager bridge is busy")
+        if not self._request_lock.acquire(blocking=False):
+            raise RuntimeError("eager bridge is busy")
+        self._request_lock.release()
+        self.frozen = True
+        if self.freeze_hook is not None:
+            self.freeze_hook(self)
+
+    def unfreeze_admission(self):
+        self.frozen = False
 
     def close(self):
-        self.ensure_quiescent()
+        if self.layer_id == self.fail_close_layer:
+            raise RuntimeError("injected bridge close failure")
         self.closed = True
+
+    def rollback_close(self):
+        self.closed = False
+
+    def request(self):
+        if self.frozen:
+            raise RuntimeError("eager bridge admission is frozen")
+        if not self._request_lock.acquire(blocking=False):
+            raise RuntimeError("eager bridge is busy")
+        try:
+            self.request_started.set()
+            if not self.request_release.wait(timeout=2):
+                raise RuntimeError("direct request did not drain")
+        except BaseException as error:
+            self.request_error = error
+            raise
+        finally:
+            self._request_lock.release()
 
     @property
     def host_weight_telemetry(self):
@@ -199,6 +236,8 @@ def fake_eager_attachment(monkeypatch):
     _FakeBridge.created = []
     _FakeBridge.fail_layer = None
     _FakeBridge.busy_layer = None
+    _FakeBridge.fail_close_layer = None
+    _FakeBridge.freeze_hook = None
     monkeypatch.setattr(attach_module, "QwenGGUFCpuMoELayer", _FakeAdapter)
     monkeypatch.setattr(attach_module, "GGUFCpuEagerBridge", _FakeBridge)
     return _FakeBridge
@@ -347,6 +386,113 @@ def test_eager_detach_busy_preflight_preserves_attachment(fake_eager_attachment)
 
     assert tuple(layer.mlp.experts for layer in model.layers.op_list) != originals
     assert [bridge.closed for bridge in fake_eager_attachment.created] == [False, False, False]
+    assert [bridge.frozen for bridge in fake_eager_attachment.created] == [False, False, False]
+
+
+def test_eager_detach_freezes_all_bridges_before_direct_request_can_start(
+    fake_eager_attachment,
+):
+    model, originals = _model()
+    model.attach_gguf_cpu_eager_bridge(_bundle())
+    bridges = fake_eager_attachment.created
+    installed = tuple(layer.mlp.experts for layer in model.layers.op_list)
+
+    request_thread = None
+
+    def start_request_between_freezes(bridge):
+        nonlocal request_thread
+        if bridge.layer_id == 0:
+            request_thread = threading.Thread(target=bridges[1].request)
+            request_thread.start()
+            assert bridges[1].request_started.wait(timeout=2)
+
+    fake_eager_attachment.freeze_hook = start_request_between_freezes
+
+    try:
+        with pytest.raises(RuntimeError, match="busy"):
+            model.detach_gguf_cpu_expert_bundle()
+    finally:
+        bridges[1].request_release.set()
+        if request_thread is not None:
+            request_thread.join(timeout=2)
+            assert not request_thread.is_alive()
+            assert bridges[1].request_error is None
+
+    assert tuple(layer.mlp.experts for layer in model.layers.op_list) == installed
+    assert tuple(layer.mlp.experts for layer in model.layers.op_list) != originals
+    assert [bridge.closed for bridge in bridges] == [False, False, False]
+    assert [bridge.frozen for bridge in bridges] == [False, False, False]
+
+
+def test_eager_detach_close_failure_rolls_back_closed_wrappers(
+    fake_eager_attachment,
+):
+    model, originals = _model()
+    model.attach_gguf_cpu_eager_bridge(_bundle())
+    fake_eager_attachment.fail_close_layer = 1
+    bridges = fake_eager_attachment.created
+    installed = tuple(layer.mlp.experts for layer in model.layers.op_list)
+
+    with pytest.raises(RuntimeError, match="injected bridge close failure"):
+        model.detach_gguf_cpu_expert_bundle()
+
+    assert tuple(layer.mlp.experts for layer in model.layers.op_list) == installed
+    assert tuple(layer.mlp.experts for layer in model.layers.op_list) != originals
+    assert [bridge.closed for bridge in bridges] == [False, False, False]
+    assert [bridge.frozen for bridge in bridges] == [False, False, False]
+
+
+def test_forward_checks_eager_mode_inside_attachment_lock(fake_adapter):
+    model, _originals = _model()
+    model._gguf_cpu_attachment = None
+    mode_checked = threading.Event()
+    release_mode_check = threading.Event()
+    attach_finished = threading.Event()
+    seen = []
+
+    original_has_eager = Qwen4ExpModel._has_eager_gguf_attachment
+
+    def delayed_mode_check():
+        mode_checked.set()
+        assert release_mode_check.wait(timeout=2)
+        return original_has_eager(model)
+
+    model._has_eager_gguf_attachment = delayed_mode_check
+    model._forward_impl = lambda input_ids, *, eager: seen.append(eager)
+    forward_thread = threading.Thread(
+        target=Qwen4ExpModel.forward,
+        args=(model, torch.zeros(1, 1, dtype=torch.int64)),
+    )
+    forward_thread.start()
+    assert mode_checked.wait(timeout=2)
+
+    attach_thread = threading.Thread(
+        target=lambda: (model.attach_gguf_cpu_expert_bundle(_bundle()), attach_finished.set())
+    )
+    attach_thread.start()
+    assert not attach_finished.wait(timeout=0.1)
+
+    release_mode_check.set()
+    forward_thread.join(timeout=2)
+    attach_thread.join(timeout=2)
+    assert not forward_thread.is_alive()
+    assert not attach_thread.is_alive()
+    assert seen == [False]
+    model.detach_gguf_cpu_expert_bundle()
+
+
+def test_load_state_dict_rejects_any_active_gguf_attachment(fake_adapter, fake_eager_attachment):
+    for eager in (False, True):
+        model, _originals = _model()
+        if eager:
+            model.attach_gguf_cpu_eager_bridge(_bundle())
+        else:
+            model.attach_gguf_cpu_expert_bundle(_bundle())
+
+        with pytest.raises(RuntimeError, match=r"detach.*load_state_dict"):
+            model.load_state_dict({})
+
+        model.detach_gguf_cpu_expert_bundle()
 
 
 def test_eager_execution_context_rejects_before_router_or_shared_work():
