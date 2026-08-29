@@ -8,6 +8,7 @@ later layers without changing the source addressing contract.
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import json
 import mmap
@@ -71,6 +72,38 @@ def _warm_model_files(paths: tuple[str, ...]) -> int:
     return warmed
 
 
+def _publish_directory_noreplace(staging: Path, output: Path) -> None:
+    """Atomically publish a directory without replacing a concurrent destination."""
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2 is required for atomic PLE publication")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,
+        os.fsencode(staging),
+        -100,
+        os.fsencode(output),
+        1,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(output)
+        raise OSError(error, os.strerror(error), output)
+    directory_fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def convert_gguf_ple_to_artifact(source: str | Path, output: str | Path) -> Path:
     """Atomically extract the IQ4_NL PLE tensor into a serving-only artifact."""
     source = Path(source)
@@ -124,7 +157,7 @@ def convert_gguf_ple_to_artifact(source: str | Path, output: str | Path) -> Path
             target.write("\n")
             target.flush()
             os.fsync(target.fileno())
-        os.replace(staging, output)
+        _publish_directory_noreplace(staging, output)
         return output
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
