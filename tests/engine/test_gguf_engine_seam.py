@@ -56,6 +56,7 @@ def test_engine_attaches_borrowed_bundle_without_homogeneous_cache():
 
     engine = Engine.__new__(Engine)
     engine.model = _Model()
+    engine.moe_offload_cache = None
     bundle = _Bundle()
     config = _config()
     engine.config = config
