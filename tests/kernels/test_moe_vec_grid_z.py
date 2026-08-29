@@ -41,15 +41,15 @@ def banks():
     }
 
 
-def _run(b, n: int) -> torch.Tensor:
+def _run(b, n: int, start: int = 0) -> torch.Tensor:
     from freetoken.moe.fused_q4_0 import fused_experts_gguf_q4_0
 
     return fused_experts_gguf_q4_0(
-        b["x"][:n].contiguous(),
+        b["x"][start : start + n].contiguous(),
         b["gate_up"],
         b["down"],
-        b["w"][:n].contiguous(),
-        b["ids"][:n].contiguous(),
+        b["w"][start : start + n].contiguous(),
+        b["ids"][start : start + n].contiguous(),
         "silu",
     )
 
@@ -64,7 +64,37 @@ def test_moe_vec_launches_past_grid_z_ceiling(banks, n):
 
 @pytest.mark.parametrize("n", [CEIL - 1, CEIL, CEIL + 1, 2 * CEIL + 7])
 def test_moe_vec_chunking_preserves_rows(banks, n):
-    ref = _run(banks, 64)
     got = _run(banks, n)
     torch.cuda.synchronize()
-    assert torch.equal(got[:64], ref)
+    window = 5
+    boundaries = (CEIL, 2 * CEIL)
+    for boundary in boundaries:
+        if boundary + 2 >= n:
+            continue
+        start = boundary - 2
+        ref = _run(banks, window, start=start)
+        torch.cuda.synchronize()
+        assert torch.equal(got[start : start + window], ref)
+
+
+@pytest.mark.parametrize(
+    ("top_k", "message"),
+    [
+        (0, "top_k must be positive"),
+        (65536, "top_k must be <= 65535"),
+    ],
+)
+def test_moe_vec_rejects_invalid_top_k(banks, top_k, message):
+    from freetoken.moe.fused_q4_0 import fused_experts_gguf_q4_0
+
+    ids = torch.zeros((1, top_k), dtype=torch.int32, device="cuda")
+    weights = torch.ones((1, top_k), dtype=torch.float32, device="cuda")
+    with pytest.raises(RuntimeError, match=message):
+        fused_experts_gguf_q4_0(
+            banks["x"][:1],
+            banks["gate_up"],
+            banks["down"],
+            weights,
+            ids,
+            "silu",
+        )

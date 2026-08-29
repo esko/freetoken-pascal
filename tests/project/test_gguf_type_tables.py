@@ -92,3 +92,19 @@ def test_moe_vector_launchers_chunk_tokens_before_grid_z_limit() -> None:
     assert "topk_ids + (size_t)t0 * top_k" in source
     assert source.count("<<<block_nums") == 1
     assert source.count("moe_vec_launch<") >= 19
+
+
+def test_moe_vector_rejects_invalid_top_k_before_narrowing_or_allocation() -> None:
+    source = KERNEL.read_text(encoding="utf-8")
+    function_start = source.index("torch::Tensor ggml_moe_a8_vec(")
+    function = source[function_start:]
+    positive_check = function.index(
+        'TORCH_CHECK(top_k > 0, "ggml_moe_a8_vec: top_k must be positive'
+    )
+    ceiling_check = function.index("TORCH_CHECK(\n      top_k <= MOE_VEC_MAX_GRID_Z")
+    narrowing = function.index("int col = X.sizes()[1];")
+    allocation = function.index("at::Tensor Y = torch::zeros", narrowing)
+    assert positive_check < narrowing
+    assert ceiling_check < narrowing
+    assert positive_check < allocation
+    assert ceiling_check < allocation
