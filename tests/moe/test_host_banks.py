@@ -131,9 +131,7 @@ def test_no_swap_failure_invalidates_prior_plan_and_accounting():
             return f"SwapTotal: {'1' if state['active'] else '0'} kB\nSwapFree: 0 kB\n"
         return "Filename Type Size Used Priority\n"
 
-    policy = HostBankPolicy(
-        strategy="pageable", require_no_swap=True, swap_probe_reader=reader
-    )
+    policy = HostBankPolicy(strategy="pageable", require_no_swap=True, swap_probe_reader=reader)
     policy.prepare_layer_bytes([4096])
     assert policy.plan.layer_bytes == (4096,)
 
