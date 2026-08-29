@@ -135,6 +135,28 @@ def _stub_probe_internals(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(real_artifact_probe, "_run_gguf_oracle", run_oracle)
 
 
+def test_compare_outputs_emits_builtin_numeric_metrics() -> None:
+    values = np.zeros((1, 4), dtype=np.float32)
+
+    comparison = real_artifact_probe._compare_outputs(
+        values,
+        values,
+        expected_name="expected",
+        actual_name="actual",
+    )
+
+    assert all(
+        type(comparison[name]) is float
+        for name in (
+            "max_abs_error",
+            "relative_rms_error",
+            "max_tolerance_violation",
+            "rtol",
+            "atol",
+        )
+    )
+
+
 def test_q3_triad_uses_exact_inclusive_ranges_and_never_reads_full_shards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -989,7 +989,11 @@ def _compare_outputs(
         max_abs = float(difference.max(initial=0.0))
         rms = float(np.sqrt(np.mean(np.square(difference), dtype=np.float64)))
         denominator = float(np.sqrt(np.mean(np.square(expected), dtype=np.float64)))
-        relative_rms = rms / max(denominator, np.finfo(np.float32).tiny)
+        # NumPy 2.5 returns a scalar NumPy type when the denominator fallback
+        # is selected.  Cast the durable metric back to a builtin float so the
+        # JSON/report schema and checkpoint validator see the same type across
+        # supported NumPy versions.
+        relative_rms = float(rms / max(denominator, np.finfo(np.float32).tiny))
         tolerance = atol + rtol * np.abs(actual.astype(np.float32))
         max_tolerance_violation = float(np.max(difference - tolerance, initial=0.0))
         correct = bool(np.allclose(expected, actual, rtol=rtol, atol=atol))
