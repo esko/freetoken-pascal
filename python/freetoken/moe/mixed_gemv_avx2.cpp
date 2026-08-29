@@ -69,6 +69,42 @@ FREETOKEN_AVX2_TARGET void scale_min(const uint8_t* scales, int index, int* scal
   *minimum = (scales[index + 4] >> 4) | ((scales[index] >> 6) << 4);
 }
 
+// Keep the packed Q8_0 dot body local to this translation unit so GEMV can
+// inline it for each block.  The exported symbol remains the ABI entry point,
+// while the internal helper avoids one call/vzeroupper boundary per 32-value
+// block in the promoted down projection.
+FREETOKEN_AVX2_TARGET inline float q8_0_dot_avx2(const uint8_t* block,
+                                                 const float* input) {
+#if defined(__x86_64__) || defined(__i386__)
+  const float d = half_to_float(load_u16(block));
+  __m256 accumulator = _mm256_setzero_ps();
+  const __m256 scale = _mm256_set1_ps(d);
+  for (int lane = 0; lane < 32; lane += 8) {
+    // Q8_0 stores signed int8 codes immediately after the fp16 scale.  Load
+    // eight adjacent bytes and sign-extend them directly to AVX2 lanes so the
+    // hot promoted down projection does not round-trip through scalar float
+    // temporaries.
+    const __m128i packed = _mm_loadl_epi64(
+        reinterpret_cast<const __m128i*>(block + 2 + lane));
+    const __m256i codes = _mm256_cvtepi8_epi32(packed);
+    accumulator = _mm256_fmadd_ps(
+        _mm256_mul_ps(_mm256_cvtepi32_ps(codes), scale),
+        _mm256_loadu_ps(input + lane), accumulator);
+  }
+  alignas(32) float reduced[8];
+  _mm256_store_ps(reduced, accumulator);
+  float result = 0.0f;
+  for (float value : reduced) {
+    result += value;
+  }
+  return result;
+#else
+  (void)block;
+  (void)input;
+  return 0.0f;
+#endif
+}
+
 }  // namespace
 
 extern "C" FREETOKEN_AVX2_TARGET __attribute__((visibility("default"))) float
@@ -143,36 +179,8 @@ freetoken_mixed_q5_1_decode_avx2_impl(const uint8_t* block, float* output) {
 
 extern "C" FREETOKEN_AVX2_TARGET __attribute__((visibility("default"))) float
 freetoken_mixed_q8_0_dot_avx2_impl(const uint8_t* block, const float* input) {
-#if defined(__x86_64__) || defined(__i386__)
-  const float d = half_to_float(load_u16(block));
-  __m256 accumulator = _mm256_setzero_ps();
-  const __m256 scale = _mm256_set1_ps(d);
-  for (int lane = 0; lane < 32; lane += 8) {
-    // Q8_0 stores signed int8 codes immediately after the fp16 scale.  Load
-    // eight adjacent bytes and sign-extend them directly to AVX2 lanes so the
-    // hot promoted down projection does not round-trip through scalar float
-    // temporaries.  The per-block accumulator and final scalar lane reduction
-    // are intentionally unchanged: packed GEMV adds one complete dot result
-    // per block in the established reference order.
-    const __m128i packed = _mm_loadl_epi64(
-        reinterpret_cast<const __m128i*>(block + 2 + lane));
-    const __m256i codes = _mm256_cvtepi8_epi32(packed);
-    accumulator = _mm256_fmadd_ps(
-        _mm256_mul_ps(_mm256_cvtepi32_ps(codes), scale),
-        _mm256_loadu_ps(input + lane), accumulator);
-  }
-  alignas(32) float reduced[8];
-  _mm256_store_ps(reduced, accumulator);
-  float result = 0.0f;
-  for (float value : reduced) {
-    result += value;
-  }
-  return result;
-#else
-  (void)block;
-  (void)input;
-  return 0.0f;
-#endif
+  // The helper retains the established one-block lane reduction order.
+  return q8_0_dot_avx2(block, input);
 }
 
 extern "C" FREETOKEN_AVX2_TARGET __attribute__((visibility("default"))) void
@@ -305,7 +313,7 @@ freetoken_mixed_q8_0_gemv_avx2_impl(const uint8_t* rows, int row_count, int bloc
     const uint8_t* packed_row = rows + static_cast<size_t>(row) * row_stride_bytes;
     float result = 0.0f;
     for (int block = 0; block < blocks_per_row; ++block) {
-      result += freetoken_mixed_q8_0_dot_avx2_impl(
+      result += q8_0_dot_avx2(
           packed_row + static_cast<size_t>(block) * 34,
           input + static_cast<size_t>(block) * 32);
     }
