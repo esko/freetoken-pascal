@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor as StandardThreadPoolExecutor
 from types import SimpleNamespace
 
 import numpy as np
@@ -18,7 +20,12 @@ from freetoken.moe.cpu_abi import (
     ExecutionFailed,
     InvalidRequest,
 )
-from freetoken.moe.cpu_topology import CpuTopology, PhysicalCore, WorkerAffinityPolicy
+from freetoken.moe.cpu_topology import (
+    CpuTopology,
+    PhysicalCore,
+    WorkerAffinityPolicy,
+    discover_cpu_topology,
+)
 from freetoken.moe.ggml_reference import (
     Q5_1_BLOCK_BYTES,
     Q5_K_BLOCK_BYTES,
@@ -148,6 +155,13 @@ def _inputs(tokens: int = 2, routes: int = 10):
     return hidden, ids, weights
 
 
+def _capture_exception(bucket: list[BaseException], function, *args, **kwargs) -> None:
+    try:
+        function(*args, **kwargs)
+    except BaseException as error:
+        bucket.append(error)
+
+
 def _worker_plan(thread_count: int = 2):
     topology = CpuTopology(
         allowed_cpus=tuple(range(100, 100 + thread_count)),
@@ -201,6 +215,30 @@ def test_q4_worker_plan_verifies_distinct_worker_masks_without_changing_owner(
     executor.close()
 
 
+@pytest.mark.skipif(
+    not all(hasattr(os, name) for name in ("sched_getaffinity", "sched_setaffinity")),
+    reason="Linux thread affinity APIs unavailable",
+)
+def test_q4_live_affinity_readback_preserves_parent_mask(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_native(monkeypatch)
+    parent_mask = frozenset(os.sched_getaffinity(0))
+    topology = discover_cpu_topology()
+    if len(topology.cores) < 2:
+        pytest.skip("fewer than two affinity-visible physical cores")
+    plan = WorkerAffinityPolicy(requested_threads=2).plan(topology)
+    executor = Q4KExecutor(
+        _layout(), mode="avx2", num_threads=2, worker_plan=plan, required_alignment=1
+    )
+    executor.prepare(1, 2)
+    hidden, ids, weights = _inputs(tokens=1, routes=2)
+    executor.execute(0, hidden, ids, weights)
+    report = executor.affinity_telemetry
+    assert report["affinity_status"] == "verified"
+    assert report["worker_observed_affinity_cpus"] == list(plan.worker_cpus)
+    assert frozenset(os.sched_getaffinity(0)) == parent_mask
+    executor.close()
+
+
 def test_q4_worker_affinity_failure_drains_and_falls_back_serial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -237,6 +275,100 @@ def test_q4_explicit_worker_plan_rejects_external_pool(monkeypatch: pytest.Monke
             thread_pool=_ImmediatePool(),
             required_alignment=1,
         )
+
+
+def test_q4_affinity_startup_partial_submit_aborts_and_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_native(monkeypatch)
+    plan = _worker_plan()
+
+    class _PartialPool:
+        def __init__(self) -> None:
+            self._pool = StandardThreadPoolExecutor(max_workers=2)
+            self.submits = 0
+
+        def submit(self, function, *args, **kwargs):
+            self.submits += 1
+            if self.submits == 2:
+                raise RuntimeError("startup submit failed")
+            return self._pool.submit(function, *args, **kwargs)
+
+        def shutdown(self, *, wait: bool) -> None:
+            self._pool.shutdown(wait=wait)
+
+    pool = _PartialPool()
+    monkeypatch.setattr(q4_k, "ThreadPoolExecutor", lambda **_kwargs: pool)
+    executor = Q4KExecutor(
+        _layout(), mode="avx2", num_threads=2, worker_plan=plan, required_alignment=1
+    )
+    executor.prepare(1, 2)
+    hidden, ids, weights = _inputs(tokens=1, routes=2)
+    result = executor.execute(0, hidden, ids, weights)
+    assert result.telemetry.thread_count == 1
+    assert executor.affinity_telemetry["affinity_status"] == "fallback"
+    assert "startup submit failed" in executor.affinity_telemetry["fallback_reason"]
+    executor.close()
+
+
+def test_q4_close_waits_for_startup_admission_before_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_native(monkeypatch)
+    plan = _worker_plan()
+    masks: dict[int, frozenset[int]] = {}
+    monkeypatch.setattr(
+        q4_k.os,
+        "sched_setaffinity",
+        lambda _pid, cpus: masks.__setitem__(threading.get_ident(), frozenset(cpus)),
+    )
+    monkeypatch.setattr(
+        q4_k.os,
+        "sched_getaffinity",
+        lambda _pid: masks.get(threading.get_ident(), frozenset({7, 9})),
+    )
+    executor = Q4KExecutor(
+        _layout(), mode="avx2", num_threads=2, worker_plan=plan, required_alignment=1
+    )
+    executor.prepare(1, 2)
+    runner = executor._threaded_runner
+    assert runner is not None
+    entered = threading.Event()
+    release = threading.Event()
+    original_ensure = runner._ensure_affinity_workers_started
+
+    def blocked_ensure() -> None:
+        entered.set()
+        assert release.wait(2.0)
+        original_ensure()
+
+    monkeypatch.setattr(runner, "_ensure_affinity_workers_started", blocked_ensure)
+    hidden, ids, weights = _inputs(tokens=1, routes=2)
+    execution_error: list[BaseException] = []
+    execution = threading.Thread(
+        target=lambda: _capture_exception(
+            execution_error,
+            executor.execute,
+            0,
+            hidden,
+            ids,
+            weights,
+        )
+    )
+    execution.start()
+    assert entered.wait(1.0)
+    closing = threading.Thread(target=executor.close)
+    closing.start()
+    time.sleep(0.02)
+    assert closing.is_alive()
+    release.set()
+    execution.join(2.0)
+    closing.join(2.0)
+    assert not execution.is_alive()
+    assert not closing.is_alive()
+    assert execution_error == []
+    with pytest.raises(InvalidRequest, match="closed"):
+        executor.execute(0, hidden, ids, weights)
 
 
 def test_partition_is_balanced_and_index_ordered() -> None:

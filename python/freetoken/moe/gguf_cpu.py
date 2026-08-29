@@ -64,7 +64,7 @@ def _resolve_bridge_worker_plan(
         return 0, 1, None
     try:
         topology = discover_cpu_topology()
-        capacity = _affinity_visible_physical_core_count()
+        capacity = len(topology.cores)
         if value > capacity:
             raise UnsupportedGGUFCpuConfiguration(
                 "Qwen GGUF CPU bridge num_threads="
@@ -252,6 +252,7 @@ class QwenGGUFCpuExpertBundle:
         cache_size: int = 0,
         prefill: bool = False,
         grouped: bool = False,
+        _resolved_thread_policy: tuple[int | None, int, WorkerPlan | None] | None = None,
     ) -> QwenGGUFCpuExpertBundle:
         _validate_cpu_bridge_config(
             backend=backend,
@@ -260,9 +261,41 @@ class QwenGGUFCpuExpertBundle:
             prefill=prefill,
             grouped=grouped,
         )
-        requested_num_threads, effective_num_threads, worker_plan = _resolve_bridge_worker_plan(
-            num_threads
-        )
+        if _resolved_thread_policy is None:
+            requested_num_threads, effective_num_threads, worker_plan = (
+                _resolve_bridge_worker_plan(num_threads)
+            )
+        else:
+            try:
+                requested_num_threads, effective_num_threads, worker_plan = (
+                    _resolved_thread_policy
+                )
+            except (TypeError, ValueError) as error:
+                raise UnsupportedGGUFCpuConfiguration(
+                    "invalid pre-resolved Qwen GGUF CPU bridge thread policy"
+                ) from error
+            try:
+                expected_requested = (
+                    None if num_threads is None else _checked_int(num_threads, "num_threads")
+                )
+            except CpuAbiError as error:
+                raise UnsupportedGGUFCpuConfiguration(str(error)) from error
+            if requested_num_threads != expected_requested:
+                raise UnsupportedGGUFCpuConfiguration(
+                    "pre-resolved Qwen GGUF CPU bridge thread policy does not match "
+                    f"num_threads={num_threads!r}"
+                )
+            if expected_requested in (None, 0):
+                valid_policy = effective_num_threads == 1 and worker_plan is None
+            else:
+                valid_policy = (
+                    isinstance(worker_plan, WorkerPlan)
+                    and effective_num_threads == expected_requested
+                )
+            if not valid_policy:
+                raise UnsupportedGGUFCpuConfiguration(
+                    "invalid pre-resolved Qwen GGUF CPU bridge thread policy"
+                )
         if host is None or not hasattr(host, "layout") or not hasattr(host, "experts"):
             raise TypeError("Qwen GGUF CPU bridge requires a QwenGGUFHostWeights-like host")
         if not callable(getattr(host, "claim_cpu_bridge", None)):
@@ -570,6 +603,7 @@ def open_qwen_gguf_cpu_expert_bundle(
         prefill=prefill,
         grouped=grouped,
     )
+    resolved_thread_policy = _resolve_bridge_worker_plan(num_threads)
     host = open_qwen_host_weights(
         path,
         supported_expert_types=supported_expert_types,
@@ -591,6 +625,7 @@ def open_qwen_gguf_cpu_expert_bundle(
             cache_size=cache_size,
             prefill=prefill,
             grouped=grouped,
+            _resolved_thread_policy=resolved_thread_policy,
         )
     except BaseException:
         host.close()

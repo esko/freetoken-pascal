@@ -60,6 +60,7 @@ Q4K_SCALE_BYTES = 12
 Q4K_DATA_OFFSET = 16
 Q4K_MODE = Literal["auto", "scalar", "avx2"]
 _Q4K_TYPES = frozenset({12, "Q4_K", "q4_k"})
+_AFFINITY_STARTUP_TIMEOUT_SECONDS = 5.0
 
 
 def _initial_affinity_report(worker_plan: WorkerPlan | None) -> dict[str, object]:
@@ -1156,8 +1157,12 @@ class _ThreadedMixedRunner:
             for _ in range(self.max_threads):
                 futures.append(self._pool.submit(barrier.wait))
             for future in futures:
-                future.result()
+                future.result(timeout=_AFFINITY_STARTUP_TIMEOUT_SECONDS)
         except BaseException as error:
+            try:
+                barrier.abort()
+            except BaseException:
+                pass
             self._cancel_and_drain(futures)
             with self._affinity_lock:
                 self._affinity_errors[self._affinity_next] = (
@@ -1166,17 +1171,6 @@ class _ThreadedMixedRunner:
             return
         with self._affinity_lock:
             self._affinity_workers_started = True
-
-    @staticmethod
-    def _run_affinity_partition(
-        barrier: threading.Barrier,
-        worker: _MixedReferenceExecutor,
-        *args: Any,
-        **kwargs: Any,
-    ) -> CpuExecutionResult:
-        """Make participating planned workers rendezvous before doing any work."""
-        barrier.wait()
-        return worker.execute(*args, **kwargs)
 
     def _decorate(self, telemetry: CpuExecutionTelemetry) -> CpuExecutionTelemetry:
         return self.owner._decorate(telemetry)
@@ -1232,11 +1226,13 @@ class _ThreadedMixedRunner:
 
     def prepare(self, max_tokens: int, max_routes: int):
         started = time.perf_counter_ns()
-        if self._closed:
-            raise InvalidRequest("Q4_K executor is closed")
         if not self._lock.acquire(blocking=False):
+            if self._closed:
+                raise InvalidRequest("Q4_K executor is closed")
             raise self._busy(started)
         try:
+            if self._closed:
+                raise InvalidRequest("Q4_K executor is closed")
             plan = self.owner._reference.prepare(max_tokens, max_routes)
             for worker in self._workers:
                 worker.prepare(max_tokens, max_routes)
@@ -1355,11 +1351,13 @@ class _ThreadedMixedRunner:
         submitted: list[Any] = []
         worker_cancel: _WorkerCancellation | None = None
         actual_threads = 1
-        if self._closed:
-            raise InvalidRequest("Q4_K executor is closed")
         if not self._lock.acquire(blocking=False):
+            if self._closed:
+                raise InvalidRequest("Q4_K executor is closed")
             raise self._busy(started)
         try:
+            if self._closed:
+                raise InvalidRequest("Q4_K executor is closed")
             selected_threads = (
                 self.max_threads
                 if _thread_count is None
@@ -1443,9 +1441,6 @@ class _ThreadedMixedRunner:
             ranges = partition_q4_k_routes(expert_ids.shape[1], selected_threads)
             actual_threads = len(ranges)
             worker_cancel = _WorkerCancellation()
-            affinity_barrier = (
-                threading.Barrier(actual_threads) if self._worker_plan is not None else None
-            )
             for index, (begin, end) in enumerate(ranges):
                 width = end - begin
                 ids_view = route_ids[index, :tokens, :width]
@@ -1465,20 +1460,11 @@ class _ThreadedMixedRunner:
                         "accumulate": False,
                         "cancellation": worker_cancel,
                     }
-                    if affinity_barrier is None:
-                        future = self._pool.submit(
-                            self._workers[index].execute,
-                            *worker_args,
-                            **worker_kwargs,
-                        )
-                    else:
-                        future = self._pool.submit(
-                            self._run_affinity_partition,
-                            affinity_barrier,
-                            self._workers[index],
-                            *worker_args,
-                            **worker_kwargs,
-                        )
+                    future = self._pool.submit(
+                        self._workers[index].execute,
+                        *worker_args,
+                        **worker_kwargs,
+                    )
                 except BaseException as submit_error:
                     worker_cancel.cancel()
                     self._cancel_and_drain(submitted)
@@ -1807,11 +1793,12 @@ class _ThreadedMixedRunner:
         return tuple(samples)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self._owns_pool:
-            self._pool.shutdown(wait=True)
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._owns_pool:
+                self._pool.shutdown(wait=True)
 
 
 Q4KCpuExpertExecutor = Q4KExecutor
