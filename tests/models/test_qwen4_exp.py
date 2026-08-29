@@ -570,9 +570,12 @@ def test_safetensors_ple_undersized_table_closes_open_handles(
             self._inner = original_safe_open(path, **kwargs)
 
         def __enter__(self):
-            handle = self._inner.__enter__()
+            self._inner.__enter__()
             opened.append(self)
-            return handle
+            return self
+
+        def __getattr__(self, name: str):
+            return getattr(self._inner, name)
 
         def __exit__(self, *args: object) -> None:
             exited.append(self)
