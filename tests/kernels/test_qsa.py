@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 from freetoken.attention.qsa import _compact_expanded_selection, select_qsa_logical_rows
-from freetoken.kernel.triton.qsa import qsa_sparse_gqa
+from freetoken.kernel.triton.qsa_legacy import qsa_sparse_gqa
 
 
 def test_qsa_selection_is_dense_before_budget_and_keeps_tail():

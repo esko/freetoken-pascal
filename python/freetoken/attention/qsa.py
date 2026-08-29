@@ -84,7 +84,7 @@ def _compact_expanded_selection(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Expand compressed blocks and append the visible incomplete-group tail."""
     if block_indices.is_cuda:
-        from freetoken.kernel.triton.qsa import compact_qsa_blocks
+        from freetoken.kernel.triton.qsa_legacy import compact_qsa_blocks
 
         return compact_qsa_blocks(
             block_indices,
@@ -478,7 +478,7 @@ class QSAAttnBackend(BaseAttnBackend):
         batch: Batch,
         debug_observer: ObservationHook | None = None,
     ) -> torch.Tensor:
-        from freetoken.kernel.triton.qsa import qsa_sparse_gqa
+        from freetoken.kernel.triton.qsa_legacy import qsa_sparse_gqa
 
         self.kvcache.store_kv(k, v, batch.out_loc, layer_id)
         self._compress_current_keys(indexer, index_k, layer_id, batch)
