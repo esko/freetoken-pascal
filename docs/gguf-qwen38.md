@@ -126,6 +126,54 @@ tolerances are recorded separately from raw timing, and missing or mismatched gg
 clearly. The report labels the partial payload as `range_evidence: measured/artifact-byte`, remains H0/no-P4
 evidence, and makes no cache, hybrid-split or full-engine performance claim.
 
+## Real-byte Q3 reference triad (H0)
+
+The bounded Q3 triad composes the single-expert probe above for three deterministic
+points: layer 0/expert 0, layer 23/expert 255 and layer 47/expert 511. It fetches exactly
+three inclusive projection ranges per point (nine ranges total), retains no complete shard,
+and uses the pinned `gguf-py==0.19.0` dequantizer as the independent reference. The final
+layer exercises the Q8_0 promoted down bank while the first and middle points cover the
+ordinary IQ3_XXS/IQ4_NL family.
+
+Run it from the pinned CPU environment with an output path outside the repository:
+
+```bash
+PYTHONPATH=python python scripts/probe_qwen38_q3_triad.py \
+  --cache-dir /srv/freetoken-pascal/cache/qwen38-q3-range \
+  --repeats 1 --warmup 0 \
+  --output /srv/freetoken-pascal/results/qwen38-q3-triad.json
+python scripts/validate_evidence.py \
+  /srv/freetoken-pascal/results/qwen38-q3-triad.json
+```
+
+On a supervised or slow host, add `--checkpoint-dir /srv/freetoken-pascal/results/q3-checkpoint`
+and `--watchdog-seconds 120`. The runner atomically records each completed point and emits a
+point-boundary progress line; rerun the semantic workload with `--resume` after an
+interruption, even if the output path or offline/cache mode changes. Stable checkpoint
+identity covers the commit, manifest/census hashes, seed and triad selection; audit history
+retains the original and current command, host, offline mode and cache path. The watchdog is
+checked only after a point returns; it does not interrupt a hung HTTP or CPU operation.
+
+Use three repeatable `--probe LAYER:EXPERT` options to select another bounded triad;
+the runner rejects fewer than three points, duplicates, malformed ranges, and any
+transport response whose `Content-Range` or body length is not exact. `--offline` requires
+all nine selected ranges to already exist in the range cache. The aggregate report records
+the source commit, manifest and census hashes, declared per-shard artifact identities,
+host identity, every inclusive start/end and range hash, raw timing samples, correctness
+comparisons, and per-mode kernel census.
+
+This is `artifact-metadata`/`measured/artifact-byte` H0 evidence for reference correctness
+only. It makes no AVX2 speed, CPU throughput, model-quality, complete-shard checksum,
+full-model, cache, hybrid split, serving, or Tesla P4/dual-P4 claim. Do not commit model
+range caches or measured result JSON; retain the small report with the run artifact bundle
+under the evidence retention policy.
+
+The validator is a structural and self-consistency check plus binding to the checked-in
+manifest and census files. A report's range and output hashes are not an authenticity proof:
+authenticity requires re-fetching the selected source/cache bytes or an external signature.
+The report intentionally stores no shard bytes and does not claim cryptographic tamper
+resistance.
+
 For a target-CPU timing comparison over those same ranges, use
 `benchmarks/bench_qwen38_real_expert.py` with `--offline` after populating the probe cache.
 Run `--layer 0` and `--layer 2` separately. Each run is fixed to one token, one route and
