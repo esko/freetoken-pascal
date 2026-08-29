@@ -36,6 +36,11 @@ class Qwen4ExpArgs:
     index_head_dim: int
     index_budget: int
     index_ratio: int
+    # GGUF stores these hash constants in metadata instead of as state-dict tensors.  They are
+    # optional for HF configs, where the constants arrive with the regular PLE weights.
+    ple_layer_multipliers: Tuple[int, ...] | None = None
+    ple_head_vocab_sizes: Tuple[int, ...] | None = None
+    ple_head_offsets: Tuple[int, ...] | None = None
 
     @property
     def index_topk_blocks(self) -> int:
@@ -87,6 +92,11 @@ class Qwen4ExpArgs:
         return self.index_ratio
 
     @property
+    def index_compress_ratio(self) -> int:
+        """Legacy spelling retained for downstream Qwen attention adapters."""
+        return self.index_ratio
+
+    @property
     def output_gate_type(self) -> str:
         return "sigmoid"
 
@@ -118,7 +128,11 @@ def _quant_get(hf_config: Any):
     quant = getattr(hf_config, "quantization_config", None)
     if quant is None:
         return None
-    return quant.get if isinstance(quant, dict) else (lambda key, default=None: getattr(quant, key, default))
+    return (
+        quant.get
+        if isinstance(quant, dict)
+        else (lambda key, default=None: getattr(quant, key, default))
+    )
 
 
 def _ignored(patterns, module_name: str) -> bool:
@@ -136,21 +150,34 @@ def _layer_types(text: Any) -> list[str]:
     ]
 
 
+def _index_ratio(text: Any) -> int:
+    """Read the QSA compression ratio across HF/downstream naming generations."""
+    for name in ("indexer_compress_ratio", "index_compress_ratio", "index_ratio"):
+        if hasattr(text, name):
+            return int(getattr(text, name))
+    raise AttributeError("Qwen4-Exp config is missing indexer_compress_ratio/index_ratio")
+
+
 def _parse_quantization(hf_config: Any) -> tuple[str, str, str, str]:
     get = _quant_get(hf_config)
     if get is None:
         return "none", "none", "none", "none"
     algo = str(get("quant_algo") or get("quant_method") or "").lower()
     block = get("weight_block_size")
-    if algo == "fp8" and block:
+    if algo == "fp8":
+        if block is None:
+            raise ValueError(
+                "Qwen4-Exp block-FP8 checkpoints must declare weight_block_size=(128, 128)"
+            )
         block_size = tuple(int(value) for value in block)
         if block_size != (128, 128):
-            raise ValueError(
-                "Qwen4-Exp block-FP8 checkpoints require a 128x128 weight block size"
-            )
+            raise ValueError("Qwen4-Exp block-FP8 checkpoints require a 128x128 weight block size")
         return "fp8_block", "none", "none", "none"
     if "fp4" not in algo:
-        return "none", "none", "none", "none"
+        raise ValueError(
+            "Qwen4-Exp requires routed experts in 128x128 block-FP8 or ModelOpt NVFP4; "
+            f"detected {algo!r}"
+        )
     ignore = list(get("ignore") or [])
 
     def quantized(probe: str) -> str:
@@ -181,7 +208,9 @@ def parse_config(hf_config: Any) -> ModelConfig:
     rope_scaling = (
         None
         if rope_type in (None, "default")
-        else {key: value for key, value in rope_params.items() if not isinstance(value, (list, dict))}
+        else {
+            key: value for key, value in rope_params.items() if not isinstance(value, (list, dict))
+        }
     )
     rotary = RotaryConfig(
         head_dim=head_dim,
@@ -196,14 +225,23 @@ def parse_config(hf_config: Any) -> ModelConfig:
     if unsupported:
         raise ValueError(f"Unsupported Qwen4-Exp layer types: {unsupported}")
     full_ids = tuple(index for index, kind in enumerate(layer_types) if kind == "full_attention")
-    linear_ids = tuple(index for index, kind in enumerate(layer_types) if kind == "linear_attention")
+    linear_ids = tuple(
+        index for index, kind in enumerate(layer_types) if kind == "linear_attention"
+    )
 
     ple_layer_ids = tuple(int(index) - 1 for index in (getattr(text, "ple_layer_ids", None) or ()))
     for layer_id in ple_layer_ids:
-        if layer_id < 0 or layer_id >= len(layer_types) or layer_types[layer_id] != "linear_attention":
+        if (
+            layer_id < 0
+            or layer_id >= len(layer_types)
+            or layer_types[layer_id] != "linear_attention"
+        ):
             raise ValueError(f"PLE must sit on a linear_attention layer, got layer {layer_id}")
 
     expert_quant, attn_quant, dense_quant, lm_head_quant = _parse_quantization(hf_config)
+    index_ratio = _index_ratio(text)
+    if index_ratio <= 0:
+        raise ValueError(f"invalid Qwen4-Exp index compression ratio {index_ratio}")
     full_group = FullAttentionGroupConfig(
         name="full",
         layer_ids=full_ids,
@@ -212,7 +250,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
         rotary_config=rotary,
         index_head_dim=int(text.indexer_head_dim),
         num_index_layers=len(full_ids),
-        index_ratio=int(text.indexer_compress_ratio),
+        index_ratio=index_ratio,
     )
     linear_group = LinearGatedDeltaGroupConfig(
         name="linear",
@@ -224,7 +262,12 @@ def parse_config(hf_config: Any) -> ModelConfig:
         conv_kernel_dim=int(text.linear_conv_kernel_dim),
         output_gate=str(getattr(text, "output_gate_type", None) or text.hidden_act),
     )
-    groups = tuple(sorted((full_group, linear_group), key=lambda group: group.layer_ids[0] if group.layer_ids else 1 << 30))
+    groups = tuple(
+        sorted(
+            (full_group, linear_group),
+            key=lambda group: group.layer_ids[0] if group.layer_ids else 1 << 30,
+        )
+    )
 
     eos_token_id = getattr(text, "eos_token_id", 0)
     if isinstance(eos_token_id, (list, tuple)):
@@ -239,14 +282,16 @@ def parse_config(hf_config: Any) -> ModelConfig:
         ngram_size=int(text.ngram_size),
         heads_per_ngram=int(text.heads_per_ngram),
         ngram_vocab_size_base=int(text.ngram_vocab_size_base),
-        make_ngram_vocab_size_divisible_by=int(getattr(text, "make_ngram_vocab_size_divisible_by", 1)),
+        make_ngram_vocab_size_divisible_by=int(
+            getattr(text, "make_ngram_vocab_size_divisible_by", 1)
+        ),
         split_ngram_parts=int(text.split_ngram_parts),
         ngram_boundary_token_id=int(eos_token_id),
         index_n_heads=int(text.indexer_n_heads),
         index_kv_heads=int(text.indexer_kv_heads),
         index_head_dim=int(text.indexer_head_dim),
         index_budget=int(text.indexer_budget),
-        index_ratio=int(text.indexer_compress_ratio),
+        index_ratio=index_ratio,
     )
     return ModelConfig(
         num_layers=int(text.num_hidden_layers),
@@ -263,7 +308,9 @@ def parse_config(hf_config: Any) -> ModelConfig:
         num_experts=int(getattr(text, "num_experts", 0) or 0),
         num_experts_per_tok=int(getattr(text, "num_experts_per_tok", 0) or 0),
         moe_intermediate_size=int(getattr(text, "moe_intermediate_size", 0) or 0),
-        shared_expert_intermediate_size=int(getattr(text, "shared_expert_intermediate_size", 0) or 0),
+        shared_expert_intermediate_size=int(
+            getattr(text, "shared_expert_intermediate_size", 0) or 0
+        ),
         norm_topk_prob=bool(getattr(text, "norm_topk_prob", True)),
         moe_enabled=int(getattr(text, "num_experts", 0) or 0) > 0,
         use_qk_norm=True,
@@ -277,6 +324,10 @@ def parse_config(hf_config: Any) -> ModelConfig:
         dense_quant=dense_quant,
         lm_head_quant=lm_head_quant,
         qwen4_args=qwen4_args,
+        # PLE conv history and n-gram context now ride the snapshot/COW-aware linear-state
+        # pool.  The old naive-only requirement belonged to the pre-slot-state adapter.
+        requires_naive_cache=False,
+        supports_cuda_graph=False,
         slot_states=ple_slot_states(qwen4_args),
     )
 
@@ -317,6 +368,8 @@ def parse_gguf_config(shim: Any) -> ModelConfig:
     if len(compress_ratios) != num_layers:
         raise ValueError("qwen4exp.attention.compress_ratios length != block_count")
     qsa_ratios = {compress_ratios[layer] for layer in full_ids}
+    if not qsa_ratios:
+        raise ValueError("Qwen4-Exp GGUF has no full-attention layers")
     if len(qsa_ratios) != 1:
         raise ValueError(f"QSA layers have heterogeneous compression ratios: {qsa_ratios}")
     index_ratio = qsa_ratios.pop()
@@ -332,10 +385,14 @@ def parse_gguf_config(shim: Any) -> ModelConfig:
     ple_layers = tuple(int(layer) for layer in required("ple.layers"))
     if any(layer < 0 or layer >= num_layers for layer in ple_layers):
         raise ValueError(f"qwen4exp.ple.layers out of range: {ple_layers}")
+    if any(layer not in linear_ids for layer in ple_layers):
+        raise ValueError(f"Qwen4-Exp PLE must sit on a linear_attention layer, got {ple_layers}")
     heads_per_ngram = int(required("ple.heads_per_ngram"))
     ngram_size = int(required("ple.ngram_size"))
     if ngram_size < 2 or heads_per_ngram < 1:
-        raise ValueError("Qwen4-Exp PLE ngram_size must be >= 2 and heads_per_ngram must be positive")
+        raise ValueError(
+            "Qwen4-Exp PLE ngram_size must be >= 2 and heads_per_ngram must be positive"
+        )
     head_vocab_sizes = tuple(int(value) for value in required("ple.head_vocab_sizes"))
     head_offsets = tuple(int(value) for value in required("ple.head_offsets"))
     layer_multipliers = tuple(int(value) for value in required("ple.layer_multipliers"))
@@ -370,6 +427,9 @@ def parse_gguf_config(shim: Any) -> ModelConfig:
         index_head_dim=index_head_dim,
         index_budget=int(required("attention.indexer.top_k")),
         index_ratio=index_ratio,
+        ple_layer_multipliers=layer_multipliers,
+        ple_head_vocab_sizes=head_vocab_sizes,
+        ple_head_offsets=head_offsets,
     )
     full_group = FullAttentionGroupConfig(
         name="full",
@@ -424,8 +484,11 @@ def parse_gguf_config(shim: Any) -> ModelConfig:
         ),
         attention_groups=(linear_group, full_group),
         qwen4_args=qwen4_args,
-        requires_naive_cache=True,
+        # GGUF uses the same declarative PLE slot states as the HF path; host-table I/O does not
+        # make the request state opaque to the radix snapshot lifecycle.
+        requires_naive_cache=False,
         supports_cuda_graph=False,
+        slot_states=ple_slot_states(qwen4_args),
         moe_weight_format="gguf",
         gguf_model_path=shim.model_path,
     )

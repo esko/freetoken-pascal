@@ -149,7 +149,9 @@ def test_qwen4_config_uses_exact_qsa_prefix():
     assert config.attn_quant == "none"
     assert config.qwen4_args.ple_layer_ids == (1,)
     assert config.qwen4_args.output_gate_type == "sigmoid"
-    assert config.requires_naive_cache
+    # PLE state is now declared on the snapshot/COW-aware linear-state pool; the pre-#257
+    # adapter required naive cache only because it owned an unsnapshotted Python state map.
+    assert not config.requires_naive_cache
     assert not config.supports_cuda_graph
     assert not config.is_multimodal
     assert config.is_linear_layer(0)
@@ -162,10 +164,10 @@ def test_qwen4_config_accepts_transformers_sparse_attention_alias():
     config = parse_config(hf_config)
     assert not config.is_linear_layer(3)
     assert config.attn_type_for_layer(3).value == "qsa"
-    spec = config.kv_cache_group_specs()[0]
+    spec = next(spec for spec in config.kv_cache_group_specs() if spec.attn_type.value == "qsa")
     assert spec.layer_ids == (3,)
     assert spec.index_head_dim == 128
-    assert spec.index_compress_ratio == 4
+    assert spec.index_ratio == 4
     assert spec.index_token_budget == 2048
 
 
@@ -173,7 +175,9 @@ def test_qwen4_config_accepts_missing_norm_topk_prob():
     hf_config = _config()
     del hf_config.text_config.norm_topk_prob
     config = parse_config(hf_config)
-    assert not config.norm_topk_prob
+    # HF Qwen4ExpTextConfig defaults this omitted field to True and the upstream MoE block
+    # renormalizes selected routes accordingly.
+    assert config.norm_topk_prob
 
 
 def test_qwen4_config_accepts_routed_expert_nvfp4():
@@ -319,7 +323,8 @@ def test_qwen4_gguf_config_uses_exact_artifact_geometry():
     assert config.qwen4_args.ple_head_offsets is not None
     assert config.is_linear_layer(2)
     assert not config.is_linear_layer(3)
-    assert config.attention_group_for_layer(3).index_compress_ratio == 4
+    assert config.attention_group_for_layer(3).index_ratio == 4
+    assert config.qwen4_args.index_compress_ratio == config.qwen4_args.index_ratio == 4
 
 
 @pytest.mark.parametrize(

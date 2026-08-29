@@ -143,6 +143,15 @@ def test_qwen4_args_payload():
     assert args.ple_conv_state_len == 9
     assert args.ple_state_width == 10240
     assert args.ngram_boundary_token_id == 248044
+    assert args.index_compress_ratio == args.indexer_compress_ratio == args.index_ratio == 4
+
+
+def test_index_ratio_legacy_config_name_is_accepted():
+    hf = _hf_config()
+    del hf.text_config.indexer_compress_ratio
+    hf.text_config.index_compress_ratio = 4
+    args = parse_config(hf).qwen4_args
+    assert args.index_ratio == 4
 
 
 def test_ple_on_full_attention_layer_rejected():
@@ -156,9 +165,7 @@ def test_output_gate_null_falls_back_to_hidden_act():
     hf = _hf_config()
     hf.text_config.output_gate_type = None
     linear = [
-        g
-        for g in parse_config(hf).attention_groups
-        if isinstance(g, LinearGatedDeltaGroupConfig)
+        g for g in parse_config(hf).attention_groups if isinstance(g, LinearGatedDeltaGroupConfig)
     ]
     assert linear[0].output_gate == "silu"
 
@@ -168,3 +175,10 @@ def test_eos_token_id_list_uses_the_first_entry():
     hf = _hf_config()
     hf.text_config.eos_token_id = [base, base + 1]
     assert parse_config(hf).qwen4_args.ngram_boundary_token_id == base
+
+
+def test_unsupported_expert_quantization_fails_closed():
+    hf = _hf_config()
+    hf.quantization_config = {"quant_method": "gptq"}
+    with pytest.raises(ValueError, match="requires routed experts"):
+        parse_config(hf)
