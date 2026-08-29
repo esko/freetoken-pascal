@@ -614,7 +614,7 @@ def test_safetensors_ple_undersized_table_closes_open_handles(
             self._inner.__exit__(*args)
 
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model.safetensors.safe_open",
+        "freetoken.models.qwen4_exp.model_legacy.safetensors.safe_open",
         lambda path, **kwargs: TrackedHandle(path, **kwargs),
     )
     with pytest.raises(RuntimeError, match="has 4 rows, needs 6"):
@@ -791,7 +791,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=5, cached_len=0, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model.get_global_ctx",
+        "freetoken.models.qwen4_exp.model_legacy.get_global_ctx",
         lambda: SimpleNamespace(batch=full_batch),
     )
     expected = full._short_conv(values)
@@ -802,7 +802,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=2, cached_len=0, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model.get_global_ctx",
+        "freetoken.models.qwen4_exp.model_legacy.get_global_ctx",
         lambda: SimpleNamespace(batch=first_batch),
     )
     first = chunked._short_conv(values[:2])
@@ -811,7 +811,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=3, cached_len=2, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model.get_global_ctx",
+        "freetoken.models.qwen4_exp.model_legacy.get_global_ctx",
         lambda: SimpleNamespace(batch=second_batch),
     )
     second = chunked._short_conv(values[2:])
@@ -823,7 +823,7 @@ def test_ple_state_matches_chunked_execution_and_resets_reused_slot(monkeypatch)
         reqs=[SimpleNamespace(extend_len=1, cached_len=0, table_idx=3)],
     )
     monkeypatch.setattr(
-        "freetoken.models.qwen4_exp.model.get_global_ctx",
+        "freetoken.models.qwen4_exp.model_legacy.get_global_ctx",
         lambda: SimpleNamespace(batch=reset_batch),
     )
     actual_reset = chunked._short_conv(reused)
@@ -841,7 +841,7 @@ def test_qwen4_vision_entrypoint_fails_with_v1_scope_message() -> None:
 def test_qwen4_debug_hook_is_opt_in_and_captures_logits_and_state(monkeypatch) -> None:
     model = object.__new__(Qwen4ExpForCausalLM)
     model.model = SimpleNamespace(
-        forward=lambda input_ids: input_ids.float().unsqueeze(-1),
+        forward=lambda input_ids, batch=None: input_ids.float().unsqueeze(-1),
         debug_state=lambda: {1: {7: torch.tensor([3.0])}},
     )
     model.lm_head = SimpleNamespace(forward=lambda hidden: torch.cat((hidden, -hidden), dim=-1))
@@ -870,7 +870,8 @@ def test_qwen4_debug_hook_collects_opt_in_semantic_events(monkeypatch) -> None:
         def set_debug_observer(self, observer):
             self.observer = observer
 
-        def forward(self, input_ids):
+        def forward(self, input_ids, batch=None):
+            del batch
             if self.observer is not None:
                 self.observer(
                     "router",

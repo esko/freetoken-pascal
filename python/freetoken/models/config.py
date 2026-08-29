@@ -103,6 +103,7 @@ class KVCacheGroupSpec:
     # QSA compression: one index-key row per index_ratio tokens (1 keeps the BSA/DSA
     # per-token slab). The pool factory and the cost model divide by the same value.
     index_ratio: int = 1
+    index_token_budget: int = 0
     # Attention-type taxonomy value for this group; drives the backend capability
     # matrix and (with the pool factory) selects the KV pool family.
     attn_type: AttnType = AttnType.FULL
@@ -473,6 +474,7 @@ class ModelConfig:
                         index_head_dim=group.index_head_dim,
                         num_index_layers=group.num_index_layers,
                         index_ratio=group.index_ratio,
+                        index_token_budget=group.index_token_budget,
                         attn_type=_full_group_attn_type(group),
                     )
                 )

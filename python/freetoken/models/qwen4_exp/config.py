@@ -251,6 +251,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
         index_head_dim=int(text.indexer_head_dim),
         num_index_layers=len(full_ids),
         index_ratio=index_ratio,
+        index_token_budget=int(text.indexer_budget),
     )
     linear_group = LinearGatedDeltaGroupConfig(
         name="linear",
@@ -440,6 +441,7 @@ def parse_gguf_config(shim: Any) -> ModelConfig:
         index_head_dim=index_head_dim,
         num_index_layers=len(full_ids),
         index_ratio=index_ratio,
+        index_token_budget=int(required("attention.indexer.top_k")),
     )
     linear_group = LinearGatedDeltaGroupConfig(
         name="linear",
