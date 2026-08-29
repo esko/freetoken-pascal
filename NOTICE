@@ -12,6 +12,8 @@ This product currently includes source from the following upstream distribution:
   c8e4c08e6548eb185b8d278efee5a03e26522655; Pascal compile and runtime fallbacks replayed
 - freetoken-qwen4-pr232: FlashML-org/FreeToken pull request 232 (Apache-2.0), commit
   ad752c9970e0dc3f1b09aeec38235332149336ed; Qwen3.8 text architecture and QSA adapted
+- freetoken-fp8-rowwise-safety: FlashML-org/FreeToken (Apache-2.0), commit
+  58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6; FP8 row-wise scaled-mm safety imported
 - freetoken-gguf-pr131: FlashML-org/FreeToken pull request 131 (Apache-2.0), commit
   bb432e8c473c557cdef6517abccf0c129bd8c544; generic GGUF K/I tables, shard loading,
   mixed-projection handling, and Qwen converter reversals adapted
