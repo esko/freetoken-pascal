@@ -16,6 +16,16 @@
 
 The P4 cards are not yet available. No issue requiring H2 or H3 evidence may be closed until the cards are installed and the self-hosted runner records the actual topology.
 
+## Tier contract
+
+NVMe is the normal v1 home of the dedicated contiguous PLE/N-gram file or shard set, not emergency backing.
+DDR4 holds the complete quantized expert bank and the Linux page cache for frequently accessed PLE rows.
+Dual-P4 VRAM is reserved for dense latency-critical tensors, shared experts, runtime state, and adaptive hot routed-expert caches.
+The full PLE table must remain pageable and must not be permanently pinned; spare DDR4 may be consumed dynamically by the OS page cache.
+PLE reads must support mmap and positional-read backends, with batched, deduplicated, offset-sorted requests and bounded asynchronous prefetch.
+PLE measurement separates cold-cache, warm-cache, major-page-fault, and steady-state behavior.
+SSD expert execution is startup backing or an explicitly labeled experiment, while the complete expert bank remains in DDR4 for v1.
+
 ## Immediate work before GPU arrival
 
 The following can and should be completed now:
@@ -25,9 +35,10 @@ The following can and should be completed now:
 - host simulators and CPU tests;
 - Qwen4 and GGUF parsers/loaders;
 - tensor-census tools;
-- PLE mmap and page-cache tests;
+- dedicated PLE file-format, mmap, positional-read, batching, deduplication, sorting, prefetch, and page-cache tests;
 - AVX2 expert kernels and parity tests;
 - cache policy simulation from captured or synthetic traces;
+- CPU expert execution and Q4/Q5/Q8/CPU-format conversion/correctness comparisons;
 - API/config/metrics contracts;
 - CI and benchmark harnesses;
 - tiny-model tests on available non-Pascal hardware where architecture-independent.
@@ -59,9 +70,16 @@ When the P4s arrive:
 - Do not add RAM solely for model capacity before measuring.
 - Never permit swap during a performance run.
 - Keep ZFS ARC bounded during inference qualification.
-- PLE may be backed by NVMe, but warm and cold behavior must be measured separately.
-- Excessive pinned memory can destabilize the host; use bounded staging or a measured pinned bank.
+- PLE is backed by its dedicated NVMe file or shard set, and cold-cache, warm-cache, major-page-fault, and steady-state behavior must be measured separately.
+- Do not permanently pin the full PLE table; use Linux page cache and bounded staging where appropriate.
+- Excessive pinned memory can destabilize the host; use bounded staging or a measured pinned expert bank.
 - Memory pages for a GPU-owned layer should prefer the GPU-local NUMA node unless A/B evidence favors interleaving.
+
+## Deferred P4 decisions
+
+Prioritize Pascal DP4A integer kernels and format-specific tuning over FP16, BF16, and FP8 paths.
+Before conventional tensor parallelism, test disjoint expert ownership across both P4s for correctness, transfer cost, balance, and recovery.
+Do not claim a final quantization recipe until Q4, Q5, Q8, and CPU-format candidates have been benchmarked on the actual P4s.
 
 ## Thermal rules
 

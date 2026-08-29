@@ -63,9 +63,12 @@ host-source bytes.
   `A_log = log(-A)`.
 - Qwen centered RMSNorm tensors are converted back from llama.cpp's effective scale by
   subtracting one.
-- `per_layer_token_embd.weight` and routed expert tensors are read-only file-range mappings.
+- `per_layer_token_embd.weight` and routed expert tensors are read-only file-range mappings in the current source-artifact path.
   Each expert descriptor retains its shard, absolute offset, quant type, row stride and
   bytes per expert. No complete expert or PLE copy is allocated or pinned.
+- For the v1 serving path, conversion extracts the PLE bytes into a dedicated contiguous
+  file or shard set with its own manifest identity and checksum. The GGUF-embedded range
+  remains an import/reference source, not the final serving layout.
 
 Inspect a complete local artifact without touching its tensor payload pages:
 
@@ -74,7 +77,7 @@ PYTHONPATH=python python scripts/inspect_gguf_host.py \
   /models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
 ```
 
-## PLE mmap controls
+## Transitional GGUF PLE mmap controls
 
 The GGUF `per_layer_token_embd.weight` tensor has 320,001,536 IQ4_NL rows of 160
 elements. Each selected 90-byte packed row is copied and dequantized independently,
@@ -82,7 +85,8 @@ then the 16 n-gram heads are assembled into the 2,560-element PLE input. Row bou
 checked before any lookup. The exact artifact multipliers, head offsets and prime vocab
 sizes come from GGUF metadata; they are not regenerated or guessed.
 
-`--ple-warm-mode` exposes four distinct modes:
+The current GGUF-backed implementation exposes four modes for reference and conversion
+validation:
 
 - `cold` is the default and issues `MADV_DONTNEED` for the PLE range;
 - `page-cache-warm` requests OS readahead for the complete PLE range;
@@ -92,6 +96,9 @@ sizes come from GGUF metadata; they are not regenerated or guessed.
 Telemetry reports the selected mode, mapped/resident bytes where `mincore` is available,
 lookup rows and packed bytes, output bytes, targeted rows, process minor/major page faults
 and `/proc/self/io` storage-read bytes. Full-model warm is never selected implicitly.
+Because `full-model-warm` touches unrelated weights, it is excluded from the v1 serving
+contract and will be removed from the dedicated-shard API. The serving API warms only its
+PLE shard and supports both mmap and positional reads.
 
 ## Validation status
 

@@ -16,7 +16,7 @@ Each result record contains:
 - GPU names, bus IDs, clocks, power limits and temperatures;
 - model filename, SHA-256, GGUF metadata and tensor-type census;
 - context, batch, ubatch, concurrency and sampling;
-- placement, cache size/policy, pinned-memory policy and q-star mode;
+- placement, PLE backend/shard identity, page-cache state, cache size/policy, pinned-memory policy and q-star mode;
 - prompt ID and token counts;
 - raw repetitions, median and dispersion.
 
@@ -28,7 +28,8 @@ Each result record contains:
 - 8K coding prompt to 512 output;
 - 32K coding prompt to 512 output;
 - 128K long-context continuation;
-- PLE cold versus warm;
+- PLE cold-cache, warm-cache, major-page-fault and steady-state phases reported independently;
+- PLE logical rows requested, unique rows read, coalesced ranges, prefetch hits, bytes requested and bytes read;
 - cache hit/miss/oracle-hit rate;
 - experts per token on CPU, cached GPU and current-step GPU;
 - H2D bytes and duration;
@@ -47,6 +48,11 @@ Each result record contains:
 5. Best measured dual-P4 policy.
 6. llama.cpp Qwen4 Q4_K_XL reference.
 7. PXQ/llama reference when Qwen4 support is available.
+8. Explicitly experimental SSD expert execution, if implemented, reported separately from every release mode.
+
+Run the PLE suite separately for mmap and positional-read backends against the same dedicated shard bytes and row sequence. Cold-cache runs must begin from a recorded cache state and must never be mixed statistically with warm or steady-state samples. Warm-cache runs rely on ordinary Linux page-cache behavior rather than permanently pinning the full PLE. Report major faults and block-device reads for each phase; do not infer physical I/O solely from application-level read calls.
+
+The release quant comparison includes Q4, Q5, Q8 and the shipping CPU formats on actual P4 hardware. Pre-P4 conversion and correctness results may narrow candidates, but cannot establish the final recipe.
 
 For the H0 mixed CPU slice, collect Gorilla-relevant normal and promoted raw
 route/thread sweeps with:
@@ -121,5 +127,7 @@ An optimization ships enabled only if:
 - no core workload regresses by more than 5% unless the policy auto-disables there;
 - memory use remains within the documented operating envelope;
 - the selected policy is visible in logs and metrics.
+
+Mixed-precision candidates also pass fixed routing-decision, long-context retrieval, tool-call and structured-output quality probes before they may become defaults.
 
 The final product must demonstrate a measurable end-to-end gain over its cache-zero FreeToken fallback on the target coding workload. The project does not promise an absolute TPS before hardware qualification.

@@ -4,46 +4,62 @@
 
 Maximize delivered token throughput for Qwen3.8-Flash-Next on two 8 GB Pascal GPUs without pruning experts or forcing the complete model into VRAM.
 
-The architecture treats the server as a memory hierarchy:
+The architecture treats the server as three explicit storage and execution tiers:
 
 ```text
 NVMe
-  └─ GGUF and PLE backing files
-        │ mmap/page faults
-Host RAM, NUMA-owned
-  ├─ complete low-bit routed expert bank
-  ├─ PLE page cache
-  ├─ bounded pinned staging or pinned expert regions
+  ├─ dedicated contiguous PLE/N-gram file or shard set
+  └─ immutable GGUF model and expert source files
+        │ mmap faults or sorted positional reads
+DDR4, NUMA-owned
+  ├─ complete quantized routed-expert bank
+  ├─ Linux page cache for frequently accessed PLE rows
+  ├─ bounded staging only where explicitly configured
   └─ AVX2 CPU expert executor
         │
         ├──────────── PCIe H2D ────────────┐
         │                                  │
 P4 #0 VRAM                            P4 #1 VRAM
-  ├─ owned trunk layers                 ├─ owned trunk layers
-  ├─ recurrent/QSA state                ├─ recurrent/QSA state
-  ├─ fixed expert slots                 ├─ fixed expert slots
-  └─ CUDA workspaces                    └─ CUDA workspaces
+  ├─ dense latency-critical tensors      ├─ dense latency-critical tensors
+  ├─ shared experts and runtime state    ├─ shared experts and runtime state
+  ├─ adaptive hot routed-expert cache    ├─ adaptive hot routed-expert cache
+  └─ CUDA workspaces                     └─ CUDA workspaces
 ```
+
+PLE is a normal v1 NVMe-backed input, not emergency backing, while the complete expert bank is a DDR4-resident source for CPU execution and cache fills.
+The P4s receive only dense latency-critical tensors, shared experts, runtime state, and bounded hot routed-expert cache entries.
+N-gram/PLE in this document names the required table and lookup substrate; it does not include speculative decoding, which remains outside v1.
 
 ## Model partition
 
-### CPU/NVMe tier
+### NVMe tier
 
-- complete routed-expert weights;
-- PLE table;
-- source-of-truth low-bit weights for cache fills;
-- CPU reference and AVX2 expert path;
-- cache heat and telemetry state.
+- dedicated contiguous PLE/N-gram file or shard set;
+- immutable GGUF model and expert source files;
+- independently identifiable PLE offsets and manifest identity.
+
+### DDR4 tier
+
+- complete quantized routed-expert bank;
+- Linux page cache for frequently accessed PLE rows;
+- CPU reference and AVX2 expert execution;
+- bounded staging buffers and cache heat/telemetry state.
+
+The complete expert bank is loaded and pre-faulted into DDR4 for v1, is covered by the release no-swap policy, and supplies all steady-state CPU expert execution and GPU cache fills. SSD-backed expert reads are startup backing or an explicitly labeled experiment only.
+PLE mappings remain pageable by default so the OS can consume spare RAM dynamically, and the full PLE table is never permanently pinned.
 
 ### GPU tier
 
-- embeddings/output when placement is beneficial;
-- QSA, GDN, hyperconnections, routers and shared experts;
-- recurrent, QSA and KV state;
-- fixed-address cache slots for hot routed experts;
+- dense latency-critical tensors, including embeddings/output when placement is beneficial;
+- QSA, GDN, hyperconnections, routers, and shared experts;
+- recurrent, QSA, KV, and other runtime state;
+- adaptive fixed-address cache slots for hot routed experts;
 - transfer staging and partial-output buffers.
 
-The exact ordinary-tensor placement is measured. The architecture requires the routed expert bank to remain complete on the host even when a subset is cached.
+Pascal DP4A integer kernels and format-specific tuning are prioritized over FP16, BF16, and FP8 paths until actual P4 measurements justify otherwise.
+
+The exact ordinary-tensor placement is measured. The architecture requires the routed expert bank to remain complete in DDR4 even when a subset is cached in VRAM.
+The PLE file or shard set has a separate ownership and accounting boundary so model-weight mappings cannot be accidentally paged, prefetched, or pinned with it.
 
 ## GGUF ingestion
 
@@ -309,19 +325,21 @@ Each rank owns:
 - a CPU worker pool and host pages local to its NUMA node where possible;
 - its transfer streams and metrics.
 
-TP and layer ownership must not require an expert to bounce between P4s. Graph/layer split alternatives can be benchmarked, but v1 chooses one reproducible default.
+Hardware qualification first tests disjoint expert ownership across the two P4s, including correctness, transfer, load balance, and recovery behavior.
+Conventional tensor parallelism is evaluated only after that policy has evidence and remains disabled until its communication cost is measured on the actual PCIe topology.
+No dual-P4 release default exists until H3 compares the candidates and records one reproducible choice. The ordering and selection gate supersede ADR 0007's initial contiguous-layer default. The selected policy must not require an expert to bounce between P4s.
 
 ## PLE design
 
-- PLE remains a host operation and is never placed in P4 VRAM by default.
-- The backing range is independently identifiable and warmable.
-- Normal decode, speculative-style batched lookup, warm cache and cold cache are separate benchmarks.
-- The implementation must not pin the full PLE table.
-- Page-cache state is reported where practical.
-- Selected IQ4_NL rows dequantize on the host and only the bounded result transfers to the
-  execution device.
-- Cold, OS-readahead, targeted-row and explicit full-model warm modes are distinct and
-  observable.
+- PLE is a core v1 host operation whose normal source is a dedicated contiguous NVMe file or shard set.
+- The PLE manifest records file identity, contiguous logical row geometry, shard boundaries, and byte ranges independently from GGUF model weights.
+- The loader rejects overlapping or ambiguous PLE ranges and never maps, pins, or warms unrelated model-weight bytes as part of a PLE operation.
+- The lookup API supports both an mmap/page-fault backend and a positional-read (`pread`) backend with the same ordered result contract.
+- Each batch is deduplicated by row ID, sorted by physical offset for I/O, and restored to caller order after reads complete.
+- Asynchronous prefetch is bounded, cancelable, and observable; it may warm Linux page cache but does not permanently pin the full table.
+- Selected IQ4_NL rows dequantize in DDR4 and only the bounded result transfers to the execution device.
+- Cold-cache, warm-cache, major-page-fault, and steady-state decode behavior are separate benchmark dimensions with independent counters and reporting.
+- Cold, OS-readahead, targeted-row, and explicit full-model warm modes are distinct and observable; full-model warm is a measurement mode, not a residency requirement.
 
 ## State and serving
 
@@ -344,3 +362,5 @@ Checkpoints are created at semantic boundaries for coding-agent workflows. Resto
 5. CPU reference/tiny-model validation.
 
 Unsupported quant, shape or topology must fail before generation or select an explicit slower path. Silent use of uninitialized output or an unreported fallback is forbidden.
+
+No final quantization recipe is claimed before Q4, Q5, Q8, and CPU-format candidates are benchmarked on the actual P4 hardware.

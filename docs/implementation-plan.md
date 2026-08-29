@@ -26,7 +26,8 @@ A clean clone passes hosted CI and compiles the intended source set for `sm_61` 
 - integrate Qwen3.8/Qwen4 text architecture;
 - integrate GGUF K/I loading;
 - support heterogeneous expert-bank types needed by target artifacts;
-- implement PLE mmap/offload;
+- implement the dedicated, separately sharded PLE file as a core NVMe-backed path;
+- provide both mmap and positional-read PLE backends with batched, deduplicated, sorted reads and asynchronous prefetch;
 - produce a cache-disabled, correctness-first short-context path.
 
 ### Exit gate
@@ -42,6 +43,7 @@ A tiny Qwen4 model passes CPU/reference tests. When the P4 arrives, a single P4 
 - additional Q2/Q3/IQ types selected from real model census;
 - gate/up activation/down fused at the right boundary;
 - bounded pinned-memory and NUMA-aware host bank;
+- load and pre-fault the complete quantized expert bank into a no-swap DDR4 serving allocation; SSD expert reads are startup backing or an explicitly gated experiment, not the serving design;
 - parity and microbenchmark suite.
 
 The ABI slice precedes AVX2 kernels. It defines immutable heterogeneous expert-bank
@@ -103,9 +105,10 @@ For each shipping quant and shape, the CPU expert output passes error tolerances
 
 ### Outcomes
 
-- PXA-derived `sm_61` low-bit GPU kernels;
+- Pascal DP4A low-bit GPU kernels and format-specific tuning, ahead of FP16/BF16/FP8 optimization;
 - fused Qwen3.8 `topk=10` router with a permanent Torch reference path;
-- Qwen4 TP=2 and fixed layer ownership;
+- disjoint routed-expert ownership across the two P4s, measured before conventional tensor parallelism;
+- Qwen4 TP=2 and fixed layer ownership retained as the comparison/fallback policy;
 - fixed-address per-GPU expert slot pools;
 - static cache and mixed CPU/GPU output merge;
 - async LFRU fill and persisted heat;
@@ -151,7 +154,8 @@ The scheduler never chooses an unsupported path, exposes its decisions, and beat
 - actual P4/NUMA topology profile;
 - one- and two-P4 qualification;
 - benchmark comparison with llama.cpp/PXQ;
-- warm/cold PLE and cache measurements;
+- independently measured cold-cache, warm-cache, major-page-fault and steady-state PLE behavior for both storage backends;
+- Q4/Q5/Q8 and CPU-format comparisons on the actual P4s before selecting a final quant recipe;
 - soak and fault injection;
 - v1 release artifact, image, docs and known limitations.
 
@@ -164,11 +168,13 @@ Every required checkbox in `release-criteria.md` has linked evidence.
 ```text
 upstream import
   → Pascal compile
-  → Qwen4 + GGUF + PLE reference
+  → Qwen4 + GGUF + dedicated NVMe PLE reference
+  → mmap/pread + batched PLE I/O and prefetch
   → AVX2 expert backend
-  → P4 expert kernels
+  → Pascal DP4A expert kernels
   → fused topk=10 Pascal router
-  → TP2 ownership
+  → disjoint dual-P4 expert ownership
+  → TP2 comparison
   → static mixed execution
   → async cache
   → current-step q*
@@ -184,7 +190,9 @@ Before P4 arrival, independent workers can handle:
 - source import/provenance;
 - build container and H1 CI;
 - Qwen4/GGUF loader integration;
+- dedicated PLE file format, mmap/pread backends, caches and asynchronous prefetch;
 - CPU expert ABI/kernels;
+- routing simulation, quant conversion and mixed-precision correctness A/B tests;
 - fused router reference/dispatch and `sm_61` compile work after #14 H0 lands;
 - cache trace simulator;
 - benchmark result schema;
@@ -200,6 +208,7 @@ Create or amend an ADR before continuing if:
 - FreeToken upstream merges equivalent work with a conflicting design;
 - Qwen3.8 artifact cannot fit the host operating envelope without a different quant;
 - P4 lacks sufficient VRAM for the required always-active trunk;
+- the dedicated PLE shard layout cannot provide stable mmap or positional-read behavior without coupling unrelated model weights;
 - AVX2 CPU experts are so slow that current-step CPU work cannot help;
 - no realistic cache size produces useful routing locality;
 - TP=2 communication costs exceed one-P4 plus CPU performance;
