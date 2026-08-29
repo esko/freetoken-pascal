@@ -241,6 +241,52 @@ def test_dedicated_full_warm_only_touches_artifact(
     assert touched == [(str(artifact / "ple.bin"),)]
 
 
+def test_dedicated_pread_batch_matches_mmap_and_deduplicates(tmp_path: Path) -> None:
+    artifact = tmp_path / "ple"
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+    ids = np.array([31, 0, 31, 16])
+    with MappedPLETable.open_from_artifact(artifact) as mmap_table:
+        expected = mmap_table.lookup_batch(ids)
+    with MappedPLETable.open_from_artifact(artifact, backend="pread") as pread_table:
+        actual = pread_table.lookup_batch(ids)
+        np.testing.assert_array_equal(actual, expected)
+        assert pread_table.telemetry()["batch_unique_rows"] == 3
+        assert pread_table.telemetry()["backend"] == "pread"
+        assert pread_table.telemetry()["mapped_bytes"] == 0
+        assert pread_table.telemetry()["batch_physical_reads"] == 3
+        assert pread_table.telemetry()["batch_sorted_rows"] == 3
+        assert pread_table.telemetry()["batch_bytes_read"] == 3 * 90
+
+
+def test_dedicated_pread_batch_fails_closed_on_short_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", lambda *_args: b"")
+        with pytest.raises(ValueError, match="short PLE positional read"):
+            table.lookup_batch(np.array([0, 0]))
+        telemetry = table.telemetry()
+        assert telemetry["short_reads"] == 1
+        assert telemetry["batch_calls"] == 0
+        assert telemetry["lookup_rows"] == 0
+
+
+def test_dedicated_pread_empty_and_invalid_batches_do_no_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        monkeypatch.setattr(
+            "freetoken.gguf_host.os.pread",
+            lambda *_args: pytest.fail("unexpected positional read"),
+        )
+        assert table.lookup_batch(np.array([], dtype=np.int64)).shape == (0, 160)
+        with pytest.raises(IndexError):
+            table.lookup_batch(np.array([table.descriptor.rows]))
+        assert table.telemetry()["batch_calls"] == 0
+
+
 def test_dedicated_loader_ignores_provenance_source_path(tmp_path: Path) -> None:
     artifact = tmp_path / "ple"
     convert_gguf_ple_to_artifact(FIXTURE, artifact)

@@ -581,6 +581,12 @@ def parse_args(
         help="Dedicated PLE artifact directory; never inferred or silently replaced by GGUF.",
     )
     parser.add_argument(
+        "--ple-backend",
+        choices=["mmap", "pread"],
+        default=ServerArgs.ple_backend,
+        help="Dedicated PLE storage backend; pread requires --ple-artifact-path.",
+    )
+    parser.add_argument(
         "--ple-warm-mode",
         default=ServerArgs.ple_warm_mode,
         choices=["cold", "page-cache-warm", "targeted", "full-model-warm", "full-ple-warm"],
