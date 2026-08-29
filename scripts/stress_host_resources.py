@@ -853,7 +853,7 @@ def run_stress(
         raise ValueError("backend must be production; use allow_fallback for test-only banks")
     if (
         isinstance(per_iteration_timeout, bool)
-        or not isinstance(per_iteration_timeout, (int, float))
+        or not isinstance(per_iteration_timeout, int | float)
         or per_iteration_timeout <= 0
     ):
         raise ValueError("per_iteration_timeout must be positive")
