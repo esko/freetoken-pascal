@@ -94,8 +94,13 @@ The standalone Qwen GGUF CPU bridge is not registered by `ft serve` yet, so
 `num_threads` argument uses a separate safe policy: omitted or `0` means one
 serial worker, while a positive value must fit within the process's
 affinity-visible physical-core capacity.  The bridge reports both the selected
-policy and the actual participating thread partitions after decode.  This is an
-admission check only; it does not pin workers or claim NUMA placement.
+policy and the actual participating thread partitions after decode.  For positive
+requests its Q4 runner pins only its internally owned workers to distinct planned
+CPUs and verifies the singleton read-back lazily at first participating decode.
+Pin/read-back failure drains the request and reruns the serial reference path;
+telemetry reports the requested and observed CPUs, errors, and explicit fallback.
+Caller-supplied pools are not accepted with this explicit plan.  This is an H0
+CPU-affinity check only; it does not change the owner mask or claim NUMA placement.
 
 For the compiled CPU/hybrid executor, `0` plans one worker per visible physical
 core using the process affinity mask and a positive count is exact; requests above

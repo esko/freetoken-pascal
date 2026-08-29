@@ -150,7 +150,15 @@ thread. Scalar helpers, unavailable native libraries, unsupported geometries,
 and partial layers remain serial. The runner owns a persistent pool, prepared
 private buffers, and a bounded public-result ring; omitted caller output is
 returned from that prepared ring only after success, so results never alias
-worker scratch.
+worker scratch. When the standalone GGUF bridge receives a positive
+`num_threads`, it resolves the shared cpuset-aware `WorkerPlan` and passes it
+to this runner. Only an internally owned pool gets worker-local singleton
+affinity requests; each worker reads its mask back before the report can say
+`verified`. A pin or readback error drains that request and reruns the serial
+reference path with `fallback` affinity telemetry. Direct `Q4KExecutor` callers
+without a plan retain the existing pool behavior, and caller-supplied pools
+cannot be combined with an explicit plan. This is H0 affinity verification
+only: it changes no owner mask and makes no NUMA or performance claim.
 
 The standalone `QwenGGUFCpuExpertBundle` owns a `QwenGGUFHostWeights` mapping, builds the exact heterogeneous `CpuExpertLayout`, and owns a `Q4KExecutor` for decode-only CPU use.
 Its Torch adapter accepts only CPU tensors, copies through explicit NumPy float32/int32 buffers, and returns a CPU tensor in the hidden-state dtype.
@@ -160,7 +168,10 @@ through the process affinity.  The bundle reports the requested and effective co
 the actual participating partitions from the last decode, the selected kernel census,
 and any threading fallback reason; this policy does not reinterpret the existing
 `EngineConfig.moe_cpu_threads` value.  The physical-core check is an admission guard
-only; it does not pin workers or claim NUMA placement.
+only. For a positive request, the Q4 runner also reports requested and observed
+worker CPUs, per-worker affinity errors, and `planned-unverified`, `verified`,
+`not-applicable`, or `fallback` status. Only its internally owned pool is pinned;
+the bridge never changes the owner mask or claims NUMA placement.
 It rejects GPU, hybrid, offload, nonzero-cache, prefill, grouped, and closed-mapping requests before execution.
 The CUDA `Engine` registration seam fails closed for Qwen GGUF rather than constructing the homogeneous `OffloadMoeCache`.
 The standalone `QwenGGUFCpuMoELayer` adapts one layer's bundle to the existing routed-expert

@@ -49,6 +49,7 @@ from freetoken.moe.cpu_abi import (
     _checked_int,
     _clear_output,
 )
+from freetoken.moe.cpu_topology import WorkerPlan
 from freetoken.moe.ggml_reference import BUILTIN_REFERENCE_DECODERS
 from freetoken.moe.mixed_gemv import _FORMATS as _MIXED_FORMATS
 from freetoken.moe.mixed_gemv import MixedGemvPrimitive, select_mixed_gemv_primitive
@@ -59,6 +60,29 @@ Q4K_SCALE_BYTES = 12
 Q4K_DATA_OFFSET = 16
 Q4K_MODE = Literal["auto", "scalar", "avx2"]
 _Q4K_TYPES = frozenset({12, "Q4_K", "q4_k"})
+_AFFINITY_STARTUP_TIMEOUT_SECONDS = 5.0
+
+
+def _initial_affinity_report(worker_plan: WorkerPlan | None) -> dict[str, object]:
+    """Build Q4 affinity telemetry without changing the CPU execution ABI."""
+    requested = [] if worker_plan is None else list(worker_plan.worker_cpus)
+    status = "not-requested" if worker_plan is None else "planned-unverified"
+    return {
+        "affinity_status": status,
+        "planned_affinity_status": status,
+        "verification_status": "not-requested" if worker_plan is None else "unverified",
+        "affinity_planned": worker_plan is not None,
+        "affinity_verified": False,
+        "affinity_fallback": False,
+        "requested_worker_cpus": requested,
+        "worker_requested_cpus": requested.copy(),
+        "planned_worker_cpus": requested.copy(),
+        "observed_worker_cpus": [],
+        "worker_observed_affinity_cpus": [],
+        "affinity_errors": [],
+        "worker_affinity_errors": [],
+        "fallback_reason": None if worker_plan is None else worker_plan.fallback_reason,
+    }
 
 
 def partition_q4_k_routes(route_count: int, thread_count: int) -> tuple[tuple[int, int], ...]:
@@ -583,6 +607,7 @@ class Q4KExecutor:
         required_alignment: int = 32,
         num_threads: int = 1,
         thread_pool: Executor | None = None,
+        worker_plan: WorkerPlan | None = None,
     ) -> None:
         self.layout = layout
         self.primitive = select_q4_k_primitive(mode)
@@ -592,6 +617,20 @@ class Q4KExecutor:
         if num_threads <= 0:
             raise InvalidRequest(f"num_threads must be positive, got {num_threads}")
         self.num_threads = num_threads
+        if worker_plan is not None:
+            if not isinstance(worker_plan, WorkerPlan):
+                raise InvalidRequest("worker_plan must be a WorkerPlan or None")
+            if thread_pool is not None:
+                raise InvalidRequest(
+                    "an explicit worker_plan requires an internally owned ThreadPoolExecutor"
+                )
+            if worker_plan.effective_threads != num_threads:
+                raise InvalidRequest(
+                    "worker_plan effective_threads must match num_threads "
+                    f"({worker_plan.effective_threads} != {num_threads})"
+                )
+        self.worker_plan = worker_plan
+        self._affinity_telemetry = _initial_affinity_report(worker_plan)
         q4_descriptors = frozenset(
             (descriptor.layer_id, descriptor.projection)
             for descriptor in layout.descriptors
@@ -713,6 +752,14 @@ class Q4KExecutor:
                 output_dtype=output_dtype,
                 required_alignment=required_alignment,
             )
+        elif worker_plan is not None:
+            self._affinity_telemetry.update(
+                {
+                    "affinity_status": "not-applicable",
+                    "verification_status": "not-applicable",
+                    "fallback_reason": "native_avx2_or_layout_ineligible",
+                }
+            )
 
     @property
     def backend(self) -> str:
@@ -722,6 +769,16 @@ class Q4KExecutor:
     def parallel_enabled(self) -> bool:
         """Whether this executor has an opt-in threaded runner."""
         return self._threaded_runner is not None
+
+    @property
+    def affinity_telemetry(self) -> dict[str, object]:
+        """Return requested, observed and fallback state for an explicit worker plan."""
+        if self._threaded_runner is not None:
+            return self._threaded_runner.affinity_telemetry
+        return {
+            key: value.copy() if isinstance(value, list) else value
+            for key, value in self._affinity_telemetry.items()
+        }
 
     def _layer_direct_eligible(self, layer_id: int) -> bool:
         """Require all three projections of one census geometry to be direct."""
@@ -943,14 +1000,23 @@ class _ThreadedMixedRunner:
     ) -> None:
         self.owner = owner
         self.max_threads = owner.num_threads
-        self._pool = (
-            thread_pool
-            if thread_pool is not None
-            else ThreadPoolExecutor(
-                max_workers=self.max_threads,
-                thread_name_prefix="freetoken-mixed",
-            )
-        )
+        self._worker_plan = getattr(owner, "worker_plan", None)
+        self._affinity_lock = threading.Lock()
+        self._admission_owner_thread: int | None = None
+        self._affinity_next = 0
+        self._affinity_observed: dict[int, int] = {}
+        self._affinity_errors: dict[int, str] = {}
+        self._affinity_workers_started = False
+        if thread_pool is not None:
+            self._pool = thread_pool
+        else:
+            pool_kwargs: dict[str, Any] = {
+                "max_workers": self.max_threads,
+                "thread_name_prefix": "freetoken-mixed",
+            }
+            if self._worker_plan is not None:
+                pool_kwargs["initializer"] = self._initialize_worker_affinity
+            self._pool = ThreadPoolExecutor(**pool_kwargs)
         self._owns_pool = thread_pool is None
         self._lock = threading.Lock()
         try:
@@ -992,6 +1058,120 @@ class _ThreadedMixedRunner:
     @property
     def last_telemetry(self) -> CpuExecutionTelemetry | None:
         return self._last_telemetry
+
+    @property
+    def affinity_telemetry(self) -> dict[str, object]:
+        """Snapshot affinity planning and worker-local verification state."""
+        plan = self._worker_plan
+        with self._affinity_lock:
+            requested = [] if plan is None else list(plan.worker_cpus)
+            observed = [
+                self._affinity_observed[index]
+                for index in range(self.max_threads)
+                if index in self._affinity_observed
+            ]
+            errors = [
+                self._affinity_errors[index]
+                for index in range(self.max_threads)
+                if index in self._affinity_errors
+            ]
+            if plan is None:
+                status = "not-requested"
+                fallback_reason = None
+            elif errors:
+                status = "fallback"
+                fallback_reason = errors[0]
+            elif len(self._affinity_observed) == self.max_threads:
+                status = "verified"
+                fallback_reason = plan.fallback_reason
+            else:
+                status = "planned-unverified"
+                fallback_reason = plan.fallback_reason
+            verification_status = {
+                "not-requested": "not-requested",
+                "fallback": "fallback",
+                "verified": "verified",
+                "planned-unverified": "unverified",
+            }[status]
+            return {
+                "affinity_status": status,
+                "planned_affinity_status": "planned-unverified"
+                if plan is not None
+                else "not-requested",
+                "verification_status": verification_status,
+                "affinity_planned": plan is not None,
+                "affinity_verified": status == "verified",
+                "affinity_fallback": status == "fallback",
+                "requested_worker_cpus": requested,
+                "worker_requested_cpus": requested.copy(),
+                "planned_worker_cpus": requested.copy(),
+                "observed_worker_cpus": observed,
+                "worker_observed_affinity_cpus": observed.copy(),
+                "affinity_errors": errors,
+                "worker_affinity_errors": errors.copy(),
+                "fallback_reason": fallback_reason,
+            }
+
+    def _initialize_worker_affinity(self) -> None:
+        """Pin one internally-owned worker and verify its singleton mask."""
+        plan = self._worker_plan
+        if plan is None:
+            return
+        with self._affinity_lock:
+            index = self._affinity_next
+            self._affinity_next += 1
+        if index >= len(plan.worker_cpus):
+            with self._affinity_lock:
+                self._affinity_errors[index] = "worker affinity initializer exceeded the plan"
+            return
+        cpu = plan.worker_cpus[index]
+        try:
+            setter = os.sched_setaffinity
+            getter = os.sched_getaffinity
+            setter(0, {cpu})
+            observed = frozenset(getter(0))
+            if observed != frozenset({cpu}):
+                raise OSError(
+                    f"worker {index} read back CPU mask {sorted(observed)}, expected [{cpu}]"
+                )
+        except BaseException as error:
+            with self._affinity_lock:
+                self._affinity_errors[index] = f"worker {index}: {error}"
+            return
+        with self._affinity_lock:
+            self._affinity_observed[index] = cpu
+
+    def _affinity_failure(self) -> str | None:
+        with self._affinity_lock:
+            return next(iter(self._affinity_errors.values()), None)
+
+    def _ensure_affinity_workers_started(self) -> None:
+        """Start every planned pool worker behind a startup rendezvous."""
+        if self._worker_plan is None:
+            return
+        with self._affinity_lock:
+            if self._affinity_workers_started:
+                return
+        barrier = threading.Barrier(self.max_threads)
+        futures: list[Any] = []
+        try:
+            for _ in range(self.max_threads):
+                futures.append(self._pool.submit(barrier.wait))
+            for future in futures:
+                future.result(timeout=_AFFINITY_STARTUP_TIMEOUT_SECONDS)
+        except BaseException as error:
+            try:
+                barrier.abort()
+            except BaseException:
+                pass
+            self._cancel_and_drain(futures)
+            with self._affinity_lock:
+                self._affinity_errors[self._affinity_next] = (
+                    f"worker affinity startup failed: {error}"
+                )
+            return
+        with self._affinity_lock:
+            self._affinity_workers_started = True
 
     def _decorate(self, telemetry: CpuExecutionTelemetry) -> CpuExecutionTelemetry:
         return self.owner._decorate(telemetry)
@@ -1047,11 +1227,14 @@ class _ThreadedMixedRunner:
 
     def prepare(self, max_tokens: int, max_routes: int):
         started = time.perf_counter_ns()
-        if self._closed:
-            raise InvalidRequest("Q4_K executor is closed")
         if not self._lock.acquire(blocking=False):
+            if self._closed:
+                raise InvalidRequest("Q4_K executor is closed")
             raise self._busy(started)
         try:
+            self._admission_owner_thread = threading.get_ident()
+            if self._closed:
+                raise InvalidRequest("Q4_K executor is closed")
             plan = self.owner._reference.prepare(max_tokens, max_routes)
             for worker in self._workers:
                 worker.prepare(max_tokens, max_routes)
@@ -1086,6 +1269,7 @@ class _ThreadedMixedRunner:
             self._invalidate_prepared_state()
             raise
         finally:
+            self._admission_owner_thread = None
             self._lock.release()
 
     def _serial(self, *args: Any, **kwargs: Any) -> CpuExecutionResult:
@@ -1170,11 +1354,14 @@ class _ThreadedMixedRunner:
         submitted: list[Any] = []
         worker_cancel: _WorkerCancellation | None = None
         actual_threads = 1
-        if self._closed:
-            raise InvalidRequest("Q4_K executor is closed")
         if not self._lock.acquire(blocking=False):
+            if self._closed:
+                raise InvalidRequest("Q4_K executor is closed")
             raise self._busy(started)
         try:
+            self._admission_owner_thread = threading.get_ident()
+            if self._closed:
+                raise InvalidRequest("Q4_K executor is closed")
             selected_threads = (
                 self.max_threads
                 if _thread_count is None
@@ -1220,6 +1407,29 @@ class _ThreadedMixedRunner:
                     accumulate=accumulate,
                     cancellation=cancellation,
                 )
+            if self._affinity_failure() is not None:
+                return self._serial(
+                    parsed_layer,
+                    hidden,
+                    expert_ids,
+                    routing_weights,
+                    num_token_non_padded=active_tokens,
+                    output=result_output,
+                    accumulate=accumulate,
+                    cancellation=cancellation,
+                )
+            self._ensure_affinity_workers_started()
+            if self._affinity_failure() is not None:
+                return self._serial(
+                    parsed_layer,
+                    hidden,
+                    expert_ids,
+                    routing_weights,
+                    num_token_non_padded=active_tokens,
+                    output=result_output,
+                    accumulate=accumulate,
+                    cancellation=cancellation,
+                )
             route_ids = self._route_ids
             route_weights = self._route_weights
             outputs = self._outputs
@@ -1242,16 +1452,22 @@ class _ThreadedMixedRunner:
                 np.copyto(ids_view, expert_ids[:, begin:end], casting="unsafe")
                 np.copyto(weights_view, routing_weights[:, begin:end], casting="unsafe")
                 try:
-                    future = self._pool.submit(
-                        self._workers[index].execute,
+                    worker_args = (
                         parsed_layer,
                         hidden,
                         ids_view,
                         weights_view,
-                        num_token_non_padded=active_tokens,
-                        output=outputs[index, :tokens],
-                        accumulate=False,
-                        cancellation=worker_cancel,
+                    )
+                    worker_kwargs = {
+                        "num_token_non_padded": active_tokens,
+                        "output": outputs[index, :tokens],
+                        "accumulate": False,
+                        "cancellation": worker_cancel,
+                    }
+                    future = self._pool.submit(
+                        self._workers[index].execute,
+                        *worker_args,
+                        **worker_kwargs,
                     )
                 except BaseException as submit_error:
                     worker_cancel.cancel()
@@ -1339,6 +1555,18 @@ class _ThreadedMixedRunner:
                 self._last_telemetry = cancelled.telemetry
                 _clear_output(result_output)
                 raise cancelled
+            if self._affinity_failure() is not None:
+                self._cancel_and_drain(submitted)
+                return self._serial(
+                    parsed_layer,
+                    hidden,
+                    expert_ids,
+                    routing_weights,
+                    num_token_non_padded=active_tokens,
+                    output=result_output,
+                    accumulate=accumulate,
+                    cancellation=cancellation,
+                )
             if any(result is None for result in results):
                 raise ExecutionFailed("threaded mixed GEMV completed without all partitions")
             if result_output is None:
@@ -1415,6 +1643,7 @@ class _ThreadedMixedRunner:
             _clear_output(result_output)
             raise wrapped from error
         finally:
+            self._admission_owner_thread = None
             self._lock.release()
 
     def execute_group(
@@ -1569,11 +1798,14 @@ class _ThreadedMixedRunner:
         return tuple(samples)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self._owns_pool:
-            self._pool.shutdown(wait=True)
+        if self._admission_owner_thread == threading.get_ident():
+            raise RuntimeError("Q4_K executor cannot close from its executing thread")
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._owns_pool:
+                self._pool.shutdown(wait=True)
 
 
 Q4KCpuExpertExecutor = Q4KExecutor

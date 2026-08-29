@@ -8,7 +8,6 @@ CPU boundary until the model layer can consume that boundary directly.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Collection
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,6 +22,7 @@ from freetoken.moe.cpu_abi import (
     _checked_int,
     cpu_layout_from_source_layout,
 )
+from freetoken.moe.cpu_topology import WorkerAffinityPolicy, WorkerPlan, discover_cpu_topology
 from freetoken.moe.q4_k import Q4KExecutor
 
 if TYPE_CHECKING:
@@ -42,33 +42,40 @@ _UNSET = object()
 
 
 def _affinity_visible_physical_core_count() -> int:
-    """Return physical cores visible to this process's CPU affinity.
+    """Compatibility shim returning the shared topology planner's capacity."""
+    return len(discover_cpu_topology().cores)
 
-    The Qwen GGUF bridge is a standalone Python adapter and must not import the
-    compiled homogeneous CPU executor just to resolve its thread policy.  Keep
-    the same one-logical-CPU-per-core policy here, including the conservative
-    affinity and sysfs fallbacks used by that executor.
-    """
+
+def _resolve_bridge_worker_plan(
+    requested: int | None,
+) -> tuple[int | None, int, WorkerPlan | None]:
+    """Resolve bridge serial compatibility or an explicit, cpuset-aware plan."""
+    if requested is None:
+        return None, 1, None
     try:
-        allowed = sorted(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        allowed = list(range(os.cpu_count() or 1))
-    representatives: list[int] = []
-    seen: set[str] = set()
-    for cpu in allowed:
-        try:
-            with open(
-                f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list",
-                encoding="ascii",
-            ) as source:
-                sibling_key = source.read().strip()
-        except OSError:
-            representatives.append(cpu)
-            continue
-        if sibling_key not in seen:
-            seen.add(sibling_key)
-            representatives.append(cpu)
-    return len(representatives or allowed or [0])
+        value = _checked_int(requested, "num_threads")
+    except CpuAbiError as error:
+        raise UnsupportedGGUFCpuConfiguration(str(error)) from error
+    if value < 0:
+        raise UnsupportedGGUFCpuConfiguration(
+            f"Qwen GGUF CPU bridge num_threads must be non-negative, got {value}"
+        )
+    if value == 0:
+        return 0, 1, None
+    try:
+        topology = discover_cpu_topology()
+        capacity = len(topology.cores)
+        if value > capacity:
+            raise UnsupportedGGUFCpuConfiguration(
+                "Qwen GGUF CPU bridge num_threads="
+                f"{value} exceeds affinity-visible physical-core capacity of {capacity}"
+            )
+        plan = WorkerAffinityPolicy(requested_threads=value).plan(topology)
+    except UnsupportedGGUFCpuConfiguration:
+        raise
+    except (OSError, ValueError) as error:
+        raise UnsupportedGGUFCpuConfiguration(str(error)) from error
+    return value, value, plan
 
 
 def _resolve_bridge_num_threads(
@@ -94,13 +101,8 @@ def _resolve_bridge_num_threads(
         )
     if value == 0:
         return 0, 1
-    capacity = _affinity_visible_physical_core_count()
-    if value > capacity:
-        raise UnsupportedGGUFCpuConfiguration(
-            "Qwen GGUF CPU bridge num_threads="
-            f"{value} exceeds affinity-visible physical-core capacity of {capacity}"
-        )
-    return value, value
+    _, effective, _ = _resolve_bridge_worker_plan(value)
+    return value, effective
 
 
 def _device_type(device: Any) -> str:
@@ -219,6 +221,7 @@ class QwenGGUFCpuExpertBundle:
         output_dtype: Any,
         requested_num_threads: int | None = None,
         effective_num_threads: int = 1,
+        worker_plan: WorkerPlan | None = None,
     ) -> None:
         self.host = host
         self.layout = layout
@@ -226,6 +229,7 @@ class QwenGGUFCpuExpertBundle:
         self.output_dtype = output_dtype
         self._requested_num_threads = requested_num_threads
         self._effective_num_threads = effective_num_threads
+        self._worker_plan = worker_plan
         self._last_execution_telemetry: CpuExecutionTelemetry | None = None
         self._closed = False
         self._host_owner_token: object | None = None
@@ -248,6 +252,7 @@ class QwenGGUFCpuExpertBundle:
         cache_size: int = 0,
         prefill: bool = False,
         grouped: bool = False,
+        _resolved_thread_policy: tuple[int | None, int, WorkerPlan | None] | None = None,
     ) -> QwenGGUFCpuExpertBundle:
         _validate_cpu_bridge_config(
             backend=backend,
@@ -256,7 +261,39 @@ class QwenGGUFCpuExpertBundle:
             prefill=prefill,
             grouped=grouped,
         )
-        requested_num_threads, effective_num_threads = _resolve_bridge_num_threads(num_threads)
+        if _resolved_thread_policy is None:
+            requested_num_threads, effective_num_threads, worker_plan = _resolve_bridge_worker_plan(
+                num_threads
+            )
+        else:
+            try:
+                requested_num_threads, effective_num_threads, worker_plan = _resolved_thread_policy
+            except (TypeError, ValueError) as error:
+                raise UnsupportedGGUFCpuConfiguration(
+                    "invalid pre-resolved Qwen GGUF CPU bridge thread policy"
+                ) from error
+            try:
+                expected_requested = (
+                    None if num_threads is None else _checked_int(num_threads, "num_threads")
+                )
+            except CpuAbiError as error:
+                raise UnsupportedGGUFCpuConfiguration(str(error)) from error
+            if requested_num_threads != expected_requested:
+                raise UnsupportedGGUFCpuConfiguration(
+                    "pre-resolved Qwen GGUF CPU bridge thread policy does not match "
+                    f"num_threads={num_threads!r}"
+                )
+            if expected_requested in (None, 0):
+                valid_policy = effective_num_threads == 1 and worker_plan is None
+            else:
+                valid_policy = (
+                    isinstance(worker_plan, WorkerPlan)
+                    and effective_num_threads == expected_requested
+                )
+            if not valid_policy:
+                raise UnsupportedGGUFCpuConfiguration(
+                    "invalid pre-resolved Qwen GGUF CPU bridge thread policy"
+                )
         if host is None or not hasattr(host, "layout") or not hasattr(host, "experts"):
             raise TypeError("Qwen GGUF CPU bridge requires a QwenGGUFHostWeights-like host")
         if not callable(getattr(host, "claim_cpu_bridge", None)):
@@ -296,6 +333,7 @@ class QwenGGUFCpuExpertBundle:
                 output_dtype=np.float32,
                 required_alignment=required_alignment,
                 num_threads=effective_num_threads,
+                worker_plan=worker_plan,
             )
             executor.prepare(
                 max_tokens=max_tokens,
@@ -318,6 +356,7 @@ class QwenGGUFCpuExpertBundle:
                 output_dtype=np.float32,
                 requested_num_threads=requested_num_threads,
                 effective_num_threads=effective_num_threads,
+                worker_plan=worker_plan,
             )
             bundle._host_owner_token = host.claim_cpu_bridge()
             return bundle
@@ -356,6 +395,12 @@ class QwenGGUFCpuExpertBundle:
         return self._last_execution_telemetry
 
     @property
+    def affinity_telemetry(self) -> dict[str, object]:
+        """Q4 worker affinity planning and verification, separate from ABI telemetry."""
+        self._require_open()
+        return self.executor.affinity_telemetry
+
+    @property
     def actual_thread_count(self) -> int | None:
         """Actual participating partitions from the most recent decode, if any."""
         telemetry = self.last_telemetry
@@ -367,6 +412,9 @@ class QwenGGUFCpuExpertBundle:
         self._require_open()
         if self._effective_num_threads <= 1:
             return None
+        affinity = self.executor.affinity_telemetry
+        if affinity["affinity_status"] == "fallback":
+            return str(affinity["fallback_reason"])
         if not bool(getattr(self.executor, "parallel_enabled", False)):
             return "native_avx2_or_layout_ineligible"
         telemetry = self._last_execution_telemetry
@@ -497,6 +545,7 @@ class QwenGGUFCpuExpertBundle:
             "effective_num_threads": self._effective_num_threads,
             "actual_thread_count": None if execution is None else execution.thread_count,
             "threading_fallback_reason": self.threading_fallback_reason,
+            "affinity_telemetry": self.affinity_telemetry,
             "fallback_reason": (None if execution is None else execution.fallback_reason),
             "execution_telemetry": None if execution is None else execution.as_dict(),
         }
@@ -552,6 +601,7 @@ def open_qwen_gguf_cpu_expert_bundle(
         prefill=prefill,
         grouped=grouped,
     )
+    resolved_thread_policy = _resolve_bridge_worker_plan(num_threads)
     host = open_qwen_host_weights(
         path,
         supported_expert_types=supported_expert_types,
@@ -573,6 +623,7 @@ def open_qwen_gguf_cpu_expert_bundle(
             cache_size=cache_size,
             prefill=prefill,
             grouped=grouped,
+            _resolved_thread_policy=resolved_thread_policy,
         )
     except BaseException:
         host.close()
