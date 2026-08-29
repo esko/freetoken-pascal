@@ -1820,7 +1820,7 @@ struct CpuMoeExecutor {
     const bool coordinator_verified =
         !coordinator_requested || coordinator_affinity_verified;
     const char* status = "not-requested";
-    if (worker_pool_unusable) {
+    if (!worker_pool_usable) {
       status = "timed-out";
     } else if (worker_affinity_startup_failed || workers_failed ||
                (workers_ready && !workers_verified) || coordinator_affinity_startup_failed ||
