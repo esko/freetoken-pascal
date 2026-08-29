@@ -78,18 +78,31 @@ freetoken_mixed_q5_1_dot_avx2_impl(const uint8_t* block, const float* input) {
   const float minimum = half_to_float(load_u16(block + 2));
   const uint32_t qh = load_u32(block + 4);
   __m256 accumulator = _mm256_setzero_ps();
-  alignas(32) float values[8];
+  const __m256 scale = _mm256_set1_ps(d);
+  const __m256 offset = _mm256_set1_ps(minimum);
+  const __m256i nibble_mask = _mm256_set1_epi32(0x0F);
+  const __m256i bit_mask = _mm256_set1_epi32(1);
+  const __m256i bit_shifts = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
   for (int lane = 0; lane < 32; lane += 8) {
-    for (int j = 0; j < 8; ++j) {
-      const int index = lane + j;
-      const int bit = index < 16 ? index : index;
-      const uint8_t packed = block[8 + (index & 15)];
-      const int low_code = index < 16 ? (packed & 0x0F) : (packed >> 4);
-      const int code = low_code | static_cast<int>(((qh >> bit) & 1u) << 4);
-      values[j] = static_cast<float>(code) * d + minimum;
+    // Q5_1 stores eight adjacent low nibbles in one byte load and the fifth
+    // bit in the corresponding eight bits of qh.  Expand both byte vectors in
+    // AVX2 instead of constructing eight scalar float values per chunk.
+    const __m128i packed = _mm_loadl_epi64(
+        reinterpret_cast<const __m128i*>(block + 8 + (lane & 15)));
+    __m256i codes = _mm256_cvtepu8_epi32(packed);
+    if (lane < 16) {
+      codes = _mm256_and_si256(codes, nibble_mask);
+    } else {
+      codes = _mm256_and_si256(_mm256_srli_epi32(codes, 4), nibble_mask);
     }
+    const __m256i shifted_bits = _mm256_srlv_epi32(
+        _mm256_set1_epi32(static_cast<int>(qh >> lane)), bit_shifts);
+    const __m256i high_codes = _mm256_slli_epi32(
+        _mm256_and_si256(shifted_bits, bit_mask), 4);
+    codes = _mm256_or_si256(codes, high_codes);
+    const __m256 values = _mm256_fmadd_ps(_mm256_cvtepi32_ps(codes), scale, offset);
     accumulator = _mm256_fmadd_ps(
-        _mm256_load_ps(values), _mm256_loadu_ps(input + lane), accumulator);
+        values, _mm256_loadu_ps(input + lane), accumulator);
   }
   alignas(32) float reduced[8];
   _mm256_store_ps(reduced, accumulator);
@@ -249,13 +262,44 @@ freetoken_mixed_q5_1_gemv_avx2_impl(const uint8_t* rows, int row_count, int bloc
       row_stride_bytes != blocks_per_row * 24) {
     return -1;
   }
+  const __m256i nibble_mask = _mm256_set1_epi32(0x0F);
+  const __m256i bit_mask = _mm256_set1_epi32(1);
+  const __m256i bit_shifts = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
   for (int row = 0; row < row_count; ++row) {
     const uint8_t* packed_row = rows + static_cast<size_t>(row) * row_stride_bytes;
-    float result = 0.0f;
+    __m256 accumulator = _mm256_setzero_ps();
     for (int block = 0; block < blocks_per_row; ++block) {
-      result += freetoken_mixed_q5_1_dot_avx2_impl(
-          packed_row + static_cast<size_t>(block) * 24,
-          input + static_cast<size_t>(block) * 32);
+      const uint8_t* packed_block = packed_row + static_cast<size_t>(block) * 24;
+      const float* block_input = input + static_cast<size_t>(block) * 32;
+      const float d = half_to_float(load_u16(packed_block));
+      const float minimum = half_to_float(load_u16(packed_block + 2));
+      const uint32_t qh = load_u32(packed_block + 4);
+      const __m256 scale = _mm256_set1_ps(d);
+      const __m256 offset = _mm256_set1_ps(minimum);
+      for (int lane = 0; lane < 32; lane += 8) {
+        const __m128i packed = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(
+            packed_block + 8 + (lane & 15)));
+        __m256i codes = _mm256_cvtepu8_epi32(packed);
+        if (lane < 16) {
+          codes = _mm256_and_si256(codes, nibble_mask);
+        } else {
+          codes = _mm256_and_si256(_mm256_srli_epi32(codes, 4), nibble_mask);
+        }
+        const __m256i shifted_bits = _mm256_srlv_epi32(
+            _mm256_set1_epi32(static_cast<int>(qh >> lane)), bit_shifts);
+        const __m256i high_codes = _mm256_slli_epi32(
+            _mm256_and_si256(shifted_bits, bit_mask), 4);
+        codes = _mm256_or_si256(codes, high_codes);
+        const __m256 values = _mm256_fmadd_ps(_mm256_cvtepi32_ps(codes), scale, offset);
+        accumulator = _mm256_fmadd_ps(
+            values, _mm256_loadu_ps(block_input + lane), accumulator);
+      }
+    }
+    alignas(32) float reduced[8];
+    _mm256_store_ps(reduced, accumulator);
+    float result = 0.0f;
+    for (float value : reduced) {
+      result += value;
     }
     output[row] = result;
   }

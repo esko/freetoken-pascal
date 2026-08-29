@@ -273,6 +273,34 @@ def test_native_mixed_block_decode_and_dot_match_reference(
     )
 
 
+@pytest.mark.parametrize("qh", [0x00000000, 0xFFFFFFFF, 0xAAAAAAAA, 0x55555555, 0x80000001])
+def test_native_q5_1_expands_each_high_bit_to_its_matching_lane(
+    qh: int,
+    mixed_native_library: Path | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise all four eight-lane qh windows, including opposite bit patterns."""
+    if mixed_native_library is None:
+        pytest.skip("g++ unavailable")
+    monkeypatch.setenv("FREETOKEN_MIXED_GEMV_NATIVE_LIB", str(mixed_native_library))
+    primitive = select_mixed_gemv_primitive("forced_avx2")
+    if primitive.isa == "scalar":
+        pytest.skip("AVX2/FMA unavailable")
+    block = _pack_block("Q5_1", 131)
+    block[4:8] = np.frombuffer(np.uint32(qh).tobytes(), dtype=np.uint8)
+    expected = _independent_decode("Q5_1", block)
+    decoded = np.empty(Q5_1_BLOCK_ELEMENTS, dtype=np.float32)
+    primitive.decode(block, quant_name="Q5_1", out=decoded)
+    np.testing.assert_allclose(decoded, expected, rtol=2e-5, atol=2e-5)
+    vector = np.linspace(-1.0, 1.0, Q5_1_BLOCK_ELEMENTS, dtype=np.float32)
+    np.testing.assert_allclose(
+        primitive.dot(block, vector, quant_name="Q5_1"),
+        np.dot(expected, vector).astype(np.float32),
+        rtol=3e-5,
+        atol=3e-5,
+    )
+
+
 @pytest.mark.parametrize("name", ["Q5_1", "Q8_0", "Q5_K"])
 def test_exported_scalar_symbols_match_independent_oracle(
     name: str,
