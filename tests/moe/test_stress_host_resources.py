@@ -154,19 +154,25 @@ def test_cleanup_tolerates_baseline_worker_gc_but_rejects_new_worker(
 ) -> None:
     baseline_worker = {"ident": 101, "name": "freetoken-mixed_0"}
     current_workers: tuple[dict[str, object], ...] = ()
+    current_fds = 4
     monkeypatch.setattr(stress_host_resources, "_live_buffer_ids", lambda: ())
-    monkeypatch.setattr(stress_host_resources, "_fd_count", lambda: None)
+    monkeypatch.setattr(stress_host_resources, "_fd_count", lambda: current_fds)
     monkeypatch.setattr(
         stress_host_resources,
         "_thread_snapshot",
         lambda: {"workers": current_workers},
     )
 
-    stress_host_resources._cleanup_check((), (baseline_worker,), None)
+    stress_host_resources._cleanup_check((), (baseline_worker,), 5)
 
     current_workers = ({"ident": 202, "name": "freetoken-mixed_0"},)
     with pytest.raises(RuntimeError, match="new freetoken-mixed workers leaked"):
-        stress_host_resources._cleanup_check((), (baseline_worker,), None)
+        stress_host_resources._cleanup_check((), (baseline_worker,), 5)
+
+    current_workers = ()
+    current_fds = 6
+    with pytest.raises(RuntimeError, match="file-descriptor count increased"):
+        stress_host_resources._cleanup_check((), (baseline_worker,), 5)
 
 
 def test_threaded_failure_drains_and_restores_resources(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,9 +203,10 @@ def test_threaded_failure_drains_and_restores_resources(monkeypatch: pytest.Monk
     assert serial_calls > 0, "serial parity did not run before injected failure"
     assert worker_entered.is_set(), "injected failure did not reach a production worker"
     assert stress_host_resources._live_buffer_ids() == before_live
-    assert tuple(stress_host_resources._thread_snapshot()["workers"]) == before_workers
+    after_workers = tuple(stress_host_resources._thread_snapshot()["workers"])
+    assert not stress_host_resources._unexpected_workers(before_workers, after_workers)
     after_fds = stress_host_resources._fd_count()
-    assert before_fds is None or after_fds == before_fds
+    assert before_fds is None or after_fds is None or after_fds <= before_fds
 
 
 def test_thread_cap_is_rejected_by_cli() -> None:

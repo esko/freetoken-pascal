@@ -839,8 +839,8 @@ def _cleanup_check(
     if unexpected_workers:
         errors.append(f"new freetoken-mixed workers leaked: {unexpected_workers!r}")
     current_fds = _fd_count()
-    if baseline_fds is not None and current_fds is not None and current_fds != baseline_fds:
-        errors.append(f"file-descriptor count changed: {baseline_fds} -> {current_fds}")
+    if baseline_fds is not None and current_fds is not None and current_fds > baseline_fds:
+        errors.append(f"file-descriptor count increased: {baseline_fds} -> {current_fds}")
     if errors:
         raise RuntimeError("; ".join(errors))
 
@@ -1002,7 +1002,7 @@ def run_stress(
             if baseline_fds is None or final_fds is None
             else final_fds - baseline_fds,
             "restored": (
-                None if baseline_fds is None or final_fds is None else baseline_fds == final_fds
+                None if baseline_fds is None or final_fds is None else final_fds <= baseline_fds
             ),
         },
         "thread_counts": {
