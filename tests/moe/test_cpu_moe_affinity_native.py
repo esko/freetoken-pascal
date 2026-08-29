@@ -34,11 +34,30 @@ def _new_executor(ext, core_ids: list[int]):
     )
 
 
+def _noop_task(executor):
+    """Build a task whose invalid route avoids dereferencing the null bank tables."""
+    x = (ctypes.c_uint16 * 32)()
+    ids = (ctypes.c_int32 * 1)(-1)
+    weights = (ctypes.c_float * 1)(0.0)
+    y = (ctypes.c_uint16 * 32)()
+    task = executor.create_task(
+        0,
+        1,
+        ctypes.addressof(x),
+        ctypes.addressof(ids),
+        ctypes.addressof(weights),
+        ctypes.addressof(y),
+    )
+    return task, (x, ids, weights, y)
+
+
 def _load_extension():
     torch = pytest.importorskip("torch")
     ext = pytest.importorskip("freetoken.kernel._cpu_moe")
     if not hasattr(ext.CpuMoeExecutor, "affinity_report"):
         pytest.skip("compiled extension predates the affinity report API")
+    if not hasattr(ext.CpuMoeExecutor, "stop_flag_coordinator"):
+        pytest.skip("compiled extension predates coordinator shutdown API")
     return torch, ext
 
 
@@ -71,6 +90,9 @@ def test_native_affinity_report_verifies_workers_and_optional_coordinator() -> N
         assert report["coordinator_affinity_error"] == 0
         assert report["coordinator_affinity_verified"] is True
         assert report["status"] == "verified"
+        executor.stop_flag_coordinator()
+        executor.stop_flag_coordinator()
+        assert executor.affinity_report() == report
     del executor
     assert set(os.sched_getaffinity(0)) == before
     del torch
@@ -84,9 +106,47 @@ def test_native_invalid_cpu_is_reported_without_changing_parent_affinity() -> No
     assert report["status"] == "failed"
     assert report["worker_affinity_errors"][0] != 0
     assert report["worker_observed_affinity_cpus"] == [-1]
+    assert report["worker_pool_usable"] is True
     assert "worker" in report["reason"]
+    executor.ensure_worker_pool_usable()
+    task, keepalive = _noop_task(executor)
+    executor.run_task(task)
+    del keepalive
     del executor
     assert set(os.sched_getaffinity(0)) == before
+    del torch
+
+
+def test_native_coordinator_shutdown_is_idempotent() -> None:
+    torch, ext = _load_extension()
+    allowed = sorted(os.sched_getaffinity(0))
+    if len(allowed) < 2:
+        pytest.skip("coordinator shutdown test requires two allowed CPUs")
+    executor = _new_executor(ext, [allowed[0]])
+    flags = (ctypes.c_int64 * 1)()
+    executor.start_flag_coordinator(ctypes.addressof(flags), ctypes.addressof(flags), 1, allowed[1])
+    before = executor.affinity_report()
+    executor.stop_flag_coordinator()
+    executor.stop_flag_coordinator()
+    assert executor.affinity_report() == before
+    del executor
+    del torch
+
+
+def test_native_failed_coordinator_is_stopped_before_fallback() -> None:
+    torch, ext = _load_extension()
+    allowed = sorted(os.sched_getaffinity(0))
+    if not allowed:
+        pytest.skip("coordinator failure test requires an allowed CPU")
+    executor = _new_executor(ext, [allowed[0]])
+    flags = (ctypes.c_int64 * 1)()
+    executor.start_flag_coordinator(ctypes.addressof(flags), ctypes.addressof(flags), 1, 1024)
+    report = executor.affinity_report()
+    assert report["status"] == "failed"
+    assert report["coordinator_affinity_error"] != 0
+    executor.stop_flag_coordinator()
+    executor.stop_flag_coordinator()
+    del executor
     del torch
 
 

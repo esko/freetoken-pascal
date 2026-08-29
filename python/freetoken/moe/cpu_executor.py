@@ -238,7 +238,7 @@ class CpuMoeExecutor:
         if coord_core is None:
             coord_core = -1
         self._coord_core = coord_core
-        self._ext = _cpu_moe.CpuMoeExecutor(
+        ext = _cpu_moe.CpuMoeExecutor(
             num_threads=nthreads,
             num_layers=self.num_layers,
             num_experts=self.num_experts,
@@ -254,15 +254,29 @@ class CpuMoeExecutor:
             core_ids=core_ids,
             **ptrs,
         )
+        native_report = getattr(ext, "affinity_report", None)
+        self._native_affinity_report: dict[str, object] | None = None
+        if native_report is not None:
+            self._native_affinity_report = dict(native_report())
+            workers_ready = self._native_affinity_report.get("workers_ready", True)
+            native_status = self._native_affinity_report.get("status")
+            if native_status == "timed-out" or not bool(workers_ready):
+                reason = str(
+                    self._native_affinity_report.get(
+                        "reason", "CPU MoE worker affinity startup did not complete"
+                    )
+                )
+                stop_coordinator = getattr(ext, "stop_flag_coordinator", None)
+                if stop_coordinator is not None:
+                    stop_coordinator()
+                del ext
+                raise RuntimeError(f"CPU MoE worker pool unavailable: {reason}")
+        self._ext = ext
         self.num_threads = nthreads
         self.core_ids = core_ids
         self.isa = self._ext.isa_name()
-        self._native_affinity_report: dict[str, object] | None = None
-        native_report = getattr(self._ext, "affinity_report", None)
-        if native_report is not None:
-            self._native_affinity_report = dict(native_report())
-            if self._native_affinity_report.get("status") != "verified":
-                self._flag_sync = False
+        if native_report is None or self._native_affinity_report.get("status") != "verified":
+            self._flag_sync = False
         self.affinity_topology = affinity_topology
         self.affinity_plan = affinity_selection.plan
         self.affinity_telemetry = affinity_telemetry(
@@ -314,11 +328,15 @@ class CpuMoeExecutor:
             if native_report is not None:
                 self._native_affinity_report = dict(native_report())
                 if self._native_affinity_report.get("status") != "verified":
-                    # Do not submit flag doorbells until the native coordinator
-                    # has reported a completed startup verification.  A bounded
-                    # native wait may return pending while its thread publishes
-                    # later; host-function dispatch is the safe path meanwhile.
+                    stop_coordinator = getattr(self._ext, "stop_flag_coordinator", None)
+                    if stop_coordinator is not None:
+                        stop_coordinator()
+                    # Stop the native poller before switching to host-function
+                    # dispatch; an unverified coordinator is never left running.
                     self._flag_sync = False
+                    self._flag_slots.clear()
+                    self._ready = self._done = self._err = None
+                    self._native_affinity_report = dict(native_report())
                 self.affinity_telemetry = affinity_telemetry(
                     affinity_selection, self._native_affinity_report
                 )
@@ -531,6 +549,19 @@ class CpuMoeExecutor:
         )
         return ptrs, (H, I)
 
+    def _ensure_worker_pool_usable(self) -> None:
+        ensure = getattr(self._ext, "ensure_worker_pool_usable", None)
+        if ensure is not None:
+            ensure()
+            return
+        report = self._native_affinity_report or {}
+        workers_ready = report.get("workers_ready")
+        if report.get("status") == "timed-out" or (
+            workers_ready is not None and not bool(workers_ready)
+        ):
+            reason = report.get("reason", "CPU MoE worker affinity startup did not complete")
+            raise RuntimeError(f"CPU MoE worker pool unavailable: {reason}")
+
     def _io_for(self, bs: int) -> dict[str, torch.Tensor]:
         io = self._io.get(bs)
         if io is None:
@@ -596,6 +627,7 @@ class CpuMoeExecutor:
         computes only the routes assigned to it. Returns an opaque handle to pass to
         :meth:`decode_sync`. The output tensor is allocated here so it stays live (and
         distinct from the interleaved GPU work) across the overlap window."""
+        self._ensure_worker_pool_usable()
         bs = hidden_states.shape[0]
         io = self._io_for(bs)
 
@@ -631,6 +663,7 @@ class CpuMoeExecutor:
         """Issue the CPU-pool sync + the H2D result copy for a prior :meth:`decode_submit`,
         and return the GPU output tensor. With flag-sync the wait is a front-end stream
         memop on done[slot] (set by the CPU coordinator); otherwise a cudaLaunchHostFunc."""
+        self._ensure_worker_pool_usable()
         bs, task, out, slot = pending
         if slot is not None:
             # Front-end WAIT(done[slot] >= 1): blocks this stream's later nodes without

@@ -1308,8 +1308,8 @@ struct CpuMoeExecutor {
   std::vector<int> core_ids;          // worker tid -> logical CPU to pin to (may be empty)
 
   // Affinity startup state is normally published before the constructor/start call
-  // returns.  Bounded waits may leave it pending; the Python wrapper treats this as
-  // verification data, never as a requested-plan success signal.
+  // returns. A bounded worker wait can become terminally timed out; the Python
+  // wrapper treats this as a fail-closed state, never as a requested-plan success.
   mutable std::mutex affinity_mtx;
   std::condition_variable affinity_cv;
   int worker_affinity_ready = 0;
@@ -1320,6 +1320,7 @@ struct CpuMoeExecutor {
   std::vector<uint8_t> worker_affinity_published;
   bool worker_affinity_startup_failed = false;
   bool worker_affinity_startup_timed_out = false;
+  bool worker_pool_usable = true;
   int coordinator_requested_cpu = -1;
   int coordinator_observed_affinity_cpu = -1;
   int coordinator_affinity_error = 0;
@@ -1472,7 +1473,11 @@ struct CpuMoeExecutor {
           [this] { return worker_affinity_ready == num_threads || worker_affinity_startup_failed; });
       if (!ready) {
         worker_affinity_startup_timed_out = true;
+        worker_pool_usable = false;
         affinity_failure_reason = "worker affinity startup timed out";
+        lk.unlock();
+        stop_workers();
+        return;
       }
       if (worker_affinity_startup_failed) {
         lk.unlock();
@@ -1723,6 +1728,7 @@ struct CpuMoeExecutor {
       coordinator_affinity_ready = true;
       note_affinity_error_locked("coordinator", error);
     }
+    if (error != 0) coord_stop.store(true, std::memory_order_release);
     affinity_cv.notify_all();
   }
 
@@ -1738,6 +1744,16 @@ struct CpuMoeExecutor {
       }
       affinity_cv.notify_all();
     } catch (...) {
+    }
+  }
+
+  void ensure_worker_pool_usable() const {
+    std::lock_guard<std::mutex> lk(affinity_mtx);
+    if (!worker_pool_usable) {
+      const std::string reason = affinity_failure_reason.empty()
+                                     ? "worker affinity startup timed out"
+                                     : affinity_failure_reason;
+      throw std::runtime_error("CPU MoE worker pool is unusable: " + reason);
     }
   }
 
@@ -1757,14 +1773,14 @@ struct CpuMoeExecutor {
     // notify workers first; sync() also observes stop so this ordering cannot
     // leave the coordinator waiting for work that teardown intentionally drops.
     stop_workers();
-    coord_stop.store(true, std::memory_order_release);
-    if (coord_thread.joinable()) coord_thread.join();
+    stop_flag_coordinator();
     join_workers();
     for (MoeTask* t : owned_tasks) delete t;
   }
 
   uintptr_t create_task(int layer_id, int num_tokens, uintptr_t x_ptr,
                         uintptr_t ids_ptr, uintptr_t w_ptr, uintptr_t y_ptr) {
+    ensure_worker_pool_usable();
     MoeTask* t = new MoeTask{this,
                              layer_id,
                              num_tokens,
@@ -1796,14 +1812,15 @@ struct CpuMoeExecutor {
     const bool coordinator_verified =
         !coordinator_requested || coordinator_affinity_verified;
     const char* status = "not-requested";
-    if (worker_affinity_startup_timed_out || !workers_ready ||
-        coordinator_affinity_startup_timed_out ||
-        (coordinator_requested && !coordinator_affinity_ready)) {
-      status = "pending";
-    } else if (worker_affinity_startup_failed || workers_failed || !workers_verified ||
-               coordinator_affinity_startup_failed || coordinator_failed ||
-               !coordinator_verified) {
+    if (worker_pool_unusable) {
+      status = "timed-out";
+    } else if (worker_affinity_startup_failed || workers_failed ||
+               (workers_ready && !workers_verified) || coordinator_affinity_startup_failed ||
+               coordinator_failed ||
+               (coordinator_requested && coordinator_affinity_ready && !coordinator_verified)) {
       status = "failed";
+    } else if (!workers_ready || (coordinator_requested && !coordinator_affinity_ready)) {
+      status = "pending";
     } else if (workers_requested || coordinator_requested) {
       status = "verified";
     }
@@ -1813,11 +1830,14 @@ struct CpuMoeExecutor {
     report["worker_affinity_errors"] = worker_affinity_errors;
     report["worker_affinity_verified"] = worker_affinity_verified;
     report["workers_ready"] = workers_ready;
+    report["worker_pool_usable"] = worker_pool_usable;
+    report["worker_affinity_startup_timed_out"] = worker_affinity_startup_timed_out;
     report["coordinator_requested_cpu"] = coordinator_requested_cpu;
     report["coordinator_observed_affinity_cpu"] = coordinator_observed_affinity_cpu;
     report["coordinator_affinity_error"] = coordinator_affinity_error;
     report["coordinator_affinity_verified"] = coordinator_affinity_verified;
     report["coordinator_ready"] = coordinator_affinity_ready;
+    report["coordinator_affinity_startup_timed_out"] = coordinator_affinity_startup_timed_out;
     if (!affinity_failure_reason.empty()) report["reason"] = affinity_failure_reason;
     return report;
   }
@@ -2151,6 +2171,7 @@ struct CpuMoeExecutor {
   }
 
   void submit(MoeTask* t) {
+    ensure_worker_pool_usable();
     n_iblk = (I + IBLK - 1) / IBLK;
     n_hblk = (H + HBLK - 1) / HBLK;
     // Grow the per-token intermediate scratch if a larger batch shows up than the
@@ -2223,6 +2244,7 @@ struct CpuMoeExecutor {
   }
 
   void sync() {
+    ensure_worker_pool_usable();
     const uint64_t target = submitted.load(std::memory_order_acquire);
     std::unique_lock<std::mutex> lk(sync_mtx);
     sync_cv.wait(lk, [&] {
@@ -2232,11 +2254,13 @@ struct CpuMoeExecutor {
   }
 
   void submit_with_cuda_stream(uintptr_t stream, uintptr_t task) {
+    ensure_worker_pool_usable();
     cudaLaunchHostFunc(reinterpret_cast<cudaStream_t>(stream), &CpuMoeExecutor::submit_cb,
                        reinterpret_cast<void*>(task));
   }
 
   void sync_with_cuda_stream(uintptr_t stream, uintptr_t task) {
+    ensure_worker_pool_usable();
     cudaLaunchHostFunc(reinterpret_cast<cudaStream_t>(stream), &CpuMoeExecutor::sync_cb,
                        reinterpret_cast<void*>(task));
   }
@@ -2244,6 +2268,7 @@ struct CpuMoeExecutor {
   // Register a (layer, batch-size) slot's task so the coordinator can dispatch it on a
   // flag bump.
   void register_flag_task(int slot, uintptr_t task) {
+    ensure_worker_pool_usable();
     std::lock_guard<std::mutex> lk(flag_task_mtx);
     if (static_cast<int>(flag_task.size()) <= slot) flag_task.resize(slot + 1, nullptr);
     flag_task[slot] = reinterpret_cast<MoeTask*>(task);
@@ -2260,6 +2285,7 @@ struct CpuMoeExecutor {
                               int pin_core) {
     if (coordinator_started || coord_thread.joinable())
       throw std::runtime_error("CPU MoE flag coordinator already started");
+    ensure_worker_pool_usable();
     coordinator_started = true;
     ready_flags = reinterpret_cast<volatile int64_t*>(ready_ptr);
     done_flags = reinterpret_cast<volatile int64_t*>(done_ptr);
@@ -2281,10 +2307,13 @@ struct CpuMoeExecutor {
     coord_thread = std::thread([this, pin_core] {
       try {
         pin_coordinator(pin_core);
-        coordinator_loop();
       } catch (...) {
         publish_coordinator_startup_failure();
+        return;
       }
+      // Keep runtime coordinator exceptions uncaught, matching the pre-existing
+      // worker/coordinator loop semantics. Only startup publication is guarded.
+      coordinator_loop();
     });
     {
       std::unique_lock<std::mutex> lk(affinity_mtx);
@@ -2294,13 +2323,20 @@ struct CpuMoeExecutor {
       if (!ready) {
         coordinator_affinity_error = ETIMEDOUT;
         coordinator_affinity_startup_timed_out = true;
+        coordinator_affinity_startup_failed = true;
         affinity_failure_reason = "coordinator affinity startup timed out";
+        coord_stop.store(true, std::memory_order_release);
         return;
       }
       if (coordinator_affinity_startup_failed) {
         return;
       }
     }
+  }
+
+  void stop_flag_coordinator() {
+    coord_stop.store(true, std::memory_order_release);
+    if (coord_thread.joinable()) coord_thread.join();
   }
 
   void coordinator_loop() {
@@ -2381,6 +2417,7 @@ struct CpuMoeExecutor {
 
   // Eager (non-graph) path: run one task to completion on the pool.
   void run_task(uintptr_t task) {
+    ensure_worker_pool_usable();
     MoeTask* t = reinterpret_cast<MoeTask*>(task);
     submit(t);
     sync();
@@ -2428,6 +2465,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("start_flag_coordinator", &CpuMoeExecutor::start_flag_coordinator,
            py::arg("ready_ptr"), py::arg("done_ptr"), py::arg("num_slots"),
            py::arg("pin_core"))
+      .def("stop_flag_coordinator", &CpuMoeExecutor::stop_flag_coordinator)
+      .def("ensure_worker_pool_usable", &CpuMoeExecutor::ensure_worker_pool_usable)
       .def("set_input_prequant",
            [](CpuMoeExecutor& e, bool v) { e.input_prequant = v; },
            py::arg("value"))

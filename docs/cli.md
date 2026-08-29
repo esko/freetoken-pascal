@@ -105,7 +105,12 @@ host-function path when no spare core exists. Startup telemetry distinguishes th
 planned CPU IDs from native `verified` or `fallback` results; it never reports
 successful affinity without an exact read-back. With an explicit worker count,
 that reservation is intentional: the coordinator consumes one additional core
-and the requested worker count remains exact.
+and the requested worker count remains exact. The `flag_sync_requested` and
+`flag_sync` telemetry fields distinguish the requested optimization from the
+native-applied mode; a missing, failed, or timed-out coordinator is stopped and
+the host-function path is used. If worker affinity startup itself times out,
+the worker pool is terminally unusable and serving construction fails rather
+than submitting work to an unready pool.
 
 ### Host expert-bank policy (Issue #18 H0/H1 slice)
 

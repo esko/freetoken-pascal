@@ -106,22 +106,26 @@ def affinity_telemetry(
     native_status = str(report.get("status", "unavailable"))
     if native_status == "verified":
         status = "verified"
-    elif native_status in {"failed", "unsupported"}:
+    elif native_status in {"failed", "timed-out", "unsupported"}:
         status = "fallback"
     else:
         status = "planned-unverified"
 
     telemetry = selection.as_dict()
+    coordinator_applied = not selection.flag_sync or (
+        native_status == "verified"
+        and int(report.get("coordinator_requested_cpu", -1)) >= 0
+        and bool(report.get("coordinator_ready", False))
+    )
+    flag_sync_applied = bool(selection.flag_sync and coordinator_applied)
     telemetry.update(
         {
             "affinity_status": status,
             "planned_affinity_status": "planned-unverified",
             "native_affinity_status": native_status,
-            "flag_sync_applied": (
-                None
-                if native_report is None
-                else selection.flag_sync and native_status == "verified"
-            ),
+            "flag_sync_requested": selection.flag_sync,
+            "flag_sync": flag_sync_applied,
+            "flag_sync_applied": flag_sync_applied,
         }
     )
     for key in (
@@ -130,11 +134,14 @@ def affinity_telemetry(
         "worker_affinity_errors",
         "worker_affinity_verified",
         "workers_ready",
+        "worker_pool_usable",
+        "worker_affinity_startup_timed_out",
         "coordinator_requested_cpu",
         "coordinator_observed_affinity_cpu",
         "coordinator_affinity_error",
         "coordinator_affinity_verified",
         "coordinator_ready",
+        "coordinator_affinity_startup_timed_out",
     ):
         if key in report:
             telemetry[key] = report[key]

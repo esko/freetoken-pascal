@@ -93,19 +93,63 @@ def test_affinity_telemetry_distinguishes_plan_from_native_verification() -> Non
     assert verified["affinity_status"] == "verified"
     assert verified["native_affinity_status"] == "verified"
     assert verified["worker_observed_affinity_cpus"] == [8]
+    assert verified["flag_sync_requested"] is False
+    assert verified["flag_sync"] is False
     assert verified["flag_sync_applied"] is False
+
+    requested = resolve_cpu_moe_affinity(
+        0,
+        flag_sync=True,
+        topology=_topology((8, 0), (13, 1)),
+    )
+    workers_only = affinity_telemetry(
+        requested,
+        {
+            "status": "verified",
+            "worker_observed_affinity_cpus": [8],
+            "worker_affinity_errors": [0],
+        },
+    )
+    assert workers_only["flag_sync_requested"] is True
+    assert workers_only["flag_sync"] is False
+    applied = affinity_telemetry(
+        requested,
+        {
+            "status": "verified",
+            "worker_observed_affinity_cpus": [8],
+            "worker_affinity_errors": [0],
+            "coordinator_requested_cpu": 13,
+            "coordinator_ready": True,
+        },
+    )
+    assert applied["flag_sync"] is True
+    assert applied["flag_sync_applied"] is True
 
     failed = affinity_telemetry(selection, {"status": "failed", "reason": "EINVAL"})
     assert failed["affinity_status"] == "fallback"
     assert failed["fallback_reason"] == "EINVAL"
 
-    pending = affinity_telemetry(
+    coordinator_failed = affinity_telemetry(
         resolve_cpu_moe_affinity(0, flag_sync=True, topology=_topology((8, 0), (13, 1))),
-        {"status": "pending", "reason": "coordinator affinity startup timed out"},
+        {
+            "status": "failed",
+            "coordinator_affinity_startup_timed_out": True,
+            "reason": "coordinator affinity startup timed out",
+        },
     )
-    assert pending["affinity_status"] == "planned-unverified"
-    assert pending["flag_sync_applied"] is False
-    assert pending["fallback_reason"] == "coordinator affinity startup timed out"
+    assert coordinator_failed["affinity_status"] == "fallback"
+    assert coordinator_failed["flag_sync_requested"] is True
+    assert coordinator_failed["flag_sync"] is False
+    assert coordinator_failed["flag_sync_applied"] is False
+    assert coordinator_failed["fallback_reason"] == "coordinator affinity startup timed out"
+
+    timed_out = affinity_telemetry(
+        selection,
+        {"status": "timed-out", "workers_ready": False, "reason": "worker timeout"},
+    )
+    assert timed_out["affinity_status"] == "fallback"
+    assert timed_out["flag_sync"] is False
+    assert timed_out["fallback_reason"] == "worker timeout"
 
 
 def test_affinity_fallback_reason_is_derived_from_native_error_fields() -> None:
