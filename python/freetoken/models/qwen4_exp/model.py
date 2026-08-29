@@ -116,6 +116,8 @@ class _SparseMoE(Qwen4ExpMoE):
         routed = self.experts.forward(
             hidden_states=hidden_states, router_logits=router_logits, **kwargs
         )
+        if shared_gate_weight is None:
+            return (routed + gate[:, None] * shared).view(num_tokens, hidden_dim)
         return shared_gate_mul_add(routed, shared, gate).view(num_tokens, hidden_dim)
 
 
