@@ -67,6 +67,7 @@ Plans and startup accounting expose source bytes, requested and applied pinned/s
 The NUMA intent is a bounded policy hook in this slice and does not claim physical placement until target-host validation.
 The CLI and `EngineConfig` construct and validate the policy directly.
 Engine serving currently accepts only explicit `pinned` FTW policy; `pageable` and `bounded-staging` remain preflight-only until their serving transfer paths are wired, and unsupported custom-provider or dummy paths reject an explicit policy instead of silently dropping it.
+The opt-in `require_no_swap` guard reads `/proc/self/status`, `/proc/meminfo`, and `/proc/swaps` before policy-owned allocation or FTW index reads. It reports process `VmSwap`, system totals, active devices, probe source/errors, raw `swap_status`, and `no_swap_observed` (`true`, `false`, or `null` when unavailable). Active swap, non-zero process swap, or an unavailable/ambiguous probe fails closed; the guard never runs `swapoff`, changes sysctls, or treats `mmap`/`mlock` behavior as proof of no swap. This is a point-in-time admission check, not a full-model residency guarantee.
 
 The CPU expert boundary is model-agnostic. An immutable layout supplies layer and
 projection identities, expert count and top-k, matrix geometry, native quant type,
@@ -125,6 +126,10 @@ representatives `0-11` and node-1 representatives `12-23`; `numactl --hardware`
 reported local/remote distances of 10/21. This is H0 host-topology evidence only and
 does not claim worker affinity enforcement, memory placement, P4 availability, or
 performance.
+Target-host swap state remains an operational observation rather than a hardware
+claim: if a Gorilla inventory records any active swap device or non-zero `VmSwap`,
+`require_no_swap` is expected to reject the explicit host-bank load. No swap device
+state is inferred from the topology fixture or from allocation behavior.
 
 Issue #16 adds a Torch/CUDA-independent Q4_K adapter at this boundary. It decodes the
 GGML 144-byte, 256-value block layout and uses direct packed-row GEMV for compatible

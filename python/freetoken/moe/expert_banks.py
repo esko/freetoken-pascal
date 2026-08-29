@@ -489,6 +489,15 @@ def load_expert_banks(
             num_layers=model_config.num_moe_layers,
             policy=host_bank_policy,
         )
+        # The policy preflight above is the one admission snapshot for this
+        # load. Thread it into the FTW loader so it does not re-read procfs.
+        if host_bank_policy.require_no_swap:
+            ftw_swap_probe = host_bank_policy.swap_probe
+            assert ftw_swap_probe is not None
+        else:
+            ftw_swap_probe = None
+    else:
+        ftw_swap_probe = None
 
     if is_ftw:
         ftw_kwargs = {
@@ -498,6 +507,8 @@ def load_expert_banks(
         }
         if host_bank_policy is not None:
             ftw_kwargs["host_bank_policy"] = host_bank_policy
+            if ftw_swap_probe is not None:
+                ftw_kwargs["swap_probe"] = ftw_swap_probe
         else:
             ftw_kwargs["layer_residency"] = layer_residency
         banks = load_ftw_banks(model_path, **ftw_kwargs)

@@ -62,6 +62,13 @@ jobs:
         env:
           PYTHONPATH: python
         run: pytest -q tests/moe/test_cpu_topology.py
+      - name: Run host-memory swap probe tests
+        env:
+          PYTHONPATH: python
+        run: |
+          ruff check python/freetoken/moe/host_memory.py tests/moe/test_host_memory.py
+          ruff format --check python/freetoken/moe/host_memory.py tests/moe/test_host_memory.py
+          pytest -q tests/moe/test_host_memory.py
       - name: Lint and test CPU affinity policy
         run: |
           ruff check python/freetoken/moe/cpu_affinity.py tests/moe/test_cpu_affinity.py tests/moe/test_cpu_moe_affinity_native.py

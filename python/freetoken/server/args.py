@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 import torch
+
 from freetoken.distributed import DistributedInfo
 from freetoken.scheduler import SchedulerConfig
 from freetoken.utils import init_logger
@@ -509,6 +510,15 @@ def parse_args(
         ),
     )
     parser.add_argument(
+        "--host-bank-require-no-swap",
+        action="store_true",
+        default=False,
+        help=(
+            "Fail an explicit host-bank preflight when procfs reports active system swap, "
+            "process swap, or an unavailable/ambiguous swap probe."
+        ),
+    )
+    parser.add_argument(
         "--host-bank-max-pinned-bytes",
         type=int,
         default=None,
@@ -716,6 +726,7 @@ def parse_args(
     selected_layers = _parse_layers(kwargs.pop("host_bank_selected_layers"))
     numa_policy = kwargs.pop("host_bank_numa_policy")
     numa_node = kwargs.pop("host_bank_numa_node")
+    require_no_swap = kwargs.pop("host_bank_require_no_swap")
     auxiliary_policy_values = (
         max_pinned is not None,
         max_staging is not None,
@@ -724,6 +735,7 @@ def parse_args(
         selected_layers is not None,
         numa_policy != "preferred",
         numa_node is not None,
+        require_no_swap,
     )
     if strategy is None:
         if any(auxiliary_policy_values):
@@ -748,6 +760,7 @@ def parse_args(
                 selected_layers=selected_layers,
                 numa_policy=numa_policy,
                 numa_node=numa_node,
+                require_no_swap=require_no_swap,
             )
             policy.validate_for_config()
         except (TypeError, ValueError) as exc:
