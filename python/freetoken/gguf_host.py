@@ -801,6 +801,7 @@ class MappedPLETable:
             verify_file_sha256=True,
         )
         table = cls(descriptor, mapping, model_shard_paths=(str(payload),))
+        table.source_kind = "dedicated-artifact"
         try:
             if warm_mode == "full-model-warm":
                 raise ValueError("artifact warm mode is full-ple-warm")

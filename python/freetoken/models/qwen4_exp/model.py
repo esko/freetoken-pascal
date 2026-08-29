@@ -363,7 +363,10 @@ class _HostNGramEmbedding(BaseOP):
                 "source": "dummy" if self._dummy else "safetensors",
                 "mapped_bytes": 0,
             }
-        return {"source": "gguf-mmap", **self._gguf_ple.telemetry()}
+        return {
+            "source": getattr(self._gguf_ple, "source_kind", "gguf-mmap"),
+            **self._gguf_ple.telemetry(),
+        }
 
     def load_host_weights(
         self,
@@ -371,19 +374,27 @@ class _HostNGramEmbedding(BaseOP):
         *,
         dummy: bool = False,
         ple_warm_mode: str = "cold",
+        ple_artifact_path: str | None = None,
     ) -> None:
         if dummy:
             self._dummy = True
             return
         from freetoken.models.gguf.reader import is_gguf_path
 
-        if is_gguf_path(model_path):
+        if ple_artifact_path is not None:
+            from freetoken.gguf_host import MappedPLETable
+
+            self._gguf_ple = MappedPLETable.open_from_artifact(
+                ple_artifact_path, warm_mode=ple_warm_mode
+            )
+        elif is_gguf_path(model_path):
             from freetoken.gguf_host import MappedPLETable
 
             self._gguf_ple = MappedPLETable.open_from_gguf(
                 model_path,
                 warm_mode=ple_warm_mode,
             )
+        if self._gguf_ple is not None:
             self._host_constants = (
                 self.layer_multipliers.cpu(),
                 self.ngram_heads_vocab_sizes.cpu(),
@@ -593,11 +604,13 @@ class _PLELayer(BaseOP):
         *,
         dummy: bool = False,
         ple_warm_mode: str = "cold",
+        ple_artifact_path: str | None = None,
     ) -> None:
         self.ple_embedding.load_host_weights(
             model_path,
             dummy=dummy,
             ple_warm_mode=ple_warm_mode,
+            ple_artifact_path=ple_artifact_path,
         )
 
     def semantic_debug_state(self, batch) -> dict[str, object]:
@@ -938,6 +951,7 @@ class Qwen4ExpModel(BaseOP):
         *,
         dummy: bool = False,
         ple_warm_mode: str = "cold",
+        ple_artifact_path: str | None = None,
     ) -> None:
         for layer in self.layers.op_list:
             if layer.ple is not None:
@@ -945,6 +959,7 @@ class Qwen4ExpModel(BaseOP):
                     model_path,
                     dummy=dummy,
                     ple_warm_mode=ple_warm_mode,
+                    ple_artifact_path=ple_artifact_path,
                 )
 
     def debug_state(self) -> dict[int, dict[str, object]]:
@@ -1110,11 +1125,13 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         *,
         dummy: bool = False,
         ple_warm_mode: str = "cold",
+        ple_artifact_path: str | None = None,
     ) -> None:
         self.model.load_host_weights(
             model_path,
             dummy=dummy,
             ple_warm_mode=ple_warm_mode,
+            ple_artifact_path=ple_artifact_path,
         )
 
     def forward(self) -> torch.Tensor:
