@@ -139,8 +139,9 @@ gate, up, or down descriptors, with a scalar implementation retained as the refe
 and runtime fallback. The optional native helper is loaded from
 `FREETOKEN_Q4K_NATIVE_LIB` or the package extension after AVX2 and FMA capability
 checks; it is split into
-baseline dispatch, baseline scalar, and `-mavx2 -mfma` translation units so the shipping
-baseline does not require newer instructions. A descriptor is eligible only when its
+baseline dispatch, baseline scalar, and an explicitly AVX-512/AMX-disabled
+`-mavx2 -mfma` translation unit so the shipping baseline does not require newer
+instructions. A descriptor is eligible only when its
 quant type and quant name both identify Q4_K and its input width and packed row stride
 match complete 256-value blocks; inconsistent or partial packed descriptors fail closed.
 The Q4 artifact remains heterogeneous: layer 2 gate/up uses Q5_K and the promoted

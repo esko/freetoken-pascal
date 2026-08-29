@@ -20,7 +20,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INCLUDE_DIR = ROOT / "python/freetoken/moe"
 BASELINE_FLAGS = ("-mno-avx", "-mno-avx2", "-mno-fma")
-AVX2_FLAGS = ("-mavx2", "-mfma")
+# Keep the optimized helper usable on Haswell/Pascal hosts even when a caller
+# adds a newer host-wide -march setting.  GCC target attributes add features but
+# do not reliably subtract AVX-512/AMX features inherited from that setting.
+AVX2_FLAGS = (
+    "-mavx2",
+    "-mfma",
+    "-mno-avx512f",
+    "-mno-avx512vl",
+    "-mno-avx512bw",
+    "-mno-avx512cd",
+    "-mno-avx512dq",
+    "-mno-amx-tile",
+    "-mno-amx-int8",
+    "-mno-amx-bf16",
+)
 COMMON_FLAGS = ("-std=c++17", "-O3", "-fPIC")
 
 

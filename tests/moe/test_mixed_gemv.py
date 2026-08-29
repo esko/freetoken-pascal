@@ -32,6 +32,18 @@ _FORMATS = {
     "Q5_K": (Q5_K_BLOCK_ELEMENTS, Q5_K_BLOCK_BYTES),
 }
 _QUANT_TYPES = {"Q5_1": 7, "Q8_0": 8, "Q5_K": 13}
+_AVX2_SAFE_FLAGS = [
+    "-mavx2",
+    "-mfma",
+    "-mno-avx512f",
+    "-mno-avx512vl",
+    "-mno-avx512bw",
+    "-mno-avx512cd",
+    "-mno-avx512dq",
+    "-mno-amx-tile",
+    "-mno-amx-int8",
+    "-mno-amx-bf16",
+]
 _DECODERS = {
     "Q5_1": decode_q5_1_block,
     "Q8_0": decode_q8_0_block,
@@ -194,9 +206,11 @@ def mixed_native_library(tmp_path_factory: pytest.TempPathFactory) -> Path | Non
     baseline_flags = ["-mno-avx", "-mno-avx2", "-mno-fma"]
     for name, path, extra in (
         ("scalar", scalar, baseline_flags),
-        ("avx2", avx2, ["-mavx2", "-mfma"]),
+        ("avx2", avx2, _AVX2_SAFE_FLAGS),
         ("dispatch", source, baseline_flags),
-        ("avx2_native", avx2, ["-march=native"]),
+        # Native tuning is allowed, but the optimized object must remain
+        # strictly AVX2/FMA-only for the Haswell deployment contract.
+        ("avx2_native", avx2, ["-march=native", *_AVX2_SAFE_FLAGS]),
         # Package builds may inherit CXXFLAGS from a host toolchain.  Verify
         # the source-level baseline fence also wins over -march=native.
         ("scalar_native", scalar, ["-march=native"]),
