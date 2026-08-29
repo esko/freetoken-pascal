@@ -181,6 +181,11 @@ worker CPUs, per-worker affinity errors, and `planned-unverified`, `verified`,
 the bridge never changes the owner mask or claims NUMA placement.
 It rejects GPU, hybrid, offload, nonzero-cache, prefill, grouped, and closed-mapping requests before execution.
 The CUDA `Engine` registration seam fails closed for Qwen GGUF rather than constructing the homogeneous `OffloadMoeCache`.
+An initialized Engine exposes an explicit `attach_qwen_gguf_cpu_expert_bundle()` seam
+for a caller-owned bundle when the model is already TP1, cache-free, and configured for
+one request.  It installs the existing eager bridge wrappers and detaches them during
+cleanup, but does not open weights, change startup or CLI defaults, enable prefill, or
+weaken the homogeneous-cache guard.
 The standalone `QwenGGUFCpuMoELayer` adapts one layer's bundle to the existing routed-expert
 interface for H0 CPU decode probes. It accepts explicit CPU router logits or a precomputed
 CPU route, preserves full-softmax and observer semantics (Qwen's default is no selected-

@@ -1082,8 +1082,66 @@ class Engine:
         torch.distributed.destroy_process_group()
         destroy_distributed()
 
+    def attach_qwen_gguf_cpu_expert_bundle(
+        self,
+        bundle: Any,
+        *,
+        transfer: Any = None,
+    ) -> None:
+        """Explicitly attach a borrowed Qwen GGUF CPU bridge to this Engine model.
+
+        This seam is intentionally not part of Engine startup or CLI defaults.  It
+        is limited to a Qwen GGUF model with TP1, no homogeneous cache, and the
+        existing model attachment's decode/group restrictions.  The caller retains
+        ownership of ``bundle`` and must keep it open until after ``shutdown``.
+        """
+        config = getattr(self, "config", None)
+        if config is None:
+            raise RuntimeError("Qwen GGUF CPU Engine attachment requires an initialized Engine")
+        _validate_qwen_gguf_cpu_engine_config(config)
+        if getattr(self, "moe_offload_cache", None) is not None:
+            raise ValueError(
+                "Qwen GGUF CPU Engine attachment requires no homogeneous OffloadMoeCache"
+            )
+        if getattr(self, "_gguf_cpu_expert_bundle", None) is not None:
+            raise RuntimeError("Qwen GGUF CPU expert bundle is already attached to this Engine")
+        attach = getattr(self.model, "attach_gguf_cpu_eager_bridge", None)
+        if not callable(attach):
+            raise TypeError(
+                "Qwen GGUF CPU Engine requires a model with "
+                "attach_gguf_cpu_eager_bridge()"
+            )
+        attach(bundle, transfer=transfer)
+        self._gguf_cpu_expert_bundle = bundle
+        logger.info_rank0(
+            "Attached explicit Qwen GGUF CPU expert bridge to Engine: "
+            f"cache_size=0 TP=1 decode-only threads="
+            f"{getattr(bundle, 'effective_num_threads', '?')}"
+        )
+
+    def gguf_cpu_expert_telemetry(self) -> dict[int, dict[str, object]]:
+        """Return telemetry from the explicitly attached Qwen GGUF CPU bridges."""
+        model = getattr(self, "model", None)
+        telemetry = getattr(model, "gguf_cpu_expert_telemetry", None)
+        if not callable(telemetry):
+            return {}
+        value = telemetry()
+        return value if isinstance(value, dict) else {}
+
     def _cleanup_host_bank_resources(self) -> None:
         """Release cache/executor tensor references before closing mmap-backed banks."""
+        bundle = getattr(self, "_gguf_cpu_expert_bundle", None)
+        if bundle is not None:
+            try:
+                detach = getattr(self.model, "detach_gguf_cpu_expert_bundle", None)
+                if callable(detach):
+                    detach()
+            except BaseException as error:
+                logger.error(f"Qwen GGUF CPU bridge detach failed: {error}")
+            finally:
+                # The bundle is borrowed, matching the model-level attachment
+                # contract.  Cleanup only detaches the Engine-owned wrappers.
+                self._gguf_cpu_expert_bundle = None
         cache = getattr(self, "moe_offload_cache", None)
         if cache is not None:
             cache.cpu_executor = None
@@ -1278,6 +1336,33 @@ def _is_qwen_gguf_expert_config(model_config) -> bool:
     )
 
 
+def _validate_qwen_gguf_cpu_engine_config(config: EngineConfig) -> None:
+    """Validate the deliberately narrow Engine-side GGUF CPU contract."""
+    model_config = getattr(config, "model_config", None)
+    if not _is_qwen_gguf_expert_config(model_config):
+        raise ValueError(
+            "--moe-backend gguf_cpu requires a Qwen4-Exp GGUF model "
+            "(model_type='qwen4_exp', expert_quant='gguf')"
+        )
+    tp_info = getattr(config, "tp_info", None)
+    if tp_info is None or int(getattr(tp_info, "size", 0)) != 1:
+        size = "unknown" if tp_info is None else getattr(tp_info, "size", "unknown")
+        raise ValueError(f"Qwen GGUF CPU Engine requires TP=1, got {size}")
+    if int(getattr(config, "max_running_req", 1)) != 1:
+        raise ValueError("Qwen GGUF CPU Engine supports one decode request at a time")
+    if int(getattr(config, "moe_cache_size", 0)) != 0:
+        raise ValueError("Qwen GGUF CPU Engine requires cache_size=0")
+    if bool(getattr(config, "moe_cache_auto", False)):
+        raise ValueError("Qwen GGUF CPU Engine requires cache_size=0; auto sizing is unsupported")
+    if getattr(config, "moe_cache_rate", None) not in (None, 0, 0.0):
+        raise ValueError("Qwen GGUF CPU Engine requires cache_size=0; cache rate is unsupported")
+    if getattr(config, "moe_cpu_layers", None) not in (None, ""):
+        raise ValueError("Qwen GGUF CPU Engine owns every layer; moe_cpu_layers is unsupported")
+    threads = getattr(config, "moe_cpu_threads", 0)
+    if isinstance(threads, bool) or not isinstance(threads, int) or threads < 0:
+        raise ValueError(f"Qwen GGUF CPU Engine moe_cpu_threads must be non-negative, got {threads!r}")
+
+
 def _guard_qwen_gguf_engine_setup(config: EngineConfig) -> None:
     """Reject the homogeneous engine cache until its layer ABI can consume GGUF banks.
 
@@ -1396,6 +1481,24 @@ def _adjust_config(config: EngineConfig):
                 f"{getattr(model_config, 'model_type', 'model')} is a dense model (no routed "
                 f"experts); ignoring MoE settings: {', '.join(dropped)}"
             )
+
+    if config.moe_backend == "gguf_cpu":
+        # This opt-in backend owns a mapped heterogeneous GGUF bundle rather than
+        # the generic GPU slot cache.  Keep the contract explicit before any
+        # cache-sizing or CPU-layer policy can reinterpret the request.
+        _validate_qwen_gguf_cpu_engine_config(config)
+        override("moe_cache_size", 0)
+        override("moe_cache_auto", False)
+        override("moe_cache_rate", None)
+        override("moe_cpu_layers", None)
+        override("moe_prefill_overlap", False)
+        override("max_running_req", 1)
+        override("cuda_graph_bs", [])
+        override("cuda_graph_max_bs", 0)
+        logger.info_rank0(
+            "Qwen GGUF CPU Engine mode is decode-only: forcing one request, "
+            "cache_size=0, and disabling CUDA graphs/prefill overlap"
+        )
 
     if single_stream_only:
         # The model runs one sequence at a time: it collapses the batch to one row and the

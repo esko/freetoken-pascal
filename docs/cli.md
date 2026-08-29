@@ -101,6 +101,12 @@ Pin/read-back failure drains the request and reruns the serial reference path;
 telemetry reports the requested and observed CPUs, errors, and explicit fallback.
 Caller-supplied pools are not accepted with this explicit plan.  This is an H0
 CPU-affinity check only; it does not change the owner mask or claim NUMA placement.
+The Engine exposes the same bridge as an explicit integration seam for an already
+initialized TP1/cache-free Engine model through
+`Engine.attach_qwen_gguf_cpu_expert_bundle()`.  This method borrows the caller's
+bundle, installs the eager bridge wrappers, and detaches them during Engine cleanup;
+it does not open GGUF weights, alter Engine startup, register a CLI backend, or
+claim prefill, serving, CUDA-transfer, P4, H2, or H3 support.
 
 For the compiled CPU/hybrid executor, `0` plans one worker per visible physical
 core using the process affinity mask and a positive count is exact; requests above

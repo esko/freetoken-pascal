@@ -57,6 +57,11 @@ The standalone Qwen GGUF CPU bridge is decode-only and owns its mapped host weig
 life of its heterogeneous CPU layout and Q4 executor. The CUDA engine rejects this GGUF
 combination until the production layer ABI can consume per-projection mappings without a
 homogeneous GPU cache; this is an integration blocker, not a hardware-performance claim.
+An initialized Engine may explicitly borrow the same bundle through
+`Engine.attach_qwen_gguf_cpu_expert_bundle()` after its model is available, provided the
+registration is TP1, cache-free, and one-request. The Engine only detaches its owned
+bridge wrappers during cleanup; the caller closes the bundle. Startup, CLI defaults,
+GGUF opening, prefill, serving and the homogeneous-cache guard remain unchanged.
 
 The H0 `QwenGGUFCpuMoELayer` is an explicit CPU-only adapter around that bundle. It
 supports routed decode with the existing full-softmax Torch reference when CPU router
