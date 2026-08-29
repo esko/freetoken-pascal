@@ -30,6 +30,10 @@ Runs on GitHub-hosted Linux without a GPU:
 - source-provenance checks;
 - tiny model/config conversion;
 - deterministic state serialization without CUDA.
+- dedicated PLE shard format and separation from unrelated model tensors;
+- mmap/positional-read parity, batched deduplication and sorting, asynchronous prefetch and cancellation;
+- deterministic page-cache/major-fault metric parsing with synthetic counters;
+- routing simulation, quant conversion and mixed-precision quality A/B fixtures.
 
 Issue #18 also provides a bounded host-resource lifecycle observation:
 
@@ -66,7 +70,7 @@ Runs in a CUDA 12.6 build container, GPU optional:
 - device kernel parity for every supported quant/shape;
 - tiny model end-to-end generation;
 - one-P4 Qwen3.8 short-context correctness;
-- PLE warm/cold behavior;
+- independent PLE cold-cache, warm-cache, major-page-fault and steady-state behavior for mmap and positional-read backends;
 - file-backed PLE first/middle/last row parity, invalid index/range/hash failures and
   page-fault/storage-read telemetry;
 - cache size zero and static-cache behavior;
@@ -75,7 +79,7 @@ Runs in a CUDA 12.6 build container, GPU optional:
 
 ### H3 — dual P4
 
-- TP/layer ownership correctness;
+- disjoint routed-expert ownership correctness before conventional TP/layer-ownership comparison;
 - per-rank expert/source placement;
 - no unintended cross-GPU expert transfer;
 - NUMA policy comparison;
@@ -83,6 +87,7 @@ Runs in a CUDA 12.6 build container, GPU optional:
 - 32K and 128K state correctness;
 - cancellation and restart;
 - deterministic fallback when one optimization is disabled.
+- mixed-precision quality gates for routing, long-context retrieval, tool calls and structured output.
 
 ### H4 — release
 
@@ -184,6 +189,8 @@ The H0 fixture suite validates this evidence protocol and the prompt materialize
 Qwen3.8 model parity. Issue #14 remains open until real-P4 H2 runs attach independent router, GDN,
 QSA, PLE, continuation-token, and selected-logit evidence for short, incremental, chunked,
 reset, checkpoint/restore, 32K, 128K, and 262K qualification cases.
+
+Every mixed-precision candidate preserves exact routed expert IDs on the fixed routing corpus and meets recorded output tolerances for long-context retrieval, tool-call selection/arguments and structured JSON. These gates compare against the declared reference recipe and are reported separately from token-level numerical tolerances.
 
 ## Test artifacts
 

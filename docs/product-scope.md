@@ -2,7 +2,7 @@
 
 ## Product statement
 
-FreeToken-Pascal v1 is a downstream FreeToken runtime optimized for **text-only Qwen3.8-Flash-Next inference on a dual NVIDIA Tesla P4 server**. It is designed for a large host-memory, small-VRAM system where the complete low-bit expert bank remains available in RAM while the GPUs accelerate the continuously active model path and a dynamically selected hot subset of routed experts.
+FreeToken-Pascal v1 is a downstream FreeToken runtime optimized for **text-only Qwen3.8-Flash-Next inference on a dual NVIDIA Tesla P4 server**. It is designed as a three-tier system where NVMe holds the dedicated PLE/N-gram shards, DDR4 holds the complete quantized expert bank and the Linux page cache for hot PLE rows, and the GPUs accelerate dense latency-critical work plus a dynamically selected hot subset of routed experts.
 
 The product is not a generic inference platform. Its v1 purpose is to maximize reliable throughput on the owner's actual server without changing the model topology or sacrificing experts.
 
@@ -12,7 +12,7 @@ The product is not a generic inference platform. Its v1 purpose is to maximize r
 - 2 × Intel Xeon E5-2673 v3, 24 physical cores / 48 threads total
 - approximately 128 GB ECC DDR4, 8 memory channels across two NUMA nodes
 - 2 × Tesla P4, 8 GB each, Pascal `sm_61` — **not installed yet**
-- 1 TB PCIe M.2 NVMe for model and PLE storage
+- 1 TB PCIe M.2 NVMe for immutable model files and the dedicated PLE/N-gram file or shard set
 - Ubuntu Server 26.04 LTS
 - CUDA 12.6-class toolchain required for Pascal
 - no NVLink; PCIe/NUMA topology must be measured after installation
@@ -36,8 +36,11 @@ The product is not a generic inference platform. Its v1 purpose is to maximize r
 - at least one smaller 3-bit artifact for comparison
 - heterogeneous quant types across ordinary tensors and expert layers
 - expert gate/up and down banks may use different quant types
-- PLE mmap-backed from NVMe with explicit warm/cold controls
+- dedicated contiguous PLE/N-gram shards as a core v1 path, with explicit mmap and positional-read backends
+- batched, deduplicated, offset-sorted PLE reads and bounded asynchronous prefetch
+- Linux page-cache residency for frequently accessed PLE rows without permanently pinning the full table
 - exact tensor census and model checksums recorded for every benchmark
+- Q4, Q5, Q8, and CPU-format candidates benchmarked on actual P4s before any final quantization recipe is selected
 
 ### Execution
 
@@ -46,6 +49,7 @@ The product is not a generic inference platform. Its v1 purpose is to maximize r
 - one-P4 bring-up mode
 - dual-P4 release mode
 - deterministic layer ownership per GPU
+- disjoint expert ownership tested across the two P4s before conventional tensor parallelism
 - fixed-address per-GPU expert cache
 - LFRU or measured successor policy
 - asynchronous cache fill
@@ -61,6 +65,8 @@ The product is not a generic inference platform. Its v1 purpose is to maximize r
 - streaming, cancellation and bounded request resources
 - one primary interactive request; limited concurrency may be supported but is not the primary optimization target
 - metrics for cache hits, misses, evictions, CPU/GPU expert counts, transfer bytes/times, scheduler decisions, NUMA placement, PP/TG and memory
+- independent PLE metrics for cold cache, warm cache, major page faults, steady-state latency, backend, batching, deduplication, sorting, and prefetch
+- explicit storage-tier and residency metrics for NVMe PLE, DDR4 expert bank/page cache, and P4 dense/shared/runtime/hot-cache allocations
 - reproducible benchmark commands and machine-readable results
 - Docker/Compose deployment compatible with the server's standard stack
 - crash-safe logs and actionable unsupported-configuration errors

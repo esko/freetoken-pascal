@@ -14,14 +14,14 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 | P1 | [#10](https://github.com/esko/freetoken-pascal/issues/10) | FreeToken Pascal/CUDA 12.6 support | H1/H2 |
 | P1 | [#11](https://github.com/esko/freetoken-pascal/issues/11) | Qwen3.8/Qwen4 text architecture | H0-H2 |
 | P1 | [#12](https://github.com/esko/freetoken-pascal/issues/12) | Safe GGUF K/I loader and tensor census | H0-H2 |
-| P1 | [#13](https://github.com/esko/freetoken-pascal/issues/13) | Heterogeneous expert pools and PLE mmap | H0-H2 |
+| P1 | [#13](https://github.com/esko/freetoken-pascal/issues/13) | Dedicated NVMe PLE format, mmap/pread I/O, batching, prefetch and heterogeneous expert pools | H0-H2 |
 | P1 | [#14](https://github.com/esko/freetoken-pascal/issues/14) | Independent short/long-context reference | H0/H2 |
 | P2 | [#15](https://github.com/esko/freetoken-pascal/issues/15) | Model-agnostic CPU expert ABI | H0 |
 | P2 | [#16](https://github.com/esko/freetoken-pascal/issues/16) | AVX2 Q4_K expert kernels | H0/target CPU |
 | P2 | [#17](https://github.com/esko/freetoken-pascal/issues/17) | Census-required Q2/Q3/IQ CPU formats | H0/target CPU |
 | P2 | [#18](https://github.com/esko/freetoken-pascal/issues/18) | NUMA-aware host banks and bounded pinning | H0/H3 |
-| P3 | [#19](https://github.com/esko/freetoken-pascal/issues/19) | PXA/PXQ `sm_61` GPU expert backend | H1/H2 |
-| P3 | [#20](https://github.com/esko/freetoken-pascal/issues/20) | Qwen4 TP=2 and dual-P4 ownership | H0/H3 |
+| P3 | [#19](https://github.com/esko/freetoken-pascal/issues/19) | Pascal DP4A and format-tuned GPU expert backend | H1/H2 |
+| P3 | [#20](https://github.com/esko/freetoken-pascal/issues/20) | Disjoint dual-P4 expert ownership before TP=2 comparison | H0/H3 |
 | P3 | [#38](https://github.com/esko/freetoken-pascal/issues/38) | Fused Qwen3.8 `topk=10` Pascal router | H0-H2 |
 | P3 | [#21](https://github.com/esko/freetoken-pascal/issues/21) | Fixed cache and correct mixed partial merge | H0-H3 |
 | P3 | [#22](https://github.com/esko/freetoken-pascal/issues/22) | Async LFRU, persisted heat and telemetry | H0-H3 |
@@ -39,7 +39,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 #5 → #7 → #10 → #11 → #12 → #13 → #14
                     └→ #15 → #16 → #18
                          #12 → #19
-#9 + #11 → #20
+#9 + #11 + #13 → #20
 #16 + #19 + #20 → #21
 #14 → #38
 #21 + #38 → #22 → #23 → #24 → #25
@@ -50,7 +50,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 
 ## Work possible before P4 arrival
 
-The orchestrator should prioritize H0/H1 portions of #5–#8, #10–#19 and #38, plus the pure logic/tests in #20–#25. Issues #9 and #29 are explicitly blocked. Other issues remain open until their H2/H3 evidence is attached, even when their hosted implementation is ready.
+The orchestrator should prioritize H0/H1 portions of #5–#8, #10–#19 and #38, plus the pure logic/tests in #20–#25. This includes the PLE file format, both storage backends, batching, prefetch, CPU expert execution, routing simulation, quant conversion, metrics and correctness A/B tests. Issues #9 and #29 are explicitly blocked. DP4A tuning and selection between disjoint ownership and conventional TP remain H2/H3 work, and other issues remain open until their required hardware evidence is attached.
 
 ## Completeness audit
 
@@ -61,11 +61,12 @@ The v1 backlog includes explicit work and acceptance evidence for:
 - hosted, compile and hardware CI;
 - loader/converter and malformed-file correctness;
 - Qwen4 GDN/QSA/hyperconnection/PLE semantics;
-- heterogeneous expert bank types and PLE NVMe/page cache;
+- heterogeneous expert bank types resident in DDR4 and a dedicated NVMe PLE layout served through the Linux page cache;
+- mmap and positional-read PLE backends with batched, deduplicated, sorted reads and asynchronous prefetch;
 - AVX2 CPU fallback and required low-bit formats;
 - Pascal GPU kernel parity;
 - exact full-softmax `topk=10` router parity and fallback;
-- one-GPU bring-up and two-GPU ownership;
+- one-GPU bring-up and disjoint two-GPU expert ownership before conventional TP comparison;
 - cache-zero, static cache, async fill and current-step hybrid merge;
 - contention-aware scheduling and safe pure fallbacks;
 - prefill wider than cache capacity;

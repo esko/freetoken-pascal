@@ -19,23 +19,24 @@ This document describes the intended release operation. Commands become authorit
   compose.yaml
   config/
   models/
+  ple/
   cache/
   results/
   logs/
 ```
 
-PLE and model shards stay on NVMe. Benchmark results and cache heat must not be stored in the Git repository.
+Model and dedicated PLE shards stay on NVMe, but PLE shards live in their own directory and contain no unrelated model tensors. The complete quantized expert bank is loaded into DDR4 for serving. The full PLE is not permanently pinned; Linux may use spare DDR4 as page cache. Benchmark results and cache heat must not be stored in the Git repository.
 
 ## Startup sequence
 
 1. Validate driver, GPU count and compute capability.
 2. Validate model checksum and tensor census.
-3. Validate available RAM, VRAM and pinned-memory budget. For an explicit host-bank policy, add `--host-bank-require-no-swap` to fail closed on active swap, process `VmSwap`, or an unavailable/ambiguous procfs probe; this is a point-in-time admission check and performs no host swap mutation. For NUMA placement, opt in separately with `--host-bank-enforce-numa-placement`; inspect `numa_status`, target/allowed nodes, applied mappings, and any fallback reason in startup accounting. This is mapping placement telemetry, not a complete residency or affinity guarantee.
-4. Read `--ple-warm-mode` and confirm the logged PLE source, mapping and warm policy.
+3. Validate available RAM, VRAM and pinned-memory budget, including capacity for the complete quantized expert bank in DDR4 without pinning the full PLE. For an explicit host-bank policy, add `--host-bank-require-no-swap` to fail closed on active swap, process `VmSwap`, or an unavailable/ambiguous procfs probe; this is a point-in-time admission check and performs no host swap mutation. For NUMA placement, opt in separately with `--host-bank-enforce-numa-placement`; inspect `numa_status`, target/allowed nodes, applied mappings, and any fallback reason in startup accounting. This is mapping placement telemetry, not a complete residency or affinity guarantee.
+4. Read the selected PLE mmap or positional-read backend and warm policy, then confirm the logged dedicated shard identity, row geometry and absence of unrelated tensors.
 5. Run startup microbench/autotune or load a hardware-profile cache tied to exact checksums.
 6. Log selected CPU/GPU kernels, layer ownership, cache slots and NUMA policy.
 7. Start the API health endpoint.
-8. Optionally request targeted, PLE readahead or explicit full-model warming before readiness.
+8. Optionally request bounded targeted PLE readahead before readiness; do not lock or eagerly retain the entire PLE in RAM.
 9. Serve traffic only after a short deterministic self-test.
 
 ## Health
@@ -70,6 +71,8 @@ The release must document:
 - Docker memory and shared-memory settings;
 - request body and output limits;
 - timeout and cancellation behavior.
+
+Operational dashboards report PLE cold/warm phase, major faults, block-device reads, logical versus unique rows, coalesced ranges and prefetch effectiveness separately from expert-bank residency. Startup backing for expert files does not authorize steady-state SSD expert execution unless the experimental mode is explicitly selected and logged.
 
 For H0 host-resource lifecycle diagnostics, run the bounded observation with an outer
 supervisor timeout, for example `timeout 60s make stress-host-resources`. The default
