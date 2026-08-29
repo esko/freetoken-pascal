@@ -262,14 +262,12 @@ class QwenGGUFCpuExpertBundle:
             grouped=grouped,
         )
         if _resolved_thread_policy is None:
-            requested_num_threads, effective_num_threads, worker_plan = (
-                _resolve_bridge_worker_plan(num_threads)
+            requested_num_threads, effective_num_threads, worker_plan = _resolve_bridge_worker_plan(
+                num_threads
             )
         else:
             try:
-                requested_num_threads, effective_num_threads, worker_plan = (
-                    _resolved_thread_policy
-                )
+                requested_num_threads, effective_num_threads, worker_plan = _resolved_thread_policy
             except (TypeError, ValueError) as error:
                 raise UnsupportedGGUFCpuConfiguration(
                     "invalid pre-resolved Qwen GGUF CPU bridge thread policy"

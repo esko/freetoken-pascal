@@ -695,6 +695,42 @@ def test_cancellation_callback_runs_only_on_owner_thread(monkeypatch: pytest.Mon
     assert callback_threads and set(callback_threads) == {owner}
 
 
+def test_cancellation_callback_cannot_deadlock_by_closing_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_native(monkeypatch)
+    executor = Q4KExecutor(_layout(), mode="avx2", num_threads=2, required_alignment=1)
+    executor.prepare(1, 2)
+    hidden, ids, weights = _inputs(tokens=1, routes=2)
+    close_errors: list[RuntimeError] = []
+
+    def cancellation() -> bool:
+        try:
+            executor.close()
+        except RuntimeError as error:
+            close_errors.append(error)
+        return False
+
+    execution_errors: list[BaseException] = []
+    execution = threading.Thread(
+        target=lambda: _capture_exception(
+            execution_errors,
+            executor.execute,
+            0,
+            hidden,
+            ids,
+            weights,
+            cancellation=cancellation,
+        )
+    )
+    execution.start()
+    execution.join(2.0)
+    assert not execution.is_alive()
+    assert close_errors and "executing thread" in str(close_errors[0])
+    assert execution_errors == []
+    executor.close()
+
+
 def test_transient_owner_cancellation_is_not_lost(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_native(monkeypatch)
     executor = Q4KExecutor(

@@ -1002,6 +1002,7 @@ class _ThreadedMixedRunner:
         self.max_threads = owner.num_threads
         self._worker_plan = getattr(owner, "worker_plan", None)
         self._affinity_lock = threading.Lock()
+        self._admission_owner_thread: int | None = None
         self._affinity_next = 0
         self._affinity_observed: dict[int, int] = {}
         self._affinity_errors: dict[int, str] = {}
@@ -1231,6 +1232,7 @@ class _ThreadedMixedRunner:
                 raise InvalidRequest("Q4_K executor is closed")
             raise self._busy(started)
         try:
+            self._admission_owner_thread = threading.get_ident()
             if self._closed:
                 raise InvalidRequest("Q4_K executor is closed")
             plan = self.owner._reference.prepare(max_tokens, max_routes)
@@ -1267,6 +1269,7 @@ class _ThreadedMixedRunner:
             self._invalidate_prepared_state()
             raise
         finally:
+            self._admission_owner_thread = None
             self._lock.release()
 
     def _serial(self, *args: Any, **kwargs: Any) -> CpuExecutionResult:
@@ -1356,6 +1359,7 @@ class _ThreadedMixedRunner:
                 raise InvalidRequest("Q4_K executor is closed")
             raise self._busy(started)
         try:
+            self._admission_owner_thread = threading.get_ident()
             if self._closed:
                 raise InvalidRequest("Q4_K executor is closed")
             selected_threads = (
@@ -1639,6 +1643,7 @@ class _ThreadedMixedRunner:
             _clear_output(result_output)
             raise wrapped from error
         finally:
+            self._admission_owner_thread = None
             self._lock.release()
 
     def execute_group(
@@ -1793,6 +1798,8 @@ class _ThreadedMixedRunner:
         return tuple(samples)
 
     def close(self) -> None:
+        if self._admission_owner_thread == threading.get_ident():
+            raise RuntimeError("Q4_K executor cannot close from its executing thread")
         with self._lock:
             if self._closed:
                 return

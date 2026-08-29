@@ -291,9 +291,7 @@ def test_open_rejects_thread_plan_before_host_mapping(monkeypatch: pytest.Monkey
         lambda *_args, **_kwargs: pytest.fail("host mapping must not start"),
     )
     with pytest.raises(ValueError, match="physical-core capacity of 2"):
-        bridge.open_qwen_gguf_cpu_expert_bundle(
-            "/does/not/exist.gguf", top_k=1, num_threads=3
-        )
+        bridge.open_qwen_gguf_cpu_expert_bundle("/does/not/exist.gguf", top_k=1, num_threads=3)
 
 
 def test_open_passes_one_resolved_plan_to_bundle_factory(
@@ -337,9 +335,7 @@ def test_open_passes_one_resolved_plan_to_bundle_factory(
         "from_host",
         staticmethod(from_host),
     )
-    result = bridge.open_qwen_gguf_cpu_expert_bundle(
-        "/synthetic.gguf", top_k=1, num_threads=2
-    )
+    result = bridge.open_qwen_gguf_cpu_expert_bundle("/synthetic.gguf", top_k=1, num_threads=2)
     assert result is sentinel
     assert discoveries == 1
     resolved = captured["_resolved_thread_policy"]
@@ -428,7 +424,21 @@ def test_bundle_reports_serial_fallback_when_threading_is_ineligible(
 
     from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
 
-    monkeypatch.setattr("freetoken.moe.gguf_cpu._affinity_visible_physical_core_count", lambda: 4)
+    topology = CpuTopology(
+        allowed_cpus=(40, 42, 44, 46),
+        cores=tuple(
+            PhysicalCore(
+                key=f"core-{cpu}",
+                representative=cpu,
+                logical_cpus=(cpu,),
+                siblings=(cpu,),
+            )
+            for cpu in (40, 42, 44, 46)
+        ),
+        confidence="full",
+        source="synthetic",
+    )
+    monkeypatch.setattr("freetoken.moe.gguf_cpu.discover_cpu_topology", lambda: topology)
     bundle = QwenGGUFCpuExpertBundle.from_host(
         _host(), top_k=1, mode="scalar", num_threads=4, required_alignment=1
     )
