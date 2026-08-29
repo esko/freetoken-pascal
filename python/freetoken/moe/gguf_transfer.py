@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Any, Protocol
 
@@ -89,6 +89,25 @@ def _element_bytes(value: Any) -> int:
         return 0
 
 
+@dataclass
+class _RequestProgress:
+    """Mutable, request-local facts retained when an eager call fails."""
+
+    started: int
+    phase: str | None
+    group_size: int | None
+    input_device: str | None = None
+    input_dtype: str | None = None
+    output_device: str | None = None
+    output_dtype: str | None = None
+    transfers: list[str] = field(default_factory=list)
+    transfer_bytes: int = 0
+    transfer_attempted: bool = False
+    cpu_execution_count: int = 0
+    adapter_started: bool = False
+    adapter_completed: bool = False
+
+
 @dataclass(frozen=True)
 class GGUFEagerBridgeTelemetry:
     """Request-scoped facts from one eager bridge attempt."""
@@ -106,6 +125,8 @@ class GGUFEagerBridgeTelemetry:
     transfer_count: int
     transfer_bytes: int
     cpu_execution_count: int
+    adapter_started: bool
+    adapter_completed: bool
     adapter_telemetry: Mapping[str, object] | None = None
     fallback_reason: str | None = None
     error: str | None = None
@@ -127,6 +148,8 @@ class GGUFEagerBridgeTelemetry:
             "transfer_count": self.transfer_count,
             "transfer_bytes": self.transfer_bytes,
             "cpu_execution_count": self.cpu_execution_count,
+            "adapter_started": self.adapter_started,
+            "adapter_completed": self.adapter_completed,
             "adapter_telemetry": (
                 None if self.adapter_telemetry is None else dict(self.adapter_telemetry)
             ),
@@ -181,7 +204,6 @@ class GGUFCpuEagerBridge:
         self._closed = False
         self._last_telemetry: GGUFEagerBridgeTelemetry | None = None
         self._last_error_telemetry: GGUFEagerBridgeTelemetry | None = None
-        self._request_adapter_called = False
 
     @property
     def layer(self) -> Any:
@@ -289,6 +311,11 @@ class GGUFCpuEagerBridge:
         method: str,
     ) -> Any:
         started = time.perf_counter_ns()
+        progress = _RequestProgress(
+            started=started,
+            phase=phase,
+            group_size=(int(group_size) if isinstance(group_size, Integral) else None),
+        )
         self._begin_request()
         try:
             self._validate_request_mode(
@@ -299,14 +326,19 @@ class GGUFCpuEagerBridge:
             )
             inputs = (hidden_states, *route_inputs)
             for index, value in enumerate(inputs):
+                if value is None:
+                    raise TypeError(f"eager bridge input {index} cannot be None")
                 _device(value)
                 _dtype(value)
                 _shape(value)
-                if value is None:
-                    raise TypeError(f"eager bridge input {index} cannot be None")
             if not self._lock.acquire(blocking=False):
                 raise GGUFEagerBridgeBusy("GGUF eager bridge is busy with another request")
             try:
+                # Validation intentionally precedes admission so unsupported calls never
+                # perform a transfer. The closed check must remain under this lock: a
+                # request validated before close() must not execute after close() wins.
+                if self._closed:
+                    raise RuntimeError("GGUF eager bridge is closed")
                 return self._execute_locked(
                     hidden_states,
                     route_inputs,
@@ -315,7 +347,7 @@ class GGUFCpuEagerBridge:
                     num_token_non_padded=num_token_non_padded,
                     debug_observer=debug_observer,
                     method=method,
-                    started=started,
+                    progress=progress,
                 )
             finally:
                 self._lock.release()
@@ -323,9 +355,7 @@ class GGUFCpuEagerBridge:
             telemetry = self._make_error_telemetry(
                 error,
                 hidden_states=hidden_states,
-                phase=phase,
-                group_size=group_size,
-                started=started,
+                progress=progress,
             )
             self._last_telemetry = None
             self._last_error_telemetry = telemetry
@@ -341,11 +371,13 @@ class GGUFCpuEagerBridge:
         num_token_non_padded: int | None,
         debug_observer: Callable[[str, dict[str, object]], None] | None,
         method: str,
-        started: int,
+        progress: _RequestProgress,
     ) -> Any:
         original_device = _device(hidden_states)
         original_dtype = _dtype(hidden_states)
         original_shape = _shape(hidden_states)
+        progress.input_device = str(original_device)
+        progress.input_dtype = str(original_dtype)
         names = (
             ("hidden_states", "router_logits")
             if method == "forward"
@@ -363,9 +395,13 @@ class GGUFCpuEagerBridge:
             if _device_type(_device(value)) == "cpu":
                 cpu_value = value
             else:
+                progress.transfer_attempted = True
                 cpu_value = self._transfer.to_cpu(value, name=name)
-                transfers.append(f"{name}:to_cpu")
+                completed_transfer = f"{name}:to_cpu"
+                transfers.append(completed_transfer)
                 transfer_bytes += _element_bytes(value) * self._numel(value)
+                progress.transfers.append(completed_transfer)
+                progress.transfer_bytes += _element_bytes(value) * self._numel(value)
             if _device_type(_device(cpu_value)) != "cpu":
                 raise RuntimeError(f"transfer seam returned non-CPU {name}: {_device(cpu_value)}")
             if _shape(cpu_value) != _shape(value):
@@ -381,7 +417,8 @@ class GGUFCpuEagerBridge:
             cpu_inputs.append(cpu_value)
 
         adapter = getattr(self._layer, method)
-        self._request_adapter_called = True
+        progress.adapter_started = True
+        progress.cpu_execution_count = 1
         if method == "forward":
             result = adapter(
                 cpu_inputs[0],
@@ -401,6 +438,9 @@ class GGUFCpuEagerBridge:
                 phase=phase,
                 group_size=group_size,
             )
+        progress.adapter_completed = True
+        progress.output_device = str(_device(result))
+        progress.output_dtype = str(_dtype(result))
         if _device_type(_device(result)) != "cpu":
             raise RuntimeError(f"CPU GGUF adapter returned a non-CPU result: {_device(result)}")
         if _shape(result) != original_shape:
@@ -415,14 +455,20 @@ class GGUFCpuEagerBridge:
         if _device_type(original_device) == "cpu":
             output = result
         else:
+            progress.transfer_attempted = True
             output = self._transfer.to_device(
                 result,
                 device=original_device,
                 dtype=original_dtype,
                 name="routed_result",
             )
-            transfers.append("routed_result:to_device")
+            completed_transfer = "routed_result:to_device"
+            transfers.append(completed_transfer)
             transfer_bytes += _element_bytes(result) * self._numel(result)
+            progress.transfers.append(completed_transfer)
+            progress.transfer_bytes += _element_bytes(result) * self._numel(result)
+            progress.output_device = str(_device(output))
+            progress.output_dtype = str(_dtype(output))
             if _device_type(_device(output)) != _device_type(original_device):
                 raise RuntimeError(
                     "transfer seam returned a result on the wrong device: "
@@ -444,10 +490,12 @@ class GGUFCpuEagerBridge:
             transfers=tuple(transfers),
             transfer_count=len(transfers),
             transfer_bytes=transfer_bytes,
-            cpu_execution_count=1,
-            adapter_telemetry=self._adapter_telemetry(),
+            cpu_execution_count=progress.cpu_execution_count,
+            adapter_started=progress.adapter_started,
+            adapter_completed=progress.adapter_completed,
+            adapter_telemetry=self._adapter_telemetry(progress.adapter_started),
             fallback_reason=(None if not transfers else "explicit_eager_cpu_bridge"),
-            elapsed_ns=time.perf_counter_ns() - started,
+            elapsed_ns=time.perf_counter_ns() - progress.started,
         )
         self._last_error_telemetry = None
         return output
@@ -490,7 +538,6 @@ class GGUFCpuEagerBridge:
             raise RuntimeError("GGUF eager bridge is closed")
         self._last_telemetry = None
         self._last_error_telemetry = None
-        self._request_adapter_called = False
 
     def _reject(
         self,
@@ -501,13 +548,12 @@ class GGUFCpuEagerBridge:
         group_size: int | None,
     ) -> Any:
         started = time.perf_counter_ns()
+        progress = _RequestProgress(started=started, phase=phase, group_size=group_size)
         self._begin_request()
         telemetry = self._make_error_telemetry(
             error,
             hidden_states=hidden_states,
-            phase=phase,
-            group_size=group_size,
-            started=started,
+            progress=progress,
         )
         self._last_telemetry = None
         self._last_error_telemetry = telemetry
@@ -518,45 +564,61 @@ class GGUFCpuEagerBridge:
         error: Exception,
         *,
         hidden_states: Any,
-        phase: str | None,
-        group_size: int | None,
-        started: int,
+        progress: _RequestProgress,
     ) -> GGUFEagerBridgeTelemetry:
-        try:
-            input_device = str(_device(hidden_states))
-        except TypeError:
-            input_device = None
-        try:
-            input_dtype = str(_dtype(hidden_states))
-        except TypeError:
-            input_dtype = None
+        input_device = progress.input_device
+        if input_device is None:
+            try:
+                input_device = str(_device(hidden_states))
+            except TypeError:
+                input_device = None
+        input_dtype = progress.input_dtype
+        if input_dtype is None:
+            try:
+                input_dtype = str(_dtype(hidden_states))
+            except TypeError:
+                input_dtype = None
+        if progress.transfers:
+            transfer_path = "eager_cpu_round_trip"
+        elif progress.transfer_attempted:
+            transfer_path = "eager_cpu_transfer"
+        elif progress.adapter_started:
+            transfer_path = "cpu_direct"
+        else:
+            transfer_path = "rejected"
         return GGUFEagerBridgeTelemetry(
             backend=self._BACKEND,
             layer_id=getattr(self._layer, "layer_id", None),
-            phase=phase,
-            group_size=(int(group_size) if isinstance(group_size, Integral) else None),
+            phase=progress.phase,
+            group_size=progress.group_size,
             input_device=input_device,
-            output_device=None,
+            output_device=progress.output_device,
             input_dtype=input_dtype,
-            output_dtype=None,
-            transfer_path="rejected",
-            transfers=(),
-            transfer_count=0,
-            transfer_bytes=0,
-            cpu_execution_count=0,
-            adapter_telemetry=self._adapter_telemetry(),
-            fallback_reason="bridge_validation",
+            output_dtype=progress.output_dtype,
+            transfer_path=transfer_path,
+            transfers=tuple(progress.transfers),
+            transfer_count=len(progress.transfers),
+            transfer_bytes=progress.transfer_bytes,
+            cpu_execution_count=progress.cpu_execution_count,
+            adapter_started=progress.adapter_started,
+            adapter_completed=progress.adapter_completed,
+            adapter_telemetry=self._adapter_telemetry(progress.adapter_started),
+            fallback_reason=(
+                "bridge_validation"
+                if not progress.transfer_attempted and not progress.adapter_started
+                else "eager_cpu_bridge_error"
+            ),
             error=type(error).__name__,
             error_detail=str(error),
-            elapsed_ns=time.perf_counter_ns() - started,
+            elapsed_ns=time.perf_counter_ns() - progress.started,
         )
 
-    def _adapter_telemetry(self) -> Mapping[str, object] | None:
-        if not self._request_adapter_called:
+    def _adapter_telemetry(self, adapter_called: bool = False) -> Mapping[str, object] | None:
+        if not adapter_called:
             return None
-        value = getattr(self._layer, "last_telemetry", None)
+        value = getattr(self._layer, "last_error_telemetry", None)
         if value is None:
-            value = getattr(self._layer, "last_error_telemetry", None)
+            value = getattr(self._layer, "last_telemetry", None)
         if value is None:
             return None
         if hasattr(value, "as_dict"):

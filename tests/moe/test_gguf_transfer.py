@@ -67,6 +67,19 @@ class _Transfer:
         return tensor.copy(device=device, dtype=dtype)
 
 
+class _FailingTransfer(_Transfer):
+    def __init__(self, events: list[object], *, fail_on: int) -> None:
+        super().__init__(events)
+        self.fail_on = fail_on
+        self.calls = 0
+
+    def to_cpu(self, tensor: _Tensor, *, name: str) -> _Tensor:
+        self.calls += 1
+        if self.calls == self.fail_on:
+            raise RuntimeError(f"transfer failure {name}")
+        return super().to_cpu(tensor, name=name)
+
+
 class _Layer:
     layer_id = 3
     closed = False
@@ -76,6 +89,7 @@ class _Layer:
         self.forward_calls = 0
         self.routed_calls = 0
         self.block = False
+        self.fail = False
         self.entered = Event()
         self.release = Event()
         self.last_telemetry = {"backend": "fake_cpu", "thread_count": 1}
@@ -88,6 +102,8 @@ class _Layer:
         if self.block:
             self.entered.set()
             assert self.release.wait(2)
+        if self.fail:
+            raise RuntimeError("adapter failure after D2H")
         if debug_observer is not None:
             debug_observer("router", {"ids": router_logits, "weights": router_logits})
         return _Tensor(hidden.values + 1, device=_Device("cpu"), dtype=hidden.dtype)
@@ -98,6 +114,8 @@ class _Layer:
         if self.block:
             self.entered.set()
             assert self.release.wait(2)
+        if self.fail:
+            raise RuntimeError("adapter failure after D2H")
         if debug_observer is not None:
             debug_observer("router", {"ids": ids, "weights": weights})
         return _Tensor(
@@ -194,6 +212,54 @@ def test_device_routed_path_transfers_all_routes_and_preserves_output_independen
     assert hidden.values[0, 0] != 999
 
 
+def test_adapter_failure_after_three_completed_copies_preserves_progress_telemetry() -> None:
+    events: list[object] = []
+    layer = _Layer(events)
+    layer.fail = True
+    bridge = GGUFCpuEagerBridge(layer, transfer=_Transfer(events))
+    hidden, weights, ids = _inputs(_Device("cuda", 0))
+
+    with pytest.raises(RuntimeError, match="adapter failure"):
+        bridge.routed_forward(hidden, weights, ids, phase="decode")
+
+    telemetry = bridge.last_error_telemetry
+    assert telemetry is not None
+    assert telemetry.transfer_path == "eager_cpu_round_trip"
+    assert telemetry.transfers == (
+        "hidden_states:to_cpu",
+        "topk_weights:to_cpu",
+        "topk_ids:to_cpu",
+    )
+    assert telemetry.transfer_count == 3
+    assert telemetry.transfer_bytes == 24
+    assert telemetry.cpu_execution_count == 1
+    assert telemetry.adapter_started is True
+    assert telemetry.adapter_completed is False
+    assert layer.routed_calls == 1
+    assert bridge.last_telemetry is None
+
+
+def test_mid_transfer_failure_preserves_only_completed_copy_telemetry() -> None:
+    events: list[object] = []
+    layer = _Layer(events)
+    bridge = GGUFCpuEagerBridge(layer, transfer=_FailingTransfer(events, fail_on=2))
+    hidden, weights, ids = _inputs(_Device("cuda", 0))
+
+    with pytest.raises(RuntimeError, match="transfer failure topk_weights"):
+        bridge.routed_forward(hidden, weights, ids, phase="decode")
+
+    telemetry = bridge.last_error_telemetry
+    assert telemetry is not None
+    assert telemetry.transfer_path == "eager_cpu_round_trip"
+    assert telemetry.transfers == ("hidden_states:to_cpu",)
+    assert telemetry.transfer_count == 1
+    assert telemetry.transfer_bytes == 8
+    assert telemetry.cpu_execution_count == 0
+    assert telemetry.adapter_started is False
+    assert telemetry.adapter_completed is False
+    assert layer.routed_calls == 0
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -269,6 +335,57 @@ def test_close_rejects_in_flight_request_and_never_closes_borrowed_layer() -> No
     assert layer.closed is False
     with pytest.raises(RuntimeError, match="closed"):
         bridge.routed_forward(hidden, weights, ids, phase="decode")
+
+
+def test_close_winning_validation_admission_race_cannot_start_request() -> None:
+    validated = Event()
+    release_validation = Event()
+
+    class _ValidationGateTensor(_Tensor):
+        def __init__(self, values, *, device: _Device) -> None:
+            super().__init__(values, device=device)
+            self._waited = False
+
+        @property
+        def shape(self) -> tuple[int, ...]:
+            if not self._waited:
+                self._waited = True
+                validated.set()
+                assert release_validation.wait(2)
+            return super().shape
+
+    events: list[object] = []
+    layer = _Layer(events)
+    bridge = GGUFCpuEagerBridge(layer, transfer=_Transfer(events))
+    hidden = _ValidationGateTensor([[1, 2]], device=_Device("cuda", 0))
+    weights = _Tensor([[3, 4]], device=_Device("cuda", 0))
+    ids = _Tensor([[0, 1]], device=_Device("cuda", 0), dtype="int32")
+    failures: list[Exception] = []
+
+    def run() -> None:
+        try:
+            bridge.routed_forward(hidden, weights, ids, phase="decode")
+        except Exception as error:
+            failures.append(error)
+
+    worker = Thread(target=run, daemon=True)
+    worker.start()
+    assert validated.wait(2)
+    bridge.close()
+    release_validation.set()
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], RuntimeError)
+    assert str(failures[0]) == "GGUF eager bridge is closed"
+    assert layer.routed_calls == 0
+    assert events == []
+    telemetry = bridge.last_error_telemetry
+    assert telemetry is not None
+    assert telemetry.transfer_path == "rejected"
+    assert telemetry.transfer_count == 0
+    assert telemetry.cpu_execution_count == 0
 
 
 def test_default_transfer_uses_blocking_to_without_non_blocking_argument() -> None:
