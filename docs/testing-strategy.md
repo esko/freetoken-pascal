@@ -99,7 +99,11 @@ hidden/router and hidden/route copies, exactly one adapter invocation, output de
 dtype restoration, output independence, observer propagation, pre-transfer rejection of
 prefill/group/graph/workspace modes, stale-telemetry clearing, and close-versus-in-flight
 admission. They are H0 seam tests only; blocking real-CUDA copies and serving integration
-remain H2-unverified.
+remain H2-unverified. The eager model-attachment tests additionally prove explicit
+batch-derived execution context, ordinary expert call compatibility, shared-before-routed
+ordering, all-layer construction rollback, busy detach preflight, state-dict invariance,
+and closure of wrappers without closing the borrowed bundle. The resident originals are
+deliberately retained, so these tests do not claim memory savings or serving support.
 
 ### MoE operation
 

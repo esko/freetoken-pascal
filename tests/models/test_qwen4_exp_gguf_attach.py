@@ -392,6 +392,25 @@ def test_eager_execution_context_rejects_before_router_or_shared_work():
         assert events == []
 
 
+def test_model_eager_context_derives_decode_batch_and_capture_state(monkeypatch):
+    batch = SimpleNamespace(
+        phase="decode",
+        size=1,
+        reqs=[SimpleNamespace(extend_len=1)],
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False, raising=False)
+
+    context = Qwen4ExpModel._eager_execution_context(batch)
+
+    assert context.phase == "decode"
+    assert context.group_size == 1
+    assert context.graph_capture is False
+    assert context.cache_size == 0
+    assert context.workspace is None
+    assert context.num_token_non_padded == 1
+
+
 def test_eager_execution_context_is_explicit_and_preserves_shared_addition_order():
     events = []
 

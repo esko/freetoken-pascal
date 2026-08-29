@@ -172,6 +172,7 @@ class GGUFCpuEagerBridge:
     """
 
     _BACKEND = "qwen_gguf_eager_cpu_bridge"
+    requires_moe_execution_context = True
 
     def __init__(
         self,
@@ -706,6 +707,16 @@ class GGUFCpuEagerBridge:
             self._closed = True
         finally:
             self._lock.release()
+
+    def ensure_quiescent(self) -> None:
+        """Fail if a request is in flight without changing admission state."""
+        if self._closed:
+            return
+        if not self._lock.acquire(blocking=False):
+            raise GGUFEagerBridgeBusy(
+                "cannot quiesce GGUF eager bridge while a request is in flight"
+            )
+        self._lock.release()
 
     def __enter__(self) -> GGUFCpuEagerBridge:
         if self._closed:

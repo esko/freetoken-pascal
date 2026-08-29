@@ -84,8 +84,11 @@ routes, invoke the adapter once, and copy the independent routed result back to 
 original device and dtype. It makes no stream, pinned-memory, overlap or performance
 claim. Its request-scoped telemetry exposes transfer fields/bytes, CPU execution count,
 adapter telemetry and failure state, and `close()` only closes bridge admission. Engine,
-model attachment and CLI wiring remain unchanged until a later CUDA correctness gate;
-real CUDA transfer behavior is H2-unverified.
+CLI and default paths remain unchanged. The explicit Qwen model attachment can wrap each
+validated routed-expert adapter with one bridge, derives decode/group context from the
+active batch, rejects unsupported modes before transfer, and restores resident originals
+on detach. Resident originals remain retained for state-dict fidelity, so the attachment
+is not memory-saving or serving-ready. Real CUDA transfer behavior is H2-unverified.
 
 ### Exit gate
 
