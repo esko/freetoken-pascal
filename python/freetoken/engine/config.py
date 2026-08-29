@@ -35,6 +35,7 @@ class EngineConfig:
     # Qwen3.8 GGUF PLE page-cache policy.  Full warming is explicit because the
     # shipping table is 28.8 GB and must never be touched wholesale by default.
     ple_warm_mode: str = "cold"
+    ple_artifact_path: str | None = None
     moe_cache_size: int = 0
     moe_cache_rate: float | None = None
     moe_cache_auto: bool = False

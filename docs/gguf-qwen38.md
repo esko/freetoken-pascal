@@ -70,6 +70,19 @@ host-source bytes.
   file or shard set with its own manifest identity and checksum. The GGUF-embedded range
   remains an import/reference source, not the final serving layout.
 
+Create the H0 dedicated serving artifact with `scripts/extract_ple_artifact.py`.
+The output directory is published atomically and contains only `ple.bin` and `manifest.json`;
+the loader verifies geometry, exact size, and SHA-256 before mapping it.
+
+```bash
+PYTHONPATH=python python scripts/extract_ple_artifact.py \
+  /models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  /models/UD-Q4_K_XL/ple-artifact
+```
+
+Use `MappedPLETable.open_from_artifact` for serving warm modes. Its `full-ple-warm` mode
+touches only `ple.bin`; `open_from_gguf` remains available as the compatibility/reference path.
+
 Inspect a complete local artifact without touching its tensor payload pages:
 
 ```bash

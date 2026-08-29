@@ -358,6 +358,7 @@ class Engine:
                 config.model_path,
                 dummy=config.use_dummy_weight,
                 ple_warm_mode=config.ple_warm_mode,
+                ple_artifact_path=config.ple_artifact_path,
             )
         if hasattr(self.model, "host_weight_telemetry"):
             logger.info_rank0(

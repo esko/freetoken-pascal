@@ -8,11 +8,15 @@ later layers without changing the source addressing contract.
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
+import json
 import mmap
 import os
 import re
 import resource
+import shutil
+import tempfile
 import threading
 from collections.abc import Collection
 from dataclasses import dataclass, replace
@@ -66,6 +70,98 @@ def _warm_model_files(paths: tuple[str, ...]) -> int:
                 _ = mapped[size - 1]
         warmed += size
     return warmed
+
+
+def _publish_directory_noreplace(staging: Path, output: Path) -> None:
+    """Atomically publish a directory without replacing a concurrent destination."""
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2 is required for atomic PLE publication")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,
+        os.fsencode(staging),
+        -100,
+        os.fsencode(output),
+        1,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(output)
+        raise OSError(error, os.strerror(error), output)
+    directory_fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def convert_gguf_ple_to_artifact(source: str | Path, output: str | Path) -> Path:
+    """Atomically extract the IQ4_NL PLE tensor into a serving-only artifact."""
+    source = Path(source)
+    output = Path(output)
+    if output == Path("/") or not output.name:
+        raise ValueError("output must be an explicit artifact directory")
+    layout = inspect_qwen_host_layout(source)
+    descriptor = layout.ple
+    source_size = Path(descriptor.shard_path).stat().st_size
+    if descriptor.data_offset < 0 or descriptor.data_offset + descriptor.tensor_bytes > source_size:
+        raise ValueError("PLE source range is truncated")
+    if output.exists():
+        raise FileExistsError(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
+    try:
+        payload = staging / "ple.bin"
+        digest = hashlib.sha256()
+        with Path(descriptor.shard_path).open("rb") as source_file, payload.open("wb") as target:
+            source_file.seek(descriptor.data_offset)
+            remaining = descriptor.tensor_bytes
+            while remaining:
+                chunk = source_file.read(min(8 << 20, remaining))
+                if not chunk:
+                    raise ValueError("PLE source range is truncated")
+                target.write(chunk)
+                digest.update(chunk)
+                remaining -= len(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        manifest = {
+            "format": "freetoken-pascal-ple-v1",
+            "version": 1,
+            "payload": "ple.bin",
+            "tensor_name": descriptor.tensor_name,
+            "quant_type": descriptor.quant_type,
+            "quant_name": descriptor.quant_name,
+            "rows": descriptor.rows,
+            "elements_per_row": descriptor.elements_per_row,
+            "row_bytes": descriptor.row_bytes,
+            "tensor_bytes": descriptor.tensor_bytes,
+            "sha256": digest.hexdigest(),
+            "source": {
+                "path": descriptor.shard_path,
+                "offset": descriptor.data_offset,
+            },
+        }
+        manifest_path = staging / "manifest.json"
+        with manifest_path.open("w", encoding="utf-8") as target:
+            json.dump(manifest, target, indent=2, sort_keys=True)
+            target.write("\n")
+            target.flush()
+            os.fsync(target.fileno())
+        _publish_directory_noreplace(staging, output)
+        return output
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
 
 @dataclass(frozen=True)
@@ -671,6 +767,79 @@ class MappedPLETable:
             model_shard_paths=layout.shard_paths,
         )
         try:
+            table.set_warm_mode(warm_mode)
+        except BaseException:
+            table.close()
+            raise
+        return table
+
+    @classmethod
+    def open_from_artifact(
+        cls, path: str | Path, *, warm_mode: str = "cold"
+    ) -> MappedPLETable:
+        root = Path(path)
+        try:
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ValueError(f"invalid PLE artifact manifest: {root}") from error
+        if manifest.get("format") != "freetoken-pascal-ple-v1" or manifest.get("version") != 1:
+            raise ValueError("unsupported PLE artifact format")
+        required = ("rows", "elements_per_row", "row_bytes", "tensor_bytes", "sha256")
+        if any(key not in manifest for key in required):
+            raise ValueError("PLE artifact manifest missing geometry or checksum")
+        if manifest.get("payload") != "ple.bin":
+            raise ValueError("invalid PLE artifact payload name")
+        if (
+            manifest.get("tensor_name") != _PLE_TENSOR
+            or manifest.get("quant_type") != GGML_IQ4_NL
+            or manifest.get("quant_name") != "IQ4_NL"
+        ):
+            raise ValueError("unsupported PLE artifact tensor")
+        values = tuple(manifest[key] for key in required[:4])
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+            raise ValueError("invalid PLE artifact geometry")
+        rows, elements, row_bytes, tensor_bytes = values
+        if min(rows, elements, row_bytes, tensor_bytes) <= 0 or tensor_bytes != rows * row_bytes:
+            raise ValueError("invalid PLE artifact geometry")
+        if row_bytes % 18 or elements != row_bytes // 18 * 32:
+            raise ValueError("invalid PLE artifact geometry")
+        payload = root / str(manifest.get("payload", "ple.bin"))
+        if not payload.is_file() or payload.stat().st_size != tensor_bytes:
+            raise ValueError("PLE artifact payload is truncated or has a gap")
+        if not isinstance(manifest["sha256"], str) or not re.fullmatch(
+            r"[0-9a-f]{64}", manifest["sha256"]
+        ):
+            raise ValueError("invalid PLE artifact sha256")
+        if _sha256_file(payload) != manifest["sha256"]:
+            raise ValueError("PLE artifact sha256 mismatch")
+        descriptor = PLEDescriptor(
+            tensor_name=str(manifest.get("tensor_name", _PLE_TENSOR)),
+            quant_type=GGML_IQ4_NL,
+            quant_name="IQ4_NL",
+            rows=rows,
+            elements_per_row=elements,
+            row_bytes=row_bytes,
+            tensor_bytes=tensor_bytes,
+            shard_index=0,
+            shard_path=str(payload),
+            data_offset=0,
+        )
+        mapping = MappedFileRange(
+            str(payload),
+            offset=0,
+            length=tensor_bytes,
+            rows=rows,
+            row_bytes=row_bytes,
+            expected_file_sha256=manifest["sha256"],
+            verify_file_sha256=True,
+        )
+        table = cls(descriptor, mapping, model_shard_paths=(str(payload),))
+        table.source_kind = "dedicated-artifact"
+        try:
+            if warm_mode == "full-model-warm":
+                raise ValueError("artifact warm mode is full-ple-warm")
+            if warm_mode == "full-ple-warm":
+                warm_mode = "full-model-warm"
             table.set_warm_mode(warm_mode)
         except BaseException:
             table.close()

@@ -576,9 +576,14 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--ple-artifact-path",
+        default=ServerArgs.ple_artifact_path,
+        help="Dedicated PLE artifact directory; never inferred or silently replaced by GGUF.",
+    )
+    parser.add_argument(
         "--ple-warm-mode",
         default=ServerArgs.ple_warm_mode,
-        choices=["cold", "page-cache-warm", "targeted", "full-model-warm"],
+        choices=["cold", "page-cache-warm", "targeted", "full-model-warm", "full-ple-warm"],
         help=(
             "Qwen3.8 GGUF PLE page-cache policy. 'cold' drops the mapped range from "
             "cache at startup; 'page-cache-warm' requests OS readahead; 'targeted' "

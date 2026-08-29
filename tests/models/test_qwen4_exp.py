@@ -15,6 +15,7 @@ import pytest
 import safetensors
 from safetensors.torch import save_file
 import torch
+from freetoken.gguf_host import convert_gguf_ple_to_artifact
 from freetoken.layers.moe import MoELayer
 from freetoken.moe.fused import FusedMoe
 from freetoken.models.qwen4_exp.config import parse_config, parse_gguf_config
@@ -474,6 +475,27 @@ def test_qwen4_gguf_ple_maps_and_dequantizes_selected_rows(monkeypatch):
     assert embedding._gguf_ple.telemetry()["mode"] == "targeted"
     assert embedding.telemetry()["source"] == "gguf-mmap"
     assert embedding.telemetry()["packed_bytes_read"] == 4 * 90
+    embedding._gguf_ple.close()
+
+
+def test_qwen4_ple_explicitly_loads_dedicated_artifact(tmp_path: Path) -> None:
+    config = parse_gguf_config(_gguf_shim())
+    args = replace(
+        config.qwen4_args,
+        ple_embed_dim=2560,
+        ple_head_vocab_sizes=(8, 8),
+        ple_head_offsets=(0, 8),
+    )
+    embedding = _HostNGramEmbedding(SimpleNamespace(qwen4_args=args), layer_id=1)
+    fixture = ROOT / "tests/fixtures/gguf/qwen-host-layout.gguf"
+    artifact = convert_gguf_ple_to_artifact(fixture, tmp_path / "ple")
+
+    embedding.load_host_weights(
+        str(fixture), ple_artifact_path=str(artifact), ple_warm_mode="cold"
+    )
+
+    assert embedding.telemetry()["source"] == "dedicated-artifact"
+    assert embedding._gguf_ple.descriptor.shard_path == str(artifact / "ple.bin")
     embedding._gguf_ple.close()
 
 
