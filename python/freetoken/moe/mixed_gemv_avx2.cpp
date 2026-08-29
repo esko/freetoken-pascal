@@ -105,6 +105,62 @@ FREETOKEN_AVX2_TARGET inline float q8_0_dot_avx2(const uint8_t* block,
 #endif
 }
 
+// Q5_K stores eight 32-value subblocks.  Each subblock's low nibbles share a
+// 32-byte window, while qh supplies one high bit per lane.  Expand eight
+// adjacent lanes directly into AVX2 integer lanes and keep the established
+// subblock/lane-chunk traversal and one-block float reduction order.
+FREETOKEN_AVX2_TARGET inline float q5_k_dot_avx2(const uint8_t* block,
+                                                 const float* input) {
+#if defined(__x86_64__) || defined(__i386__)
+  const float d = half_to_float(load_u16(block));
+  const float dmin = half_to_float(load_u16(block + 2));
+  const __m256i nibble_mask = _mm256_set1_epi32(0x0F);
+  const __m256i high_bit_mask = _mm256_set1_epi32(1);
+  __m256 accumulator = _mm256_setzero_ps();
+  for (int subblock = 0; subblock < 8; ++subblock) {
+    int scale;
+    int minimum;
+    scale_min(block + 4, subblock, &scale, &minimum);
+    const __m256 factor = _mm256_set1_ps(d * static_cast<float>(scale));
+    const __m256 offset = _mm256_set1_ps(dmin * static_cast<float>(minimum));
+    for (int lane = 0; lane < 32; lane += 8) {
+      const __m128i packed = _mm_loadl_epi64(
+          reinterpret_cast<const __m128i*>(block + 48 + (subblock / 2) * 32 + lane));
+      __m256i codes = _mm256_cvtepu8_epi32(packed);
+      if ((subblock & 1) != 0) {
+        codes = _mm256_srli_epi32(codes, 4);
+      }
+      codes = _mm256_and_si256(codes, nibble_mask);
+
+      const __m128i high_bytes = _mm_loadl_epi64(
+          reinterpret_cast<const __m128i*>(block + 16 + lane));
+      const __m256i high_bits = _mm256_slli_epi32(
+          _mm256_and_si256(
+              _mm256_srli_epi32(_mm256_cvtepu8_epi32(high_bytes), subblock),
+              high_bit_mask),
+          4);
+      codes = _mm256_or_si256(codes, high_bits);
+
+      const __m256 values = _mm256_sub_ps(
+          _mm256_mul_ps(_mm256_cvtepi32_ps(codes), factor), offset);
+      accumulator = _mm256_fmadd_ps(
+          values, _mm256_loadu_ps(input + subblock * 32 + lane), accumulator);
+    }
+  }
+  alignas(32) float reduced[8];
+  _mm256_store_ps(reduced, accumulator);
+  float result = 0.0f;
+  for (float value : reduced) {
+    result += value;
+  }
+  return result;
+#else
+  (void)block;
+  (void)input;
+  return 0.0f;
+#endif
+}
+
 }  // namespace
 
 extern "C" FREETOKEN_AVX2_TARGET __attribute__((visibility("default"))) float
@@ -203,41 +259,7 @@ freetoken_mixed_q8_0_decode_avx2_impl(const uint8_t* block, float* output) {
 
 extern "C" FREETOKEN_AVX2_TARGET __attribute__((visibility("default"))) float
 freetoken_mixed_q5_k_dot_avx2_impl(const uint8_t* block, const float* input) {
-#if defined(__x86_64__) || defined(__i386__)
-  const float d = half_to_float(load_u16(block));
-  const float dmin = half_to_float(load_u16(block + 2));
-  __m256 accumulator = _mm256_setzero_ps();
-  alignas(32) float values[8];
-  for (int subblock = 0; subblock < 8; ++subblock) {
-    int scale;
-    int minimum;
-    scale_min(block + 4, subblock, &scale, &minimum);
-    const float factor = d * static_cast<float>(scale);
-    const float offset = dmin * static_cast<float>(minimum);
-    for (int lane = 0; lane < 32; lane += 8) {
-      for (int j = 0; j < 8; ++j) {
-        const int index = lane + j;
-        const uint8_t packed = block[48 + (subblock / 2) * 32 + index];
-        const int low_code = (subblock & 1) != 0 ? (packed >> 4) : (packed & 0x0F);
-        const int high_code = ((block[16 + index] >> subblock) & 1) << 4;
-        values[j] = static_cast<float>(low_code | high_code) * factor - offset;
-      }
-      accumulator = _mm256_fmadd_ps(
-          _mm256_load_ps(values), _mm256_loadu_ps(input + subblock * 32 + lane), accumulator);
-    }
-  }
-  alignas(32) float reduced[8];
-  _mm256_store_ps(reduced, accumulator);
-  float result = 0.0f;
-  for (float value : reduced) {
-    result += value;
-  }
-  return result;
-#else
-  (void)block;
-  (void)input;
-  return 0.0f;
-#endif
+  return q5_k_dot_avx2(block, input);
 }
 
 extern "C" FREETOKEN_AVX2_TARGET __attribute__((visibility("default"))) void
@@ -344,7 +366,7 @@ freetoken_mixed_q5_k_gemv_avx2_impl(const uint8_t* rows, int row_count, int bloc
     const uint8_t* packed_row = rows + static_cast<size_t>(row) * row_stride_bytes;
     float result = 0.0f;
     for (int block = 0; block < blocks_per_row; ++block) {
-      result += freetoken_mixed_q5_k_dot_avx2_impl(
+      result += q5_k_dot_avx2(
           packed_row + static_cast<size_t>(block) * 176,
           input + static_cast<size_t>(block) * 256);
     }
