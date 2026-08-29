@@ -29,6 +29,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 | P4 | [#23](https://github.com/esko/freetoken-pascal/issues/23) | Concurrent current-step CPU/GPU misses | H0-H3 |
 | P4 | [#24](https://github.com/esko/freetoken-pascal/issues/24) | Contention-aware `q*` and fallback | H0-H3 |
 | P4 | [#25](https://github.com/esko/freetoken-pascal/issues/25) | Decode prefetch and prefill streaming | H0-H3 |
+| P4 | [#76](https://github.com/esko/freetoken-pascal/issues/76) | QSA long-context overhead and workspace safety | H0-H3 |
 | P5 | [#26](https://github.com/esko/freetoken-pascal/issues/26) | Long-context state and semantic checkpoints | H0/H3/H4 |
 | P5 | [#27](https://github.com/esko/freetoken-pascal/issues/27) | OpenAI serving, cancellation and observability | H0/H3/H4 |
 | P5 | [#28](https://github.com/esko/freetoken-pascal/issues/28) | Docker/Compose and production operations | H0/H3/H4 |
@@ -46,7 +47,8 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 #16 + #19 + #20 + #73 → #21
 #14 → #38
 #21 + #38 → #22 → #23 → #24 → #25
-#14 + #20 + #24 + #25 → #26 → #27 → #28 → #29
+#11 + #14 + #73 → #76
+#25 + #76 → long-context portions of #26 → #27 → #28 → #29
 #13 → #25 + #26 + #28 + #29
 #13 + #14 + #25 + #26 + #27 → #74  (optional; does not block #29)
 ```
@@ -55,7 +57,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 
 ## Work possible before P4 arrival
 
-The orchestrator should prioritize H0/H1 portions of #5–#8, #10–#19, #38 and #73, plus the pure logic/tests in #20–#25 and #74. This includes the PLE file format, random-access advice, mmap/`pread`, adaptive batching, read-amplification telemetry, CPU expert execution, Q4/Q3 census and quality fixtures, routing simulation, placement planning/canary logic, quant conversion, metrics and correctness A/B tests. Issues #9 and #29 are explicitly blocked. DP4A tuning, placement-cliff measurement, dual-P4 policy selection and final quant/profile selection remain H2/H3 work, and other issues remain open until their required hardware evidence is attached.
+The orchestrator should prioritize H0/H1 portions of #5–#8, #10–#19, #38, #73 and #76, plus the pure logic/tests in #20–#25 and #74. This includes the PLE file format, random-access advice, mmap/`pread`, adaptive batching, read-amplification telemetry, CPU expert execution, Q4/Q3 census and quality fixtures, routing simulation, placement planning/canary logic, QSA workspace accounting and host-synchronization profiling, quant conversion, metrics and correctness A/B tests. Issues #9 and #29 are explicitly blocked. DP4A tuning, placement-cliff measurement, context-scaling measurements, dual-P4 policy selection and final quant/profile selection remain H2/H3 work, and other issues remain open until their required hardware evidence is attached.
 
 ## Completeness audit
 
@@ -72,7 +74,8 @@ The core v1 backlog includes explicit work and acceptance evidence for:
 - named Q4 reference and Q3 whole-model throughput profiles plus component-level higher-precision tests;
 - Pascal GPU kernel parity;
 - exact full-softmax `topk=10` router parity and fallback;
-- placement planning, headroom, canary, automatic backoff and fail-readiness behavior;
+- placement planning, post-load/post-prefill high-water accounting, headroom, canary, automatic backoff and fail-readiness behavior;
+- bounded QSA score/top-k/gather workspaces, context-scaling telemetry, controlled OOM behavior and long-context performance evidence;
 - one-GPU bring-up and measured two-GPU ownership/trunk policies;
 - cache-zero, static-hot, static cache, async fill and current-step hybrid merge;
 - contention-aware scheduling and safe pure fallbacks;
