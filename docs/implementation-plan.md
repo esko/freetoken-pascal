@@ -4,7 +4,7 @@
 
 The project is implemented as a sequence of gated vertical slices. Hardware-independent work comes first. Each phase ends with a usable fallback and a decision gate; no phase assumes the next one succeeds. Optional performance profiles are isolated from the core release.
 
-## Phase 0 — downstream foundation
+## Phase 0 — downstream foundation and upstream reconciliation
 
 ### Outcomes
 
@@ -12,21 +12,25 @@ The project is implemented as a sequence of gated vertical slices. Hardware-inde
 - exact source pins and license provenance exist;
 - CUDA 12.6 build environment is reproducible;
 - hosted CI, H1 compilation and deferred H2/H3 workflows exist;
-- tiny models, fixtures, benchmark schema and result tooling exist.
+- tiny models, fixtures, benchmark schema and result tooling exist;
+- issue #77 advances the downstream to exact upstream commit `58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6`, which contains merged Qwen3.8 PR #257;
+- model/QSA/PLE/cache/state code adapted from closed PR #232 is compared file by file with merged upstream and retained only where downstream behavior remains materially distinct;
+- open PLE mmap PR #279 is recorded through an immutable `planned` or `reference` pin before any code is mined.
 
 ### Exit gate
 
-A clean clone passes hosted CI and compiles the intended source set for `sm_61` without requiring a GPU.
+A clean clone passes hosted CI and compiles the reconciled source set for `sm_61` without requiring a GPU. The selected FreeToken upstream commit is an ancestor, provenance reflects PR #257 as the primary Qwen source, and there is one authoritative downstream runtime path per Qwen capability.
 
 ## Phase 1 — Pascal and Qwen4 reference runtime
 
 ### Outcomes
 
-- integrate FreeToken Pascal and CUDA 12.6 work;
-- integrate Qwen3.8/Qwen4 text architecture;
-- integrate GGUF K/I loading;
+- preserve/reapply FreeToken Pascal and CUDA 12.6 work on the reconciled upstream base;
+- validate merged upstream Qwen3.8/Qwen4 text architecture against downstream and independent references;
+- integrate downstream GGUF K/I loading without duplicating upstream model semantics;
 - support heterogeneous expert-bank types needed by target artifacts;
 - implement the dedicated, separately sharded PLE file as a core NVMe-backed path;
+- use pinned PR #279 and other sources only as issue-scoped donors/references;
 - provide mmap and positional-read PLE backends with random-access advice;
 - provide direct and adaptive vectorized dedupe/order/coalesce lookup paths, bounded asynchronous prefetch and physical read-amplification telemetry;
 - define an explicit PLE row-codec boundary with IQ4_NL as the initial reference;
@@ -34,7 +38,7 @@ A clean clone passes hosted CI and compiles the intended source set for `sm_61` 
 
 ### Exit gate
 
-A tiny Qwen4 model passes CPU/reference tests. The dedicated PLE artifact is independently checksummed and both backends return identical rows and failure behavior. When a P4 arrives, one P4 generates deterministic short text with cache disabled inside a safe placement profile.
+A tiny Qwen4 model passes CPU/reference tests after the upstream reconciliation. The dedicated PLE artifact is independently checksummed and both backends return identical rows and failure behavior. When a P4 arrives, one P4 generates deterministic short text with cache disabled inside a safe placement profile.
 
 ## Phase 2 — AVX2 host expert backend and model profiles
 
@@ -50,15 +54,15 @@ A tiny Qwen4 model passes CPU/reference tests. The dedicated PLE artifact is ind
 - SSD expert reads are startup backing or an explicitly gated experiment, not the serving design;
 - parity, quality and microbenchmark suite.
 
-The ABI slice precedes AVX2 kernels. It defines immutable heterogeneous expert-bank descriptors, prepare/execute/group/cancel/telemetry contracts, caller-owned partial accumulation, bounded workspace and explicit decoder/thread-pool/NUMA hooks. Its microbenchmark interface records raw repeated timings for the supplied production geometry and every requested miss width from 1 through top-k; it does not by itself constitute a performance claim. The Issue #16 threaded route adapter is opt-in, native-only, and census-gated per layer; it keeps serial execution for scalar, unsupported, and mixed-reference configurations.
+The ABI slice precedes AVX2 kernels. It defines immutable heterogeneous expert-bank descriptors, prepare/execute/group/cancel/telemetry contracts, caller-owned partial accumulation, bounded workspace and explicit decoder/thread-pool/NUMA hooks. Its microbenchmark interface records raw repeated timings for the supplied production geometry and every requested miss width from 1 through top-k; it does not by itself constitute a performance claim. The issue #16 threaded route adapter is opt-in, native-only, and census-gated per layer; it keeps serial execution for scalar, unsupported, and mixed-reference configurations.
 
 The standalone Qwen GGUF CPU bridge is decode-only and owns its mapped host weights for the life of its heterogeneous CPU layout and Q4 executor. The CUDA engine rejects this GGUF combination until the production layer ABI can consume per-projection mappings without a homogeneous GPU cache; this is an integration blocker, not a hardware-performance claim.
 
-The H0 `QwenGGUFCpuMoELayer` is an explicit CPU-only adapter around that bundle. It supports routed decode with the existing full-softmax Torch reference when CPU router logits are supplied, plus precomputed routes for direct parity tests. Its Qwen default preserves the model's unrenormalized selected probabilities; callers may opt into the existing renormalized mode explicitly. Calls require phase `decode` and group size one. It does not attach to Qwen model construction or the CUDA Engine, and it does not provide prefill, grouped, CUDA, TP>1 or performance evidence.
+The H0 `QwenGGUFCpuMoELayer` is an explicit CPU-only adapter around that bundle. It supports routed decode with the exact full-softmax Torch reference when CPU router logits are supplied, plus precomputed routes for direct parity tests. Its Qwen default preserves the model's unrenormalized selected probabilities. Calls require phase `decode` and group size one. It does not provide prefill, grouped, CUDA, TP>1 or performance evidence.
 
-The H0 model-graph bridge adds explicit `Qwen4ExpModel.attach_gguf_cpu_expert_bundle()` and matching detach methods, with a `ForCausalLM` delegate. Attachment is opt-in, validates every layer against the shared bundle before mutation, and preserves the exact resident expert state-dict surface. The bundle remains caller-owned and is never closed by the model. This construction and lifetime foundation does not make the CUDA-oriented trunk, router, shared expert, or LM head CPU-runnable, and it does not remove the Engine guard.
+The H0 model-graph bridge transactionally replaces routed experts only for construction, lifecycle and correctness tests. The bundle remains caller-owned. This foundation does not make the CUDA-oriented trunk, router, shared expert, or LM head CPU-runnable and does not remove the Engine guard.
 
-The next standalone bridge is `GGUFCpuEagerBridge` in `moe/gguf_transfer.py`. It is an explicit experimental H0/H1 wrapper around the CPU layer, with required `phase="decode"`, `group_size=1`, TP1 and `cache_size=0`. It rejects prefill, grouped requests, graph capture and caller workspaces before transfer. CPU inputs use the adapter directly; non-CPU inputs use an injected blocking transfer seam for hidden states and router logits/prepared routes, invoke the adapter once, and copy the independent routed result back to the original device and dtype. It makes no stream, pinned-memory, overlap or performance claim. Engine, CLI and default paths remain unchanged. Real CUDA transfer behavior is H2-unverified.
+The standalone `GGUFCpuEagerBridge` is an explicit experimental H0/H1 wrapper around the CPU layer. It rejects prefill, grouped requests, graph capture and caller workspaces before transfer. CPU inputs use the adapter directly; non-CPU inputs use an injected blocking transfer seam, execute the adapter once, and copy the independent routed result back. It makes no stream, pinned-memory, overlap or performance claim. Real CUDA transfer behavior is H2-unverified.
 
 ### Exit gate
 
@@ -101,7 +105,7 @@ Single- and dual-P4 static-cache runs are correct and pass the post-prefill plac
 
 ### Exit gate
 
-The scheduler never chooses an unsupported/unsafe path, exposes its decisions, and beats or safely falls back to the best pure/static policy on representative decode workloads. QSA workspaces are bounded, the first-large-prefill high-water is inside the #73 reserve, and 32K/128K context behavior has independent correctness and performance evidence.
+The scheduler never chooses an unsupported or unsafe path, exposes its decisions, and beats or safely falls back to the best pure/static policy on representative decode workloads. QSA workspaces are bounded, the first-large-prefill high-water is inside the #73 reserve, and 32K/128K context behavior has independent correctness and performance evidence.
 
 ## Phase 5 — prefill, long context, serving and optional coding profile
 
@@ -115,7 +119,7 @@ The scheduler never chooses an unsupported/unsafe path, exposes its decisions, a
 
 ### Optional outcome
 
-Issue #74 may add exact context-derived n-gram speculation after ordinary state and serving semantics are stable. It uses the same target model for verification, must preserve deterministic output, reports its PLE I/O and negative controls, and automatically disables on low-acceptance workloads. It cannot block or replace the core phase exit.
+Issue #74 may add exact context-derived n-gram speculation after ordinary state and serving semantics are stable. It uses the same target model for verification, must preserve deterministic output, reports PLE I/O and negative controls, and automatically disables on low-acceptance workloads. It cannot block or replace the core phase exit.
 
 ### Exit gate
 
@@ -145,9 +149,11 @@ Every required core checkbox in `release-criteria.md` has linked evidence. Optio
 ## Critical path
 
 ```text
-upstream import
-  → Pascal compile
-  → Qwen4 + GGUF + dedicated NVMe PLE reference
+initial upstream import and provenance
+  → issue #77: sync merged FreeToken Qwen3.8 PR #257
+  → reconcile/retire duplicate PR #232 downstream code
+  → Pascal CUDA 12.6 compile and tiny Qwen reference
+  → GGUF + dedicated NVMe PLE reference
   → random-advised mmap/pread + adaptive PLE I/O/prefetch
   → AVX2 expert backend + named Q4/Q3 profiles
   → serving-ready host-expert integration
@@ -169,34 +175,38 @@ optional after stable state/serving:
 
 ## Parallel work
 
-Before P4 arrival, independent workers can handle:
+Issue #77 owns broad Qwen model/QSA/PLE/cache/state reconciliation and must be serialized against edits to those same files. Before P4 arrival, independent non-overlapping workers can handle:
 
-- source import/provenance;
-- build container and H1 CI;
-- Qwen4/GGUF loader integration;
-- dedicated PLE file format, random advice, mmap/pread backends, adaptive planner, read-amplification metrics and asynchronous prefetch;
+- CUDA 12.6/H1 environment maintenance;
+- GGUF loader and quant-format work outside conflicting Qwen model files;
 - CPU expert ABI/kernels;
-- Q4/Q3 identity, census, quant conversion and mixed-precision correctness A/B tests;
-- serving-ready host expert integration;
-- placement planner/post-prefill canary/backoff logic and result schemas;
-- QSA phase telemetry, workspace accounting/reuse, synchronization audit and controlled-OOM tests;
-- fused router reference/dispatch and `sm_61` compile work;
-- cache trace/static-hot simulator;
+- Q4/Q3 identity, census and mixed-precision quality fixtures;
+- placement planner and result-schema pure logic;
+- QSA benchmark/telemetry design that does not duplicate the upstream sync diff;
+- fused router reference/dispatch and `sm_61` compile work after its model-call boundary is stable;
+- cache trace/static-hot simulation formats;
 - optional n-gram proposal/state fixtures, kept independent from core dependencies;
 - server/config/metrics contracts;
 - documentation and tests.
 
-Avoid concurrent edits to the same model loader, quant registry or cache core. The orchestrator assigns ownership and serializes those merges.
+After #77 merges, workers can safely proceed on:
+
+- dedicated PLE file format, random advice, mmap/pread backends, adaptive planner, read-amplification metrics and asynchronous prefetch;
+- serving-ready host expert integration;
+- QSA workspace reuse/synchronization changes;
+- Pascal GPU and cache integration.
+
+Avoid concurrent edits to the same model loader, quant registry, QSA backend, PLE implementation or cache core. The orchestrator assigns ownership and serializes those merges.
 
 ## Stop/reassess conditions
 
 Create or amend an ADR before continuing if:
 
-- FreeToken upstream merges equivalent work with a conflicting design;
+- issue #77 shows that merged upstream #257 conflicts fundamentally with required Pascal/GGUF/storage contracts;
 - neither Q4 nor the named Q3 profile fits the host operating envelope with safe headroom;
 - P4 lacks sufficient VRAM for the required always-active trunk and state after post-prefill placement backoff;
 - placement canary evidence shows unavoidable spill/fallback cliffs below a useful configuration;
-- QSA selection/workspace/synchronization overhead makes required 32K or 128K operation unusable and cannot be bounded or optimized safely;
+- QSA selection/workspace/synchronization overhead makes required 32K or 128K operation unusable and cannot be bounded safely;
 - the dedicated PLE shard cannot provide stable random-I/O behavior without unrelated-weight coupling or unacceptable read amplification;
 - AVX2 CPU experts are so slow that current-step CPU work cannot help;
 - no realistic cache size beats the static-hot/control path;
