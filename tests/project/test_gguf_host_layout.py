@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from freetoken.gguf_host import (
     MappedPLETable,
+    convert_gguf_ple_to_artifact,
     dequantize_iq4_nl,
     expert_layout_from_census,
     host_memory_report_from_census,
@@ -197,6 +198,58 @@ def test_ple_warm_modes_and_fault_telemetry_are_observable() -> None:
 
     with MappedPLETable.open_from_gguf(FIXTURE, warm_mode="full-model-warm") as table:
         assert table.telemetry()["full_model_warm_bytes"] == FIXTURE.stat().st_size
+
+
+def test_dedicated_ple_artifact_round_trip_and_manifest(tmp_path: Path) -> None:
+    artifact = tmp_path / "ple"
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+    manifest = json.loads((artifact / "manifest.json").read_text())
+    assert manifest["format"] == "freetoken-pascal-ple-v1"
+    assert manifest["tensor_bytes"] == (artifact / "ple.bin").stat().st_size
+    with MappedPLETable.open_from_artifact(artifact) as table:
+        assert table.lookup(np.array([0, 31])).shape == (2, 160)
+
+
+def test_dedicated_ple_artifact_rejects_tampering_and_bad_geometry(tmp_path: Path) -> None:
+    artifact = tmp_path / "ple"
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+    payload = artifact / "ple.bin"
+    payload.write_bytes(payload.read_bytes()[:-1] + b"x")
+    with pytest.raises(ValueError, match="sha256"):
+        MappedPLETable.open_from_artifact(artifact)
+
+    convert_gguf_ple_to_artifact(FIXTURE, artifact := tmp_path / "bad")
+    manifest_path = artifact / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["row_bytes"] += 1
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="geometry"):
+        MappedPLETable.open_from_artifact(artifact)
+
+
+def test_dedicated_full_warm_only_touches_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "ple"
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+    touched: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        "freetoken.gguf_host._warm_model_files", lambda paths: touched.append(paths) or 1
+    )
+    with MappedPLETable.open_from_artifact(artifact, warm_mode="full-ple-warm"):
+        pass
+    assert touched == [(str(artifact / "ple.bin"),)]
+
+
+def test_dedicated_loader_ignores_provenance_source_path(tmp_path: Path) -> None:
+    artifact = tmp_path / "ple"
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+    manifest_path = artifact / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["source"]["path"] = str(tmp_path / "missing-model.gguf")
+    manifest_path.write_text(json.dumps(manifest))
+    with MappedPLETable.open_from_artifact(artifact) as table:
+        assert table.lookup(np.array([0])).shape == (1, 160)
 
 
 def test_host_layout_cli_reports_selected_behavior() -> None:
