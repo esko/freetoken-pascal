@@ -254,7 +254,7 @@ sources:
         source_ref: 58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6
         method: cherry-pick
         local_modifications:
-          - preserve the exact upstream implementation and validate the no-native-FP8 Pascal fallback
+          - guard the load-time probe behind native-FP8 capability so Pascal remains on W8A16
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 77
@@ -264,6 +264,7 @@ sources:
         method: cherry-pick
         local_modifications:
           - preserve the upstream side-stream and segmented-scale regressions
+          - add a no-native-FP8 load regression for Pascal
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 77

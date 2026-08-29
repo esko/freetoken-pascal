@@ -403,7 +403,9 @@ class Fp8PerTensorLinear(BaseOP):
         self._uniform_scale = bool((scale == scale[0]).all().item())
         # Segments for the per-part path; decide row-wise safety now, not under graph capture.
         self._scale_segments = None if self._uniform_scale else weight_scale_segments(scale)
-        if self.input_scale is not None and not self._uniform_scale:
+        # Pascal and every other non-native-FP8 target must remain on W8A16 without
+        # allocating probe tensors or calling _scaled_mm during model load.
+        if self.input_scale is not None and not self._uniform_scale and e4m3_native():
             rowwise_scaled_mm_ok()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

@@ -126,6 +126,27 @@ def test_layer_load_marks_uniform_scale_and_optional_input_scale():
     assert single._uniform_scale is True
     assert single.input_scale is None
 
+
+def test_layer_load_does_not_probe_rowwise_without_native_fp8(monkeypatch):
+    """sm_61 keeps input-scale metadata but must not allocate a row-wise _scaled_mm probe."""
+    import freetoken.kernel.triton.fp8_pertensor_linear as mod
+
+    K = 512
+    w8, scale = _quant_parts([256, 64, 64], K)
+    merged = mod.Fp8PerTensorColMerged(K, [256, 64, 64])
+    monkeypatch.setattr(mod, "e4m3_native", lambda: False)
+    monkeypatch.setattr(
+        mod,
+        "rowwise_scaled_mm_ok",
+        lambda: pytest.fail("non-native FP8 target attempted row-wise probe"),
+    )
+    merged.load_state_dict({
+        "weight": w8,
+        "weight_scale": scale,
+        "input_scale": torch.tensor(0.01, device=DEV),
+    })
+    assert merged.input_scale is not None
+
     # a reload must not trip over the input_scale it kept from the first load
     single.load_state_dict({"weight": w8, "weight_scale": flat})
     assert single.input_scale is None
