@@ -14,16 +14,17 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 | P1 | [#10](https://github.com/esko/freetoken-pascal/issues/10) | FreeToken Pascal/CUDA 12.6 support | H1/H2 |
 | P1 | [#11](https://github.com/esko/freetoken-pascal/issues/11) | Qwen3.8/Qwen4 text architecture | H0-H2 |
 | P1 | [#12](https://github.com/esko/freetoken-pascal/issues/12) | Safe GGUF K/I loader and tensor census | H0-H2 |
-| P1 | [#13](https://github.com/esko/freetoken-pascal/issues/13) | Dedicated NVMe PLE format, mmap/pread I/O, batching, prefetch and heterogeneous expert pools | H0-H2 |
+| P1 | [#13](https://github.com/esko/freetoken-pascal/issues/13) | Dedicated NVMe PLE format, random-I/O backends, adaptive batching/prefetch and heterogeneous expert pools | H0-H2 |
 | P1 | [#14](https://github.com/esko/freetoken-pascal/issues/14) | Independent short/long-context reference | H0/H2 |
 | P2 | [#15](https://github.com/esko/freetoken-pascal/issues/15) | Model-agnostic CPU expert ABI | H0 |
 | P2 | [#16](https://github.com/esko/freetoken-pascal/issues/16) | AVX2 Q4_K expert kernels | H0/target CPU |
-| P2 | [#17](https://github.com/esko/freetoken-pascal/issues/17) | Census-required Q2/Q3/IQ CPU formats | H0/target CPU |
+| P2 | [#17](https://github.com/esko/freetoken-pascal/issues/17) | Named Q3 profile and census-required Q2/Q3/IQ CPU formats | H0/target CPU |
 | P2 | [#18](https://github.com/esko/freetoken-pascal/issues/18) | NUMA-aware host banks and bounded pinning | H0/H3 |
 | P3 | [#19](https://github.com/esko/freetoken-pascal/issues/19) | Pascal DP4A and format-tuned GPU expert backend | H1/H2 |
-| P3 | [#20](https://github.com/esko/freetoken-pascal/issues/20) | Disjoint dual-P4 expert ownership before TP=2 comparison | H0/H3 |
+| P3 | [#73](https://github.com/esko/freetoken-pascal/issues/73) | VRAM placement-cliff guard and startup canary | H0-H3 |
+| P3 | [#20](https://github.com/esko/freetoken-pascal/issues/20) | Compare dual-P4 expert ownership and trunk policies | H0/H3 |
 | P3 | [#38](https://github.com/esko/freetoken-pascal/issues/38) | Fused Qwen3.8 `topk=10` Pascal router | H0-H2 |
-| P3 | [#21](https://github.com/esko/freetoken-pascal/issues/21) | Fixed cache and correct mixed partial merge | H0-H3 |
+| P3 | [#21](https://github.com/esko/freetoken-pascal/issues/21) | Fixed cache, static-hot comparator and correct mixed partial merge | H0-H3 |
 | P3 | [#22](https://github.com/esko/freetoken-pascal/issues/22) | Async LFRU, persisted heat and telemetry | H0-H3 |
 | P4 | [#23](https://github.com/esko/freetoken-pascal/issues/23) | Concurrent current-step CPU/GPU misses | H0-H3 |
 | P4 | [#24](https://github.com/esko/freetoken-pascal/issues/24) | Contention-aware `q*` and fallback | H0-H3 |
@@ -31,6 +32,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 | P5 | [#26](https://github.com/esko/freetoken-pascal/issues/26) | Long-context state and semantic checkpoints | H0/H3/H4 |
 | P5 | [#27](https://github.com/esko/freetoken-pascal/issues/27) | OpenAI serving, cancellation and observability | H0/H3/H4 |
 | P5 | [#28](https://github.com/esko/freetoken-pascal/issues/28) | Docker/Compose and production operations | H0/H3/H4 |
+| P5 | [#74](https://github.com/esko/freetoken-pascal/issues/74) | Optional exact context-derived n-gram profile | H0/H2/H3, non-blocking |
 | P6 | [#29](https://github.com/esko/freetoken-pascal/issues/29) | Hardware qualification, benchmark, soak and v1.0 | H2-H4, hardware blocked |
 
 ## Critical dependency chain
@@ -39,23 +41,25 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 #5 → #7 → #10 → #11 → #12 → #13 → #14
                     └→ #15 → #16 → #18
                          #12 → #19
-#9 + #11 + #13 → #20
-#16 + #19 + #20 → #21
+#11 + #13 + #19 → #73
+#9 + #11 + #13 + #73 → #20
+#16 + #19 + #20 + #73 → #21
 #14 → #38
 #21 + #38 → #22 → #23 → #24 → #25
 #14 + #20 + #24 + #25 → #26 → #27 → #28 → #29
 #13 → #25 + #26 + #28 + #29
+#13 + #14 + #25 + #26 + #27 → #74  (optional; does not block #29)
 ```
 
-[#6](https://github.com/esko/freetoken-pascal/issues/6) and [#8](https://github.com/esko/freetoken-pascal/issues/8) support all phases. [#17](https://github.com/esko/freetoken-pascal/issues/17) is required for the selected 3-bit profile and any additional release-artifact bank types.
+[#6](https://github.com/esko/freetoken-pascal/issues/6) and [#8](https://github.com/esko/freetoken-pascal/issues/8) support all phases. [#17](https://github.com/esko/freetoken-pascal/issues/17) is required for the selected Q3 profile and any additional release-artifact bank types.
 
 ## Work possible before P4 arrival
 
-The orchestrator should prioritize H0/H1 portions of #5–#8, #10–#19 and #38, plus the pure logic/tests in #20–#25. This includes the PLE file format, both storage backends, batching, prefetch, CPU expert execution, routing simulation, quant conversion, metrics and correctness A/B tests. Issues #9 and #29 are explicitly blocked. DP4A tuning and selection between disjoint ownership and conventional TP remain H2/H3 work, and other issues remain open until their required hardware evidence is attached.
+The orchestrator should prioritize H0/H1 portions of #5–#8, #10–#19, #38 and #73, plus the pure logic/tests in #20–#25 and #74. This includes the PLE file format, random-access advice, mmap/`pread`, adaptive batching, read-amplification telemetry, CPU expert execution, Q4/Q3 census and quality fixtures, routing simulation, placement planning/canary logic, quant conversion, metrics and correctness A/B tests. Issues #9 and #29 are explicitly blocked. DP4A tuning, placement-cliff measurement, dual-P4 policy selection and final quant/profile selection remain H2/H3 work, and other issues remain open until their required hardware evidence is attached.
 
 ## Completeness audit
 
-The v1 backlog includes explicit work and acceptance evidence for:
+The core v1 backlog includes explicit work and acceptance evidence for:
 
 - source import, provenance and licensing;
 - reproducible CUDA/Python toolchains;
@@ -63,12 +67,14 @@ The v1 backlog includes explicit work and acceptance evidence for:
 - loader/converter and malformed-file correctness;
 - Qwen4 GDN/QSA/hyperconnection/PLE semantics;
 - heterogeneous expert bank types resident in DDR4 and a dedicated NVMe PLE layout served through the Linux page cache;
-- mmap and positional-read PLE backends with batched, deduplicated, sorted reads and asynchronous prefetch;
+- mmap and positional-read PLE backends with random advice, adaptive deduplication/ordering, asynchronous prefetch and physical read-amplification evidence;
 - AVX2 CPU fallback and required low-bit formats;
+- named Q4 reference and Q3 whole-model throughput profiles plus component-level higher-precision tests;
 - Pascal GPU kernel parity;
 - exact full-softmax `topk=10` router parity and fallback;
-- one-GPU bring-up and disjoint two-GPU expert ownership before conventional TP comparison;
-- cache-zero, static cache, async fill and current-step hybrid merge;
+- placement planning, headroom, canary, automatic backoff and fail-readiness behavior;
+- one-GPU bring-up and measured two-GPU ownership/trunk policies;
+- cache-zero, static-hot, static cache, async fill and current-step hybrid merge;
 - contention-aware scheduling and safe pure fallbacks;
 - prefill wider than cache capacity;
 - long-context state and semantic restore;
@@ -77,4 +83,4 @@ The v1 backlog includes explicit work and acceptance evidence for:
 - clean Docker/Compose deployment and rollback;
 - benchmarks, soak, fault injection and release reproducibility.
 
-Post-v1 items such as vision, GLM, MTP, DFlash, n-gram speculation and pruning must not be used to block release.
+The optional v1 backlog may additionally provide exact context-derived n-gram speculation, but it cannot block core v1. Post-v1 items such as vision, GLM, native MTP, DFlash, external draft models, lossy speculative prefill and pruning must not be used to block release.
