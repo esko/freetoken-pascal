@@ -228,6 +228,27 @@ sources:
         header_policy: preserved
         responsible_issue: 12
         responsible_pull_request: 36
+  - id: freetoken-gguf-grid-z
+    repository: https://github.com/FlashML-org/FreeToken
+    pull_request: 131
+    upstream_ref: refs/pull/131/head
+    ref: 9952a39dd2a8718efca495940f78376f13f636ac
+    license: Apache-2.0
+    role: long-prefill GGUF MoE vector-launch correctness fix
+    usage: imported
+    responsible_issue: 14
+    notice_required: true
+    imports:
+      - source_path: python/freetoken/kernel/csrc/gguf/moe_vec.cuh
+        destination_path: python/freetoken/kernel/csrc/gguf/moe_vec.cuh
+        source_ref: 9952a39dd2a8718efca495940f78376f13f636ac
+        method: adapted
+        local_modifications:
+          - retain the downstream GGUF quantization table and source layout
+          - route every supported quant launcher through the token-aligned gridDim.z chunk helper
+        license: Apache-2.0
+        header_policy: preserved
+        responsible_issue: 14
   - id: freetoken-q4k-w4a16-reference
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 131
