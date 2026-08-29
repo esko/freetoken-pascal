@@ -73,6 +73,19 @@ def _pack_rows(name: str, rows: int, input_dim: int, seed: int) -> np.ndarray:
     ).astype(np.uint8, copy=False)
 
 
+def _pack_signed_q8_0_block(scale: float, offset: int = 0) -> np.ndarray:
+    """Build a Q8_0 block that exercises the complete signed-int8 range."""
+    codes = np.array(
+        [-128, -127, -1, 0, 1, 2, 126, 127] * 4,
+        dtype=np.int8,
+    )
+    codes = np.roll(codes, offset)
+    block = np.zeros(Q8_0_BLOCK_BYTES, dtype=np.uint8)
+    block[:2] = _half_bytes(scale)
+    block[2:] = codes.view(np.uint8)
+    return block
+
+
 def _reference_gemv(name: str, rows: np.ndarray, input_dim: int, vector: np.ndarray) -> np.ndarray:
     elements, block_bytes = _FORMATS[name]
     decoded = np.empty((rows.shape[0], input_dim), dtype=np.float32)
@@ -347,6 +360,88 @@ def test_native_q5_1_multi_block_gemv_preserves_block_reduction_order(
     bounded_rows[:] = rows
     bounded = np.empty(rows.shape[0], dtype=np.float32)
     primitive.gemv(bounded_rows, 640, vector, quant_name="Q5_1", out=bounded)
+    np.testing.assert_array_equal(canary[:32], 0xCD)
+    np.testing.assert_array_equal(canary[-32:], 0xCD)
+    np.testing.assert_array_equal(bounded, actual)
+
+
+@pytest.mark.parametrize("scale", [0.03125, -0.75, 1.0])
+def test_native_q8_0_vectorized_decode_preserves_signed_int8_codes(
+    scale: float,
+    mixed_native_library: Path | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch unsigned-byte widening, including -128 and both signed endpoints."""
+    if mixed_native_library is None:
+        pytest.skip("g++ unavailable")
+    monkeypatch.setenv("FREETOKEN_MIXED_GEMV_NATIVE_LIB", str(mixed_native_library))
+    primitive = select_mixed_gemv_primitive("forced_avx2")
+    if primitive.isa == "scalar":
+        pytest.skip("AVX2/FMA unavailable")
+    block = _pack_signed_q8_0_block(scale)
+    codes = block[2:].view(np.int8).astype(np.float32)
+    expected = codes * np.float32(scale)
+    decoded = np.empty(Q8_0_BLOCK_ELEMENTS, dtype=np.float32)
+    primitive.decode(block, quant_name="Q8_0", out=decoded)
+    np.testing.assert_array_equal(decoded, expected)
+
+    vector = np.linspace(-3.0, 2.0, Q8_0_BLOCK_ELEMENTS, dtype=np.float32)
+    expected_dot = np.asarray(np.sum(expected * vector, dtype=np.float32), dtype=np.float32)
+    np.testing.assert_allclose(
+        primitive.dot(block, vector, quant_name="Q8_0"),
+        expected_dot,
+        rtol=3e-6,
+        atol=3e-6,
+    )
+
+
+def test_native_q8_0_multi_block_gemv_preserves_block_reduction_order_and_canaries(
+    mixed_native_library: Path | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep Q8_0 GEMV block order while guarding every packed-row edge."""
+    if mixed_native_library is None:
+        pytest.skip("g++ unavailable")
+    monkeypatch.setenv("FREETOKEN_MIXED_GEMV_NATIVE_LIB", str(mixed_native_library))
+    primitive = select_mixed_gemv_primitive("forced_avx2")
+    if primitive.isa == "scalar":
+        pytest.skip("AVX2/FMA unavailable")
+
+    rows = _pack_rows("Q8_0", 3, 640, seed=719)
+    blocks = rows.shape[1] // Q8_0_BLOCK_BYTES
+    for row in range(rows.shape[0]):
+        for block in range(blocks):
+            begin = block * Q8_0_BLOCK_BYTES
+            rows[row, begin : begin + Q8_0_BLOCK_BYTES] = _pack_signed_q8_0_block(
+                0.03125 * (1 + ((row + block) % 5)), offset=row + block
+            )
+    vector = np.linspace(-500.0, 500.0, 640, dtype=np.float32)
+
+    # The established packed GEMV contract is one native float32 dot result
+    # per block, accumulated in block order.  This checks that contract without
+    # imposing a different FMA/reduction order on the dot primitive itself.
+    expected = np.zeros(rows.shape[0], dtype=np.float32)
+    for row in range(rows.shape[0]):
+        for block in range(blocks):
+            begin = block * Q8_0_BLOCK_BYTES
+            input_begin = block * Q8_0_BLOCK_ELEMENTS
+            expected[row] = np.float32(
+                expected[row]
+                + primitive.dot(
+                    rows[row, begin : begin + Q8_0_BLOCK_BYTES],
+                    vector[input_begin : input_begin + Q8_0_BLOCK_ELEMENTS],
+                    quant_name="Q8_0",
+                )
+            )
+    actual = np.empty(rows.shape[0], dtype=np.float32)
+    primitive.gemv(rows, 640, vector, quant_name="Q8_0", out=actual)
+    np.testing.assert_array_equal(actual, expected)
+
+    canary = np.full(rows.nbytes + 64, 0xCD, dtype=np.uint8)
+    bounded_rows = canary[32:-32].reshape(rows.shape)
+    bounded_rows[:] = rows
+    bounded = np.empty(rows.shape[0], dtype=np.float32)
+    primitive.gemv(bounded_rows, 640, vector, quant_name="Q8_0", out=bounded)
     np.testing.assert_array_equal(canary[:32], 0xCD)
     np.testing.assert_array_equal(canary[-32:], 0xCD)
     np.testing.assert_array_equal(bounded, actual)

@@ -150,8 +150,10 @@ same scalar reference fallback. Its optional helper is loaded from
 `FREETOKEN_MIXED_GEMV_NATIVE_LIB` or the package extension. The H0 adapter
 dispatches each packed projection to its format-specific primitive and retains
 the dense/dequantize ABI oracle. Q4_K and Q5_1 AVX2 kernels expand packed nibbles
-directly into vector lanes, but GEMV still reduces and accumulates one quant block
-at a time in the reference order. An opt-in `num_threads > 1` runner is created
+directly into vector lanes, while Q8_0 sign-extends packed int8 codes directly into
+AVX2 lanes. Q8_0 GEMV inlines that dot body to avoid a call boundary for each
+32-value block. Every packed GEMV still reduces and accumulates one quant block at
+a time in the reference order. An opt-in `num_threads > 1` runner is created
 only when the selected layer has native AVX2 coverage for all three projections
 and valid census geometry. It partitions route columns into private worker
 requests, reduces partials in partition order, and commits once on the owner
