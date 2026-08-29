@@ -279,5 +279,7 @@ softmax denominator, defaults to the Qwen unrenormalized selected probabilities,
 route widths up to the configured Qwen top-k, and forwards padding and bundle telemetry.
 The optional `phase` and `group_size` keywords must be `decode` and `1`. Its caller owns
 the shared bundle and must close it after all layer adapters finish. It rejects CUDA,
-prefill, grouped, nonzero-cache and TP>1 execution; it is not wired into Qwen model
-construction or the serving Engine.
+prefill, grouped, nonzero-cache and TP>1 execution. An initialized Engine can explicitly
+borrow the same bundle through `Engine.attach_qwen_gguf_cpu_expert_bundle()`, which
+installs the eager bridge wrappers and detaches them during cleanup; startup, CLI
+defaults, GGUF opening, prefill, serving and the homogeneous cache guard remain unchanged.
