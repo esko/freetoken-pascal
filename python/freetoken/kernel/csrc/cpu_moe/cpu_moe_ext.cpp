@@ -19,8 +19,9 @@
 #include <atomic>
 #include <condition_variable>
 #include <cmath>
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -38,6 +39,12 @@
 #define CPU_MOE_HAS_AFFINITY 1
 #else
 #define CPU_MOE_HAS_AFFINITY 0
+#endif
+
+#if defined(ENOTSUP)
+constexpr int CPU_MOE_AFFINITY_UNSUPPORTED = ENOTSUP;
+#else
+constexpr int CPU_MOE_AFFINITY_UNSUPPORTED = EINVAL;
 #endif
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -1282,7 +1289,7 @@ struct CpuMoeExecutor {
   std::mutex sync_mtx;
   std::condition_variable sync_cv;
 
-  bool stop = false;
+  std::atomic<bool> stop{false};
   uint64_t cur_gen = 0;
   MoeTask* cur_task = nullptr;
   std::atomic<uint64_t> submitted{0};
@@ -1300,6 +1307,30 @@ struct CpuMoeExecutor {
   std::vector<MoeTask*> owned_tasks;  // persistent task descriptors (graph-stable)
   std::vector<int> core_ids;          // worker tid -> logical CPU to pin to (may be empty)
 
+  // Affinity startup state is normally published before the constructor/start call
+  // returns. A bounded worker wait can become terminally timed out; the Python
+  // wrapper treats this as a fail-closed state, never as a requested-plan success.
+  mutable std::mutex affinity_mtx;
+  std::condition_variable affinity_cv;
+  int worker_affinity_ready = 0;
+  std::vector<int> worker_requested_cpus;
+  std::vector<int> worker_observed_affinity_cpus;
+  std::vector<int> worker_affinity_errors;
+  std::vector<uint8_t> worker_affinity_verified;
+  std::vector<uint8_t> worker_affinity_published;
+  bool worker_affinity_startup_failed = false;
+  bool worker_affinity_startup_timed_out = false;
+  bool worker_pool_usable = true;
+  int coordinator_requested_cpu = -1;
+  int coordinator_observed_affinity_cpu = -1;
+  int coordinator_affinity_error = 0;
+  bool coordinator_affinity_verified = false;
+  bool coordinator_affinity_ready = false;
+  bool coordinator_affinity_startup_failed = false;
+  bool coordinator_affinity_startup_timed_out = false;
+  bool coordinator_started = false;
+  std::string affinity_failure_reason;
+
   // ---- Flag-based GPU<->CPU handshake (replaces the per-layer cudaLaunchHostFunc pair) ----
   // A tiny GPU kernel bumps ready_flags[slot] at submit; this coordinator thread busy-polls
   // it, runs the slot's task on the worker pool, and sets done_flags[slot], which a GPU
@@ -1310,6 +1341,8 @@ struct CpuMoeExecutor {
   // the same pointers are used by the GPU kernels and by this thread).
   std::thread coord_thread;
   std::atomic<bool> coord_stop{false};
+  std::mutex admission_mtx;
+  bool admission_stopped = false;
   volatile int64_t* ready_flags = nullptr;  // GPU increments, this thread polls
   volatile int64_t* done_flags = nullptr;   // this thread sets, GPU spin-waits
   int coord_num_slots = 0;
@@ -1420,8 +1453,41 @@ struct CpuMoeExecutor {
       gi8_scratch.assign(static_cast<size_t>(max_tokens) * top_k * I, 0);
       gas_scratch.assign(static_cast<size_t>(max_tokens) * top_k * (I / 32), 0);
     }
-    for (int t = 0; t < num_threads; ++t)
-      workers.emplace_back([this, t] { worker_loop(t); });
+    worker_requested_cpus.assign(num_threads, -1);
+    worker_observed_affinity_cpus.assign(num_threads, -1);
+    worker_affinity_errors.assign(num_threads, 0);
+    worker_affinity_verified.assign(num_threads, 0);
+    worker_affinity_published.assign(num_threads, 0);
+    try {
+      for (int t = 0; t < num_threads; ++t)
+        workers.emplace_back([this, t] {
+          worker_loop(t);
+        });
+    } catch (...) {
+      stop_workers();
+      join_workers();
+      throw;
+    }
+    {
+      std::unique_lock<std::mutex> lk(affinity_mtx);
+      const bool ready = affinity_cv.wait_for(
+          lk, std::chrono::seconds(5),
+          [this] { return worker_affinity_ready == num_threads || worker_affinity_startup_failed; });
+      if (!ready) {
+        worker_affinity_startup_timed_out = true;
+        worker_pool_usable = false;
+        affinity_failure_reason = "worker affinity startup timed out";
+        lk.unlock();
+        stop_workers();
+        return;
+      }
+      if (worker_affinity_startup_failed) {
+        lk.unlock();
+        stop_workers();
+        join_workers();
+        throw std::runtime_error(affinity_failure_reason);
+      }
+    }
   }
 
   // Quantize a bf16 activation row to Q8_0 (llama.cpp): per-32-block symmetric int8 in
@@ -1516,34 +1582,213 @@ struct CpuMoeExecutor {
                  fp16_to_f32(dn_global_l[r]), ge, go, I, e2m1_lut, e4m3_lut);
   }
 
-  void pin_self(int tid) {
 #if CPU_MOE_HAS_AFFINITY
-    if (core_ids.empty()) return;
-    const int cpu = core_ids[tid % static_cast<int>(core_ids.size())];
-    cpu_set_t set;
-    CPU_ZERO(&set);
-    CPU_SET(cpu, &set);
-    pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
-#else
-    (void)tid;
+  static int singleton_cpu(const cpu_set_t& set) {
+    int found = -1;
+    int count = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+      if (CPU_ISSET(cpu, &set)) {
+        found = cpu;
+        ++count;
+      }
+    }
+    return count == 1 ? found : -1;
+  }
 #endif
+
+  static const char* affinity_error_name(int error) {
+    switch (error) {
+      case EINVAL:
+        return "EINVAL";
+      case ETIMEDOUT:
+        return "ETIMEDOUT";
+#if defined(ENOTSUP) && ENOTSUP != EINVAL
+      case ENOTSUP:
+        return "ENOTSUP";
+#endif
+      default:
+        return "unknown";
+    }
+  }
+
+  void note_affinity_error_locked(const char* subject, int error) {
+    if (error != 0 && affinity_failure_reason.empty()) {
+      affinity_failure_reason = std::string(subject) + " affinity error " +
+                                std::to_string(error) + " (" + affinity_error_name(error) + ")";
+    }
+  }
+
+  void publish_worker_affinity(int tid, int requested, int observed, int error,
+                               bool verified) {
+    {
+      std::lock_guard<std::mutex> lk(affinity_mtx);
+      worker_requested_cpus[tid] = requested;
+      worker_observed_affinity_cpus[tid] = observed;
+      worker_affinity_errors[tid] = error;
+      worker_affinity_verified[tid] = verified ? 1 : 0;
+      if (!worker_affinity_published[tid]) {
+        worker_affinity_published[tid] = 1;
+        ++worker_affinity_ready;
+      }
+      note_affinity_error_locked("worker", error);
+    }
+    affinity_cv.notify_all();
+  }
+
+  void publish_worker_startup_failure(int tid) noexcept {
+    try {
+      {
+        std::lock_guard<std::mutex> lk(affinity_mtx);
+        if (!worker_affinity_published[tid]) {
+          worker_requested_cpus[tid] = -1;
+          worker_observed_affinity_cpus[tid] = -1;
+          worker_affinity_errors[tid] = EFAULT;
+          worker_affinity_verified[tid] = 0;
+          worker_affinity_published[tid] = 1;
+          ++worker_affinity_ready;
+        }
+        worker_affinity_startup_failed = true;
+        if (affinity_failure_reason.empty())
+          affinity_failure_reason = "worker thread startup failed";
+      }
+      affinity_cv.notify_all();
+    } catch (...) {
+      // The constructor's bounded wait remains the final escape hatch if even
+      // failure publication cannot acquire its synchronization state.
+    }
+  }
+
+  void pin_self(int tid) {
+    const int requested =
+        (tid >= 0 && !core_ids.empty())
+            ? core_ids[tid % static_cast<int>(core_ids.size())]
+            : -1;
+    int actual = -1;
+    int error = 0;
+    bool verified = false;
+#if CPU_MOE_HAS_AFFINITY
+    if (requested >= 0 && requested < CPU_SETSIZE) {
+      cpu_set_t set;
+      CPU_ZERO(&set);
+      CPU_SET(requested, &set);
+      error = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+      cpu_set_t observed;
+      CPU_ZERO(&observed);
+      const int read_error = pthread_getaffinity_np(pthread_self(), sizeof(observed), &observed);
+      if (read_error == 0) {
+        actual = singleton_cpu(observed);
+        if (error == 0 && actual == requested)
+          verified = true;
+        else if (error == 0)
+          error = EINVAL;
+      } else if (error == 0) {
+        error = read_error;
+      }
+    } else if (requested >= 0) {
+      error = EINVAL;
+    }
+#else
+    if (requested >= 0) error = CPU_MOE_AFFINITY_UNSUPPORTED;
+#endif
+    publish_worker_affinity(tid, requested, actual, error, verified);
+  }
+
+  void pin_coordinator(int requested) {
+    int actual = -1;
+    int error = 0;
+    bool verified = false;
+#if CPU_MOE_HAS_AFFINITY
+    if (requested >= 0 && requested < CPU_SETSIZE) {
+      cpu_set_t set;
+      CPU_ZERO(&set);
+      CPU_SET(requested, &set);
+      error = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+      cpu_set_t observed;
+      CPU_ZERO(&observed);
+      const int read_error = pthread_getaffinity_np(pthread_self(), sizeof(observed), &observed);
+      if (read_error == 0) {
+        actual = singleton_cpu(observed);
+        if (error == 0 && actual == requested)
+          verified = true;
+        else if (error == 0)
+          error = EINVAL;
+      } else if (error == 0) {
+        error = read_error;
+      }
+    } else if (requested >= 0) {
+      error = EINVAL;
+    }
+#else
+    if (requested >= 0) error = CPU_MOE_AFFINITY_UNSUPPORTED;
+#endif
+    {
+      std::lock_guard<std::mutex> lk(affinity_mtx);
+      coordinator_requested_cpu = requested;
+      coordinator_observed_affinity_cpu = actual;
+      coordinator_affinity_error = error;
+      coordinator_affinity_verified = verified;
+      coordinator_affinity_ready = true;
+      note_affinity_error_locked("coordinator", error);
+    }
+    if (error != 0) coord_stop.store(true, std::memory_order_release);
+    affinity_cv.notify_all();
+  }
+
+  void publish_coordinator_startup_failure() noexcept {
+    try {
+      {
+        std::lock_guard<std::mutex> lk(affinity_mtx);
+        coordinator_affinity_error = EFAULT;
+        coordinator_affinity_startup_failed = true;
+        coordinator_affinity_ready = true;
+        if (affinity_failure_reason.empty())
+          affinity_failure_reason = "coordinator thread startup failed";
+      }
+      affinity_cv.notify_all();
+    } catch (...) {
+    }
+  }
+
+  void ensure_worker_pool_usable() const {
+    std::lock_guard<std::mutex> lk(affinity_mtx);
+    if (!worker_pool_usable) {
+      const std::string reason = affinity_failure_reason.empty()
+                                     ? "worker affinity startup timed out"
+                                     : affinity_failure_reason;
+      throw std::runtime_error("CPU MoE worker pool is unusable: " + reason);
+    }
+  }
+
+  void begin_admission_stop() {
+    std::lock_guard<std::mutex> lk(admission_mtx);
+    admission_stopped = true;
+  }
+
+  void stop_workers() {
+    stop.store(true, std::memory_order_release);
+    task_cv.notify_all();
+    sync_cv.notify_all();
+  }
+
+  void join_workers() {
+    for (auto& th : workers)
+      if (th.joinable()) th.join();
   }
 
   ~CpuMoeExecutor() {
-    coord_stop.store(true);
-    if (coord_thread.joinable()) coord_thread.join();
-    {
-      std::lock_guard<std::mutex> lk(task_mtx);
-      stop = true;
-    }
-    task_cv.notify_all();
-    for (auto& th : workers)
-      if (th.joinable()) th.join();
+    // A coordinator may be waiting in sync() for the worker pool.  Stop and
+    // notify workers first; sync() also observes stop so this ordering cannot
+    // leave the coordinator waiting for work that teardown intentionally drops.
+    begin_admission_stop();
+    stop_workers();
+    stop_flag_coordinator();
+    join_workers();
     for (MoeTask* t : owned_tasks) delete t;
   }
 
   uintptr_t create_task(int layer_id, int num_tokens, uintptr_t x_ptr,
                         uintptr_t ids_ptr, uintptr_t w_ptr, uintptr_t y_ptr) {
+    ensure_worker_pool_usable();
     MoeTask* t = new MoeTask{this,
                              layer_id,
                              num_tokens,
@@ -1556,6 +1801,54 @@ struct CpuMoeExecutor {
   }
 
   const char* isa_name() const { return isa; }
+
+  pybind11::dict affinity_report() const {
+    std::lock_guard<std::mutex> lk(affinity_mtx);
+    pybind11::dict report;
+    const bool workers_ready = worker_affinity_ready == num_threads;
+    bool workers_verified = workers_ready;
+    bool workers_requested = false;
+    bool workers_failed = false;
+    for (int i = 0; i < num_threads; ++i) {
+      workers_requested = workers_requested || worker_requested_cpus[i] >= 0;
+      workers_verified = workers_verified && worker_affinity_verified[i] != 0;
+      workers_failed = workers_failed || worker_affinity_errors[i] != 0;
+    }
+    if (!workers_requested) workers_verified = true;
+    const bool coordinator_requested = coordinator_requested_cpu >= 0;
+    const bool coordinator_failed = coordinator_affinity_error != 0;
+    const bool coordinator_verified =
+        !coordinator_requested || coordinator_affinity_verified;
+    const char* status = "not-requested";
+    if (!worker_pool_usable) {
+      status = "timed-out";
+    } else if (worker_affinity_startup_failed || workers_failed ||
+               (workers_ready && !workers_verified) || coordinator_affinity_startup_failed ||
+               coordinator_failed ||
+               (coordinator_requested && coordinator_affinity_ready && !coordinator_verified)) {
+      status = "failed";
+    } else if (!workers_ready || (coordinator_requested && !coordinator_affinity_ready)) {
+      status = "pending";
+    } else if (workers_requested || coordinator_requested) {
+      status = "verified";
+    }
+    report["status"] = status;
+    report["worker_requested_cpus"] = worker_requested_cpus;
+    report["worker_observed_affinity_cpus"] = worker_observed_affinity_cpus;
+    report["worker_affinity_errors"] = worker_affinity_errors;
+    report["worker_affinity_verified"] = worker_affinity_verified;
+    report["workers_ready"] = workers_ready;
+    report["worker_pool_usable"] = worker_pool_usable;
+    report["worker_affinity_startup_timed_out"] = worker_affinity_startup_timed_out;
+    report["coordinator_requested_cpu"] = coordinator_requested_cpu;
+    report["coordinator_observed_affinity_cpu"] = coordinator_observed_affinity_cpu;
+    report["coordinator_affinity_error"] = coordinator_affinity_error;
+    report["coordinator_affinity_verified"] = coordinator_affinity_verified;
+    report["coordinator_ready"] = coordinator_affinity_ready;
+    report["coordinator_affinity_startup_timed_out"] = coordinator_affinity_startup_timed_out;
+    if (!affinity_failure_reason.empty()) report["reason"] = affinity_failure_reason;
+    return report;
+  }
 
   void barrier(int& local_sense) {
     local_sense ^= 1;
@@ -1857,7 +2150,13 @@ struct CpuMoeExecutor {
   }
 
   void worker_loop(int tid) {
-    pin_self(tid);
+    try {
+      pin_self(tid);
+    } catch (...) {
+      publish_worker_startup_failure(tid);
+      stop_workers();
+      return;
+    }
     uint64_t my_gen = 0;
     for (;;) {
       MoeTask* t;
@@ -1880,6 +2179,7 @@ struct CpuMoeExecutor {
   }
 
   void submit(MoeTask* t) {
+    ensure_worker_pool_usable();
     n_iblk = (I + IBLK - 1) / IBLK;
     n_hblk = (H + HBLK - 1) / HBLK;
     // Grow the per-token intermediate scratch if a larger batch shows up than the
@@ -1952,17 +2252,23 @@ struct CpuMoeExecutor {
   }
 
   void sync() {
+    ensure_worker_pool_usable();
     const uint64_t target = submitted.load(std::memory_order_acquire);
     std::unique_lock<std::mutex> lk(sync_mtx);
-    sync_cv.wait(lk, [&] { return completed.load(std::memory_order_acquire) >= target; });
+    sync_cv.wait(lk, [&] {
+      return completed.load(std::memory_order_acquire) >= target ||
+             stop.load(std::memory_order_acquire);
+    });
   }
 
   void submit_with_cuda_stream(uintptr_t stream, uintptr_t task) {
+    ensure_worker_pool_usable();
     cudaLaunchHostFunc(reinterpret_cast<cudaStream_t>(stream), &CpuMoeExecutor::submit_cb,
                        reinterpret_cast<void*>(task));
   }
 
   void sync_with_cuda_stream(uintptr_t stream, uintptr_t task) {
+    ensure_worker_pool_usable();
     cudaLaunchHostFunc(reinterpret_cast<cudaStream_t>(stream), &CpuMoeExecutor::sync_cb,
                        reinterpret_cast<void*>(task));
   }
@@ -1970,6 +2276,7 @@ struct CpuMoeExecutor {
   // Register a (layer, batch-size) slot's task so the coordinator can dispatch it on a
   // flag bump.
   void register_flag_task(int slot, uintptr_t task) {
+    ensure_worker_pool_usable();
     std::lock_guard<std::mutex> lk(flag_task_mtx);
     if (static_cast<int>(flag_task.size()) <= slot) flag_task.resize(slot + 1, nullptr);
     flag_task[slot] = reinterpret_cast<MoeTask*>(task);
@@ -1984,6 +2291,10 @@ struct CpuMoeExecutor {
   // polling never migrates onto / contends with a GEMV worker's core.
   void start_flag_coordinator(uintptr_t ready_ptr, uintptr_t done_ptr, int num_slots,
                               int pin_core) {
+    if (coordinator_started || coord_thread.joinable())
+      throw std::runtime_error("CPU MoE flag coordinator already started");
+    ensure_worker_pool_usable();
+    coordinator_started = true;
     ready_flags = reinterpret_cast<volatile int64_t*>(ready_ptr);
     done_flags = reinterpret_cast<volatile int64_t*>(done_ptr);
     coord_num_slots = num_slots;
@@ -1993,17 +2304,52 @@ struct CpuMoeExecutor {
     }
     flag_served.assign(num_slots, 0);
     coord_stop.store(false);
+    {
+      std::lock_guard<std::mutex> lk(admission_mtx);
+      admission_stopped = false;
+    }
+    {
+      std::lock_guard<std::mutex> lk(affinity_mtx);
+      coordinator_requested_cpu = pin_core;
+      coordinator_observed_affinity_cpu = -1;
+      coordinator_affinity_error = 0;
+      coordinator_affinity_verified = false;
+      coordinator_affinity_ready = false;
+    }
     coord_thread = std::thread([this, pin_core] {
-#if CPU_MOE_HAS_AFFINITY
-      if (pin_core >= 0) {
-        cpu_set_t set;
-        CPU_ZERO(&set);
-        CPU_SET(pin_core, &set);
-        pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+      try {
+        pin_coordinator(pin_core);
+      } catch (...) {
+        publish_coordinator_startup_failure();
+        return;
       }
-#endif
+      // Keep runtime coordinator exceptions uncaught, matching the pre-existing
+      // worker/coordinator loop semantics. Only startup publication is guarded.
       coordinator_loop();
     });
+    {
+      std::unique_lock<std::mutex> lk(affinity_mtx);
+      const bool ready = affinity_cv.wait_for(
+          lk, std::chrono::seconds(5),
+          [this] { return coordinator_affinity_ready; });
+      if (!ready) {
+        coordinator_affinity_error = ETIMEDOUT;
+        coordinator_affinity_startup_timed_out = true;
+        coordinator_affinity_startup_failed = true;
+        affinity_failure_reason = "coordinator affinity startup timed out";
+        coord_stop.store(true, std::memory_order_release);
+        return;
+      }
+      if (coordinator_affinity_startup_failed) {
+        return;
+      }
+    }
+  }
+
+  void stop_flag_coordinator() {
+    begin_admission_stop();
+    coord_stop.store(true, std::memory_order_release);
+    if (coord_thread.joinable()) coord_thread.join();
   }
 
   void coordinator_loop() {
@@ -2043,7 +2389,12 @@ struct CpuMoeExecutor {
             sync();
           }
           // Release: the workers' y stores are visible before the GPU sees done.
-          flag_store_release(&done_flags[L], 1);
+          // Admission-stop is synchronized with this write so teardown can never
+          // advertise an incomplete task as complete.
+          {
+            std::lock_guard<std::mutex> lk(admission_mtx);
+            if (!admission_stopped) flag_store_release(&done_flags[L], 1);
+          }
           if (L < static_cast<int>(flag_served.size())) ++flag_served[L];
           any = true;
         }
@@ -2073,17 +2424,14 @@ struct CpuMoeExecutor {
       std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
       sleep_us = std::min<int64_t>(sleep_us * 2, kSleepCapUs);
     }
-    // Teardown: release any in-flight (or future) spin-wait immediately so a replay
-    // caught mid-shutdown exits its sync kernel now instead of owning the watchdog
-    // stall. Runs before the destructor's join() returns, while the flag arrays are
-    // still alive on the Python side.
-    for (int L = 0; L < coord_num_slots; ++L) {
-      flag_store_release(&done_flags[L], INT64_MAX);
-    }
+    // Teardown intentionally leaves done_flags unchanged: an incomplete task must never
+    // be advertised as complete. The owner is responsible for quiescing the CUDA stream
+    // before destruction; stop_flag_coordinator() joins this thread before buffers die.
   }
 
   // Eager (non-graph) path: run one task to completion on the pool.
   void run_task(uintptr_t task) {
+    ensure_worker_pool_usable();
     MoeTask* t = reinterpret_cast<MoeTask*>(task);
     submit(t);
     sync();
@@ -2131,9 +2479,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("start_flag_coordinator", &CpuMoeExecutor::start_flag_coordinator,
            py::arg("ready_ptr"), py::arg("done_ptr"), py::arg("num_slots"),
            py::arg("pin_core"))
+      .def("stop_flag_coordinator", &CpuMoeExecutor::stop_flag_coordinator)
+      .def("ensure_worker_pool_usable", &CpuMoeExecutor::ensure_worker_pool_usable)
       .def("set_input_prequant",
            [](CpuMoeExecutor& e, bool v) { e.input_prequant = v; },
            py::arg("value"))
+      .def("affinity_report", &CpuMoeExecutor::affinity_report)
       .def("isa_name", &CpuMoeExecutor::isa_name);
   m.def("memops_probe", &cumemops_probe, py::arg("stream"), py::arg("scratch_addr"));
   m.def("memop_submit", &cumemop_submit, py::arg("stream"), py::arg("done_addr"),

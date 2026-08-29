@@ -19,6 +19,12 @@ the correctness oracle. Packed decoders and optimized executors must declare bou
 scratch and avoid per-token or per-route heap allocation. Thread-pool and NUMA policy
 are injected hooks, not process-global behavior.
 
+The compiled executor's affinity hook is backed by the process mask and
+sysfs-derived physical-core plan. Positive worker counts are rejected when they
+exceed visible physical-core capacity before native construction; native startup
+must read back exact singleton masks before reporting verification. A flag-sync
+coordinator is optional and uses a spare planned core only when capacity allows.
+
 ## Consequences
 
 Some newest vLLM CPU kernels are unusable. Kernel work must respect NUMA and bounded pinning. The backend becomes reusable for later MoEs without coupling to Qwen class names.

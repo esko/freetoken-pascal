@@ -25,6 +25,12 @@ import weakref
 import torch
 
 from freetoken.kernel.pinned import alloc_pinned_tensor
+from freetoken.moe.cpu_affinity import (
+    affinity_telemetry,
+    native_flag_sync_supported,
+    resolve_cpu_moe_affinity,
+)
+from freetoken.moe.cpu_topology import discover_cpu_topology
 from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
@@ -189,6 +195,16 @@ class CpuMoeExecutor:
         self.device = device
         self.max_tokens = int(max_tokens)
         self.apply_router_weight_on_input = bool(apply_router_weight_on_input)
+        # Validate the requested worker count before constructing pointer tables or
+        # the native pool.  The compiled executor uses the process mask as the
+        # authoritative capacity; the legacy resolver below remains available to
+        # benchmark callers but is intentionally not used here.
+        affinity_topology = discover_cpu_topology()
+        affinity_selection = resolve_cpu_moe_affinity(
+            num_threads,
+            flag_sync=False,
+            topology=affinity_topology,
+        )
         # The per-layer tensors and their pointer tables must outlive the executor
         # (C++ holds raw addresses into both).
         self._banks: list[torch.Tensor] = []
@@ -198,7 +214,10 @@ class CpuMoeExecutor:
         # probe): its coordinator needs a core of its own, which the auto thread sizing
         # below reserves (a coordinator time-slicing against the GEMV workers measurably
         # destabilizes throughput on fully-subscribed boxes).
-        self._flag_sync = _FLAG_SYNC and device.type == "cuda"
+        native_executor_type = getattr(_cpu_moe, "CpuMoeExecutor", None)
+        coordinator_lifecycle_supported = native_flag_sync_supported(native_executor_type)
+        requested_flag_sync = _FLAG_SYNC and device.type == "cuda"
+        self._flag_sync = requested_flag_sync and coordinator_lifecycle_supported
         self._cpu_moe = _cpu_moe  # module ref for the decode-path memop calls
         if self._flag_sync:
             probe_scratch = alloc_pinned_tensor(1, dtype=torch.int64)
@@ -213,16 +232,20 @@ class CpuMoeExecutor:
                 )
                 self._flag_sync = False
 
-        nthreads, core_ids = resolve_threads_and_affinity(num_threads)
-        coord_core = -1
-        if self._flag_sync and num_threads == 0 and nthreads > 2:
-            # Auto sizing: give the coordinator the last physical core instead of
-            # oversubscribing (workers drop from N to N-1).
-            coord_core = core_ids[-1]
-            nthreads -= 1
-            core_ids = core_ids[:-1]
+        affinity_selection = resolve_cpu_moe_affinity(
+            num_threads,
+            flag_sync=self._flag_sync,
+            topology=affinity_topology,
+        )
+        self._flag_sync = affinity_selection.flag_sync
+        self._affinity_selection = affinity_selection
+        nthreads = affinity_selection.plan.effective_threads
+        core_ids = list(affinity_selection.plan.worker_cpus)
+        coord_core = affinity_selection.plan.coordinator_cpu
+        if coord_core is None:
+            coord_core = -1
         self._coord_core = coord_core
-        self._ext = _cpu_moe.CpuMoeExecutor(
+        ext = _cpu_moe.CpuMoeExecutor(
             num_threads=nthreads,
             num_layers=self.num_layers,
             num_experts=self.num_experts,
@@ -238,16 +261,48 @@ class CpuMoeExecutor:
             core_ids=core_ids,
             **ptrs,
         )
+        native_report = getattr(ext, "affinity_report", None)
+        self._native_affinity_report: dict[str, object] | None = None
+        if native_report is not None:
+            self._native_affinity_report = dict(native_report())
+            workers_ready = self._native_affinity_report.get("workers_ready", True)
+            native_status = self._native_affinity_report.get("status")
+            if native_status == "timed-out" or not bool(workers_ready):
+                reason = str(
+                    self._native_affinity_report.get(
+                        "reason", "CPU MoE worker affinity startup did not complete"
+                    )
+                )
+                stop_coordinator = getattr(ext, "stop_flag_coordinator", None)
+                if stop_coordinator is not None:
+                    stop_coordinator()
+                del ext
+                raise RuntimeError(f"CPU MoE worker pool unavailable: {reason}")
+        self._ext = ext
         self.num_threads = nthreads
         self.core_ids = core_ids
         self.isa = self._ext.isa_name()
+        if native_report is None or self._native_affinity_report.get("status") != "verified":
+            self._flag_sync = False
+        self.affinity_topology = affinity_topology
+        self.affinity_plan = affinity_selection.plan
+        self.affinity_telemetry = affinity_telemetry(
+            affinity_selection,
+            self._native_affinity_report,
+            requested_flag_sync=requested_flag_sync,
+        )
 
-        spare = len(physical_core_cpus()) - nthreads - (1 if coord_core >= 0 else 0) - 1
+        spare = (
+            len(affinity_selection.plan.partition_cpus)
+            - nthreads
+            - (1 if coord_core >= 0 else 0)
+            - 1
+        )
         clamp = max(1, min(torch.get_num_threads(), spare))
         if clamp < torch.get_num_threads():
             logger.info_rank0(
                 f"torch intra-op threads: {torch.get_num_threads()} -> {clamp} "
-                "(cores reserved for the pinned CPU MoE pool)"
+                "(cores reserved for the CPU MoE pool)"
             )
             torch.set_num_threads(clamp)
 
@@ -279,21 +334,39 @@ class CpuMoeExecutor:
                 self._ready.data_ptr(), self._done.data_ptr(), self._flag_capacity,
                 self._coord_core,
             )
-            self._watchdog_stop = False
-            # The thread target holds a WEAKREF and re-derefs it each tick: a bound
-            # method would strong-reference the executor forever (the loop never ends
-            # on its own), pinning the C++ worker pool and the pinned banks against GC
-            # in build-many-engines scenarios. NB: the stop flag / weakref death is
-            # observed only between 2 s sleeps, so teardown of the THREAD can lag up to
-            # ~2 s -- it is a daemon, so neither GC of the executor (weakref breaks the
-            # cycle) nor process exit waits on it.
-            self._watchdog = threading.Thread(
-                target=_watchdog_main,
-                args=(weakref.ref(self),),
-                name="cpu-moe-flag-watchdog",
-                daemon=True,
-            )
-            self._watchdog.start()
+            if native_report is not None:
+                self._native_affinity_report = dict(native_report())
+                if self._native_affinity_report.get("status") != "verified":
+                    stop_coordinator = getattr(self._ext, "stop_flag_coordinator", None)
+                    if stop_coordinator is not None:
+                        stop_coordinator()
+                    # Stop the native poller before switching to host-function
+                    # dispatch; an unverified coordinator is never left running.
+                    self._flag_sync = False
+                    self._flag_slots.clear()
+                    self._ready = self._done = self._err = None
+                    self._native_affinity_report = dict(native_report())
+                self.affinity_telemetry = affinity_telemetry(
+                    affinity_selection,
+                    self._native_affinity_report,
+                    requested_flag_sync=requested_flag_sync,
+                )
+            if self._flag_sync:
+                self._watchdog_stop = False
+                # The thread target holds a WEAKREF and re-derefs it each tick: a bound
+                # method would strong-reference the executor forever (the loop never ends
+                # on its own), pinning the C++ worker pool and the pinned banks against GC
+                # in build-many-engines scenarios. NB: the stop flag / weakref death is
+                # observed only between 2 s sleeps, so teardown of the THREAD can lag up to
+                # ~2 s -- it is a daemon, so neither GC of the executor (weakref breaks the
+                # cycle) nor process exit waits on it.
+                self._watchdog = threading.Thread(
+                    target=_watchdog_main,
+                    args=(weakref.ref(self),),
+                    name="cpu-moe-flag-watchdog",
+                    daemon=True,
+                )
+                self._watchdog.start()
 
         # ds_fp4: the reference FP8 activation round-trip is a scalar per-element chain
         # that the C++ side runs single-threaded on the CUDA host-callback thread --
@@ -311,8 +384,11 @@ class CpuMoeExecutor:
             )
 
         logger.info_rank0(
-            f"CPU MoE executor ready: threads={nthreads} (pinned to cores "
-            f"{core_ids[0]}..{core_ids[-1]}) isa={self.isa} fmt={fmt} "
+            f"CPU MoE executor ready: requested_threads={num_threads} "
+            f"threads={nthreads} workers={core_ids} coordinator={coord_core} "
+            f"affinity={self.affinity_telemetry['affinity_status']} "
+            f"topology={affinity_selection.plan.topology_confidence} "
+            f"isa={self.isa} fmt={fmt} "
             f"H={self.H} I={self.I} experts={self.num_experts} layers={self.num_layers} "
             f"top_k={self.top_k} act={activation} max_tokens={self.max_tokens}"
         )
@@ -485,6 +561,19 @@ class CpuMoeExecutor:
         )
         return ptrs, (H, I)
 
+    def _ensure_worker_pool_usable(self) -> None:
+        ensure = getattr(self._ext, "ensure_worker_pool_usable", None)
+        if ensure is not None:
+            ensure()
+            return
+        report = self._native_affinity_report or {}
+        workers_ready = report.get("workers_ready")
+        if report.get("status") == "timed-out" or (
+            workers_ready is not None and not bool(workers_ready)
+        ):
+            reason = report.get("reason", "CPU MoE worker affinity startup did not complete")
+            raise RuntimeError(f"CPU MoE worker pool unavailable: {reason}")
+
     def _io_for(self, bs: int) -> dict[str, torch.Tensor]:
         io = self._io.get(bs)
         if io is None:
@@ -550,6 +639,7 @@ class CpuMoeExecutor:
         computes only the routes assigned to it. Returns an opaque handle to pass to
         :meth:`decode_sync`. The output tensor is allocated here so it stays live (and
         distinct from the interleaved GPU work) across the overlap window."""
+        self._ensure_worker_pool_usable()
         bs = hidden_states.shape[0]
         io = self._io_for(bs)
 
@@ -585,6 +675,7 @@ class CpuMoeExecutor:
         """Issue the CPU-pool sync + the H2D result copy for a prior :meth:`decode_submit`,
         and return the GPU output tensor. With flag-sync the wait is a front-end stream
         memop on done[slot] (set by the CPU coordinator); otherwise a cudaLaunchHostFunc."""
+        self._ensure_worker_pool_usable()
         bs, task, out, slot = pending
         if slot is not None:
             # Front-end WAIT(done[slot] >= 1): blocks this stream's later nodes without

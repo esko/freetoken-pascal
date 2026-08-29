@@ -62,3 +62,8 @@ jobs:
         env:
           PYTHONPATH: python
         run: pytest -q tests/moe/test_cpu_topology.py
+      - name: Lint and test CPU affinity policy
+        run: |
+          ruff check python/freetoken/moe/cpu_affinity.py tests/moe/test_cpu_affinity.py tests/moe/test_cpu_moe_affinity_native.py
+          ruff format --check python/freetoken/moe/cpu_affinity.py tests/moe/test_cpu_affinity.py tests/moe/test_cpu_moe_affinity_native.py
+          PYTHONPATH=python pytest -q tests/moe/test_cpu_affinity.py tests/moe/test_cpu_moe_affinity_native.py
