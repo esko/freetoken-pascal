@@ -21,7 +21,7 @@ The exact upstream tip is a parent of the downstream reconciliation merge. The m
 
 ## Retained PR #232-derived paths
 
-- `models/qwen4_exp/gguf.py`, `gguf_attach.py`, and GGUF portions of `config.py` remain because merged PR #257 does not implement the downstream low-bit GGUF/CPU serving contract.
+- GGUF portions of `models/qwen4_exp/config.py` remain from PR #232 because merged PR #257 does not describe the downstream PLE geometry or low-bit expert quant contract. `gguf.py` is separately attributed to the PR #131 GGUF donor, while `gguf_attach.py` is a downstream implementation.
 - `attention/qsa.py` plus `kernel/triton/qsa_legacy.py` are unregistered reference-only paths used for CPU/Pascal parity fixtures until issue #76 migrates every comparison to the shipping selected-row backend.
 - `tests/models/qwen4_exp/legacy_downstream.py` contains pre-sync PLE reference helpers for regression tests only. It is outside the installed runtime and cannot be selected by serving.
 - `reference.py` remains an independent device-neutral semantic oracle for GDN, hyperconnection and routed/shared expert comparisons.

@@ -125,16 +125,13 @@ sources:
     responsible_issue: 11
     notice_required: true
     imports:
-      - source_path: python/freetoken/models/qwen4_exp
-        destination_path: python/freetoken/models/qwen4_exp
+      - source_path: python/freetoken/models/qwen4_exp/config.py
+        destination_path: python/freetoken/models/qwen4_exp/config.py
         source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
         method: adapted
         local_modifications:
-          - import the text model, configuration, loader, GDN, hyperconnection, router, and PLE interfaces
-          - exclude the vision tower and multimodal RoPE implementation
-          - skip vision and MTP weights and fail image execution with the v1 text-only scope message
-          - add downstream-only device-neutral reference equations and an opt-in debug hook
-          - preserve exact GGUF PLE address metadata and serve selected IQ4_NL rows from a bounded file-backed mapping
+          - retain GGUF PLE geometry and hash metadata absent from merged PR 257
+          - retain fail-closed low-bit expert quant validation
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 11
@@ -151,7 +148,7 @@ sources:
         responsible_issue: 11
         responsible_pull_request: 35
       - source_path: python/freetoken/kernel/triton/qsa.py
-        destination_path: python/freetoken/kernel/triton/qsa.py
+        destination_path: python/freetoken/kernel/triton/qsa_legacy.py
         source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
         method: adapted
         local_modifications:
@@ -160,11 +157,13 @@ sources:
         header_policy: preserved
         responsible_issue: 11
         responsible_pull_request: 35
-      - source_path: python/freetoken/kvcache/qsa_pool.py
-        destination_path: python/freetoken/kvcache/qsa_pool.py
+      - source_path: python/freetoken/models/qwen4_exp/model.py
+        destination_path: tests/models/qwen4_exp/legacy_downstream.py
         source_ref: ad752c9970e0dc3f1b09aeec38235332149336ed
-        method: cherry-pick
-        local_modifications: []
+        method: adapted
+        local_modifications:
+          - isolate pre-sync PLE reference helpers outside the installed runtime
+          - retain only for regression comparison during issue 76 migration
         license: Apache-2.0
         header_policy: preserved
         responsible_issue: 11

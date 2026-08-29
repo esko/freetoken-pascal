@@ -805,6 +805,7 @@ class MappedPLETable:
             model_shard_paths=layout.shard_paths,
         )
         try:
+            table._apply_random_advice()
             if warm_mode == "full-ple-warm":
                 raise ValueError("GGUF warm mode is full-model-warm")
             table.set_warm_mode(warm_mode)
