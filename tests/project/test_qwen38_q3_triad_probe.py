@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,21 @@ CLI_SPEC = importlib.util.spec_from_file_location(
 assert CLI_SPEC and CLI_SPEC.loader
 Q3_CLI = importlib.util.module_from_spec(CLI_SPEC)
 CLI_SPEC.loader.exec_module(Q3_CLI)
+_TEST_COMMIT = "a" * 40
+
+
+@pytest.fixture(autouse=True)
+def _stable_evidence_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep probe tests hermetic in pinned containers that omit Git."""
+    monkeypatch.setattr(real_artifact_probe, "_probe_commit", lambda: _TEST_COMMIT)
+    real_run = VALIDATE_EVIDENCE.subprocess.run
+
+    def _run(command, *args, **kwargs):
+        if command == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(command, 0, stdout=f"{_TEST_COMMIT}\n", stderr="")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(VALIDATE_EVIDENCE.subprocess, "run", _run)
 
 
 class _TriadTransport:
@@ -576,7 +592,7 @@ def test_q3_triad_validator_binds_all_durable_evidence_to_raw_and_census(
         ),
         (
             "nested commit",
-            lambda value: value["probes"][0]["raw"]["triad_metadata"].update({"commit": "a" * 40}),
+            lambda value: value["probes"][0]["raw"]["triad_metadata"].update({"commit": "b" * 40}),
             "raw.triad_metadata.commit",
         ),
         (
