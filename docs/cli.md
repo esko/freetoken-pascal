@@ -82,7 +82,8 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--moe-backend` | auto | `fused`/`offload`/`cpu`/`hybrid`; auto → offload, or hybrid with a `ft bench bw` profile |
 | `--moe-cache-size` / `--moe-cache-rate` / `--moe-cache-auto` | auto | GPU expert-cache size as slots / fraction of all experts / sized from free VRAM (mutually exclusive; auto is enabled by default for offload-family backends) |
 | `--kv-reserve-tokens` | 8192 | KV token floor reserved before `--moe-cache-auto` fills experts |
-| `--ple-warm-mode` | `cold` | Qwen3.8 GGUF PLE policy: `cold`, `page-cache-warm`, selected-row `targeted`, or explicit `full-model-warm` |
+| `--ple-artifact-path` | unset | Explicit dedicated PLE artifact directory; omission preserves the source-model loader and invalid artifacts never fall back silently |
+| `--ple-warm-mode` | `cold` | PLE policy: `cold`, `page-cache-warm`, selected-row `targeted`, transitional GGUF `full-model-warm`, or dedicated-artifact `full-ple-warm` |
 | `--moe-cpu-threads` | physical cores | CPU worker threads for the compiled cpu/hybrid executor |
 | `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, or a fraction) |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
