@@ -89,6 +89,15 @@ implicit global state. The Issue #15 reference executor is serial, so later para
 backends must preserve request isolation, cancellation, accumulation, and telemetry
 semantics when those hooks become active.
 
+The compiled `CpuMoeExecutor` now consumes this policy boundary directly. It
+validates the requested count against the discovered process mask before building
+host-bank pointer tables or the native pool; `resolve_threads_and_affinity()` remains
+available for benchmark compatibility and is not the serving executor's resolver.
+The native pool validates each requested singleton mask and reads it back at startup,
+including the optional flag-sync coordinator. Python reports `planned-unverified`
+until that report says `verified`, and reports `fallback` on a native error. This is
+CPU affinity telemetry only: it makes no NUMA placement or performance claim.
+
 The H0 CPU topology foundation is the Torch-free `freetoken.moe.cpu_topology` module.
 `discover_cpu_topology()` reads the process affinity mask and injectable Linux sysfs
 topology data, groups only allowed SMT siblings, and reports immutable physical-core

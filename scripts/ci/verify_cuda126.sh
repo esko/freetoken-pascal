@@ -78,6 +78,12 @@ fi
 python "${repo_root}/scripts/ci/compile_cuda_sources.py" \
     --output-dir "${artifact_dir}/cuda-sources"
 
+# Build the compiled CPU MoE executor as an H1 host-only check.  Its constructor
+# and affinity startup report do not require a CUDA device, so exercise that
+# report after compilation while keeping kernel execution out of this gate.
+python setup.py build_ext --inplace
+PYTHONPATH=python python -m pytest -q tests/moe/test_cpu_moe_affinity_native.py
+
 python "${repo_root}/scripts/write_toolchain_inventory.py" \
     --output "${artifact_dir}/inventory.json"
 cp "${repo_root}/manifests/toolchain.json" "${artifact_dir}/toolchain.json"

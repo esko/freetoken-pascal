@@ -25,6 +25,8 @@ import weakref
 import torch
 
 from freetoken.kernel.pinned import alloc_pinned_tensor
+from freetoken.moe.cpu_affinity import affinity_telemetry, resolve_cpu_moe_affinity
+from freetoken.moe.cpu_topology import discover_cpu_topology
 from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
@@ -189,6 +191,16 @@ class CpuMoeExecutor:
         self.device = device
         self.max_tokens = int(max_tokens)
         self.apply_router_weight_on_input = bool(apply_router_weight_on_input)
+        # Validate the requested worker count before constructing pointer tables or
+        # the native pool.  The compiled executor uses the process mask as the
+        # authoritative capacity; the legacy resolver below remains available to
+        # benchmark callers but is intentionally not used here.
+        affinity_topology = discover_cpu_topology()
+        affinity_selection = resolve_cpu_moe_affinity(
+            num_threads,
+            flag_sync=False,
+            topology=affinity_topology,
+        )
         # The per-layer tensors and their pointer tables must outlive the executor
         # (C++ holds raw addresses into both).
         self._banks: list[torch.Tensor] = []
@@ -213,14 +225,17 @@ class CpuMoeExecutor:
                 )
                 self._flag_sync = False
 
-        nthreads, core_ids = resolve_threads_and_affinity(num_threads)
-        coord_core = -1
-        if self._flag_sync and num_threads == 0 and nthreads > 2:
-            # Auto sizing: give the coordinator the last physical core instead of
-            # oversubscribing (workers drop from N to N-1).
-            coord_core = core_ids[-1]
-            nthreads -= 1
-            core_ids = core_ids[:-1]
+        affinity_selection = resolve_cpu_moe_affinity(
+            num_threads,
+            flag_sync=self._flag_sync,
+            topology=affinity_topology,
+        )
+        self._affinity_selection = affinity_selection
+        nthreads = affinity_selection.plan.effective_threads
+        core_ids = list(affinity_selection.plan.worker_cpus)
+        coord_core = affinity_selection.plan.coordinator_cpu
+        if coord_core is None:
+            coord_core = -1
         self._coord_core = coord_core
         self._ext = _cpu_moe.CpuMoeExecutor(
             num_threads=nthreads,
@@ -241,13 +256,27 @@ class CpuMoeExecutor:
         self.num_threads = nthreads
         self.core_ids = core_ids
         self.isa = self._ext.isa_name()
+        self._native_affinity_report: dict[str, object] | None = None
+        native_report = getattr(self._ext, "affinity_report", None)
+        if native_report is not None:
+            self._native_affinity_report = dict(native_report())
+        self.affinity_topology = affinity_topology
+        self.affinity_plan = affinity_selection.plan
+        self.affinity_telemetry = affinity_telemetry(
+            affinity_selection, self._native_affinity_report
+        )
 
-        spare = len(physical_core_cpus()) - nthreads - (1 if coord_core >= 0 else 0) - 1
+        spare = (
+            len(affinity_selection.plan.partition_cpus)
+            - nthreads
+            - (1 if coord_core >= 0 else 0)
+            - 1
+        )
         clamp = max(1, min(torch.get_num_threads(), spare))
         if clamp < torch.get_num_threads():
             logger.info_rank0(
                 f"torch intra-op threads: {torch.get_num_threads()} -> {clamp} "
-                "(cores reserved for the pinned CPU MoE pool)"
+                "(cores reserved for the CPU MoE pool)"
             )
             torch.set_num_threads(clamp)
 
@@ -279,6 +308,11 @@ class CpuMoeExecutor:
                 self._ready.data_ptr(), self._done.data_ptr(), self._flag_capacity,
                 self._coord_core,
             )
+            if native_report is not None:
+                self._native_affinity_report = dict(native_report())
+                self.affinity_telemetry = affinity_telemetry(
+                    affinity_selection, self._native_affinity_report
+                )
             self._watchdog_stop = False
             # The thread target holds a WEAKREF and re-derefs it each tick: a bound
             # method would strong-reference the executor forever (the loop never ends
@@ -311,8 +345,11 @@ class CpuMoeExecutor:
             )
 
         logger.info_rank0(
-            f"CPU MoE executor ready: threads={nthreads} (pinned to cores "
-            f"{core_ids[0]}..{core_ids[-1]}) isa={self.isa} fmt={fmt} "
+            f"CPU MoE executor ready: requested_threads={num_threads} "
+            f"threads={nthreads} workers={core_ids} coordinator={coord_core} "
+            f"affinity={self.affinity_telemetry['affinity_status']} "
+            f"topology={affinity_selection.plan.topology_confidence} "
+            f"isa={self.isa} fmt={fmt} "
             f"H={self.H} I={self.I} experts={self.num_experts} layers={self.num_layers} "
             f"top_k={self.top_k} act={activation} max_tokens={self.max_tokens}"
         )

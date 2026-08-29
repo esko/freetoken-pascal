@@ -19,8 +19,9 @@
 #include <atomic>
 #include <condition_variable>
 #include <cmath>
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -1300,6 +1301,22 @@ struct CpuMoeExecutor {
   std::vector<MoeTask*> owned_tasks;  // persistent task descriptors (graph-stable)
   std::vector<int> core_ids;          // worker tid -> logical CPU to pin to (may be empty)
 
+  // Affinity startup state is published before the constructor returns (workers) and
+  // before start_flag_coordinator returns (coordinator).  The Python wrapper treats
+  // this as verification data, never as a requested-plan success signal.
+  mutable std::mutex affinity_mtx;
+  std::condition_variable affinity_cv;
+  int worker_affinity_ready = 0;
+  std::vector<int> worker_requested_cpus;
+  std::vector<int> worker_actual_cpus;
+  std::vector<int> worker_affinity_errors;
+  std::vector<uint8_t> worker_affinity_verified;
+  int coordinator_requested_cpu = -1;
+  int coordinator_actual_cpu = -1;
+  int coordinator_affinity_error = 0;
+  bool coordinator_affinity_verified = false;
+  bool coordinator_affinity_ready = false;
+
   // ---- Flag-based GPU<->CPU handshake (replaces the per-layer cudaLaunchHostFunc pair) ----
   // A tiny GPU kernel bumps ready_flags[slot] at submit; this coordinator thread busy-polls
   // it, runs the slot's task on the worker pool, and sets done_flags[slot], which a GPU
@@ -1420,8 +1437,16 @@ struct CpuMoeExecutor {
       gi8_scratch.assign(static_cast<size_t>(max_tokens) * top_k * I, 0);
       gas_scratch.assign(static_cast<size_t>(max_tokens) * top_k * (I / 32), 0);
     }
+    worker_requested_cpus.assign(num_threads, -1);
+    worker_actual_cpus.assign(num_threads, -1);
+    worker_affinity_errors.assign(num_threads, 0);
+    worker_affinity_verified.assign(num_threads, 0);
     for (int t = 0; t < num_threads; ++t)
       workers.emplace_back([this, t] { worker_loop(t); });
+    {
+      std::unique_lock<std::mutex> lk(affinity_mtx);
+      affinity_cv.wait(lk, [this] { return worker_affinity_ready == num_threads; });
+    }
   }
 
   // Quantize a bf16 activation row to Q8_0 (llama.cpp): per-32-block symmetric int8 in
@@ -1516,17 +1541,98 @@ struct CpuMoeExecutor {
                  fp16_to_f32(dn_global_l[r]), ge, go, I, e2m1_lut, e4m3_lut);
   }
 
-  void pin_self(int tid) {
 #if CPU_MOE_HAS_AFFINITY
-    if (core_ids.empty()) return;
-    const int cpu = core_ids[tid % static_cast<int>(core_ids.size())];
-    cpu_set_t set;
-    CPU_ZERO(&set);
-    CPU_SET(cpu, &set);
-    pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
-#else
-    (void)tid;
+  static int singleton_cpu(const cpu_set_t& set) {
+    int found = -1;
+    int count = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+      if (CPU_ISSET(cpu, &set)) {
+        found = cpu;
+        ++count;
+      }
+    }
+    return count == 1 ? found : -1;
+  }
 #endif
+
+  void pin_self(int tid) {
+    const int requested =
+        (tid >= 0 && tid < static_cast<int>(core_ids.size())) ? core_ids[tid] : -1;
+    int actual = -1;
+    int error = 0;
+    bool verified = false;
+#if CPU_MOE_HAS_AFFINITY
+    if (requested >= 0 && requested < CPU_SETSIZE) {
+      cpu_set_t set;
+      CPU_ZERO(&set);
+      CPU_SET(requested, &set);
+      error = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+      cpu_set_t observed;
+      CPU_ZERO(&observed);
+      const int read_error = pthread_getaffinity_np(pthread_self(), sizeof(observed), &observed);
+      if (read_error == 0) {
+        actual = singleton_cpu(observed);
+        if (error == 0 && actual == requested)
+          verified = true;
+        else if (error == 0)
+          error = EINVAL;
+      } else if (error == 0) {
+        error = read_error;
+      }
+    } else if (requested >= 0) {
+      error = EINVAL;
+    }
+#else
+    if (requested >= 0) error = ENOTSUP;
+#endif
+    {
+      std::lock_guard<std::mutex> lk(affinity_mtx);
+      worker_requested_cpus[tid] = requested;
+      worker_actual_cpus[tid] = actual;
+      worker_affinity_errors[tid] = error;
+      worker_affinity_verified[tid] = verified ? 1 : 0;
+      ++worker_affinity_ready;
+    }
+    affinity_cv.notify_all();
+  }
+
+  void pin_coordinator(int requested) {
+    int actual = -1;
+    int error = 0;
+    bool verified = false;
+#if CPU_MOE_HAS_AFFINITY
+    if (requested >= 0 && requested < CPU_SETSIZE) {
+      cpu_set_t set;
+      CPU_ZERO(&set);
+      CPU_SET(requested, &set);
+      error = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+      cpu_set_t observed;
+      CPU_ZERO(&observed);
+      const int read_error = pthread_getaffinity_np(pthread_self(), sizeof(observed), &observed);
+      if (read_error == 0) {
+        actual = singleton_cpu(observed);
+        if (error == 0 && actual == requested)
+          verified = true;
+        else if (error == 0)
+          error = EINVAL;
+      } else if (error == 0) {
+        error = read_error;
+      }
+    } else if (requested >= 0) {
+      error = EINVAL;
+    }
+#else
+    if (requested >= 0) error = ENOTSUP;
+#endif
+    {
+      std::lock_guard<std::mutex> lk(affinity_mtx);
+      coordinator_requested_cpu = requested;
+      coordinator_actual_cpu = actual;
+      coordinator_affinity_error = error;
+      coordinator_affinity_verified = verified;
+      coordinator_affinity_ready = true;
+    }
+    affinity_cv.notify_all();
   }
 
   ~CpuMoeExecutor() {
@@ -1556,6 +1662,46 @@ struct CpuMoeExecutor {
   }
 
   const char* isa_name() const { return isa; }
+
+  pybind11::dict affinity_report() const {
+    std::lock_guard<std::mutex> lk(affinity_mtx);
+    pybind11::dict report;
+    const bool workers_ready = worker_affinity_ready == num_threads;
+    bool workers_verified = workers_ready;
+    bool workers_requested = false;
+    bool workers_failed = false;
+    for (int i = 0; i < num_threads; ++i) {
+      workers_requested = workers_requested || worker_requested_cpus[i] >= 0;
+      workers_verified = workers_verified && worker_affinity_verified[i] != 0;
+      workers_failed = workers_failed || worker_affinity_errors[i] != 0;
+    }
+    if (!workers_requested) workers_verified = true;
+    const bool coordinator_requested = coordinator_requested_cpu >= 0;
+    const bool coordinator_failed = coordinator_affinity_error != 0;
+    const bool coordinator_verified =
+        !coordinator_requested || coordinator_affinity_verified;
+    const char* status = "not-requested";
+    if (!workers_ready || (coordinator_requested && !coordinator_affinity_ready)) {
+      status = "pending";
+    } else if (workers_failed || !workers_verified || coordinator_failed ||
+               !coordinator_verified) {
+      status = "failed";
+    } else if (workers_requested || coordinator_requested) {
+      status = "verified";
+    }
+    report["status"] = status;
+    report["worker_requested_cpus"] = worker_requested_cpus;
+    report["worker_actual_cpus"] = worker_actual_cpus;
+    report["worker_affinity_errors"] = worker_affinity_errors;
+    report["worker_affinity_verified"] = worker_affinity_verified;
+    report["workers_ready"] = workers_ready;
+    report["coordinator_requested_cpu"] = coordinator_requested_cpu;
+    report["coordinator_actual_cpu"] = coordinator_actual_cpu;
+    report["coordinator_affinity_error"] = coordinator_affinity_error;
+    report["coordinator_affinity_verified"] = coordinator_affinity_verified;
+    report["coordinator_ready"] = coordinator_affinity_ready;
+    return report;
+  }
 
   void barrier(int& local_sense) {
     local_sense ^= 1;
@@ -1993,17 +2139,22 @@ struct CpuMoeExecutor {
     }
     flag_served.assign(num_slots, 0);
     coord_stop.store(false);
+    {
+      std::lock_guard<std::mutex> lk(affinity_mtx);
+      coordinator_requested_cpu = pin_core;
+      coordinator_actual_cpu = -1;
+      coordinator_affinity_error = 0;
+      coordinator_affinity_verified = false;
+      coordinator_affinity_ready = false;
+    }
     coord_thread = std::thread([this, pin_core] {
-#if CPU_MOE_HAS_AFFINITY
-      if (pin_core >= 0) {
-        cpu_set_t set;
-        CPU_ZERO(&set);
-        CPU_SET(pin_core, &set);
-        pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
-      }
-#endif
+      pin_coordinator(pin_core);
       coordinator_loop();
     });
+    {
+      std::unique_lock<std::mutex> lk(affinity_mtx);
+      affinity_cv.wait(lk, [this] { return coordinator_affinity_ready; });
+    }
   }
 
   void coordinator_loop() {
@@ -2134,6 +2285,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("set_input_prequant",
            [](CpuMoeExecutor& e, bool v) { e.input_prequant = v; },
            py::arg("value"))
+      .def("affinity_report", &CpuMoeExecutor::affinity_report)
       .def("isa_name", &CpuMoeExecutor::isa_name);
   m.def("memops_probe", &cumemops_probe, py::arg("stream"), py::arg("scratch_addr"));
   m.def("memop_submit", &cumemop_submit, py::arg("stream"), py::arg("done_addr"),

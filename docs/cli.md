@@ -97,6 +97,14 @@ affinity-visible physical-core capacity.  The bridge reports both the selected
 policy and the actual participating thread partitions after decode.  This is an
 admission check only; it does not pin workers or claim NUMA placement.
 
+For the compiled CPU/hybrid executor, `0` plans one worker per visible physical
+core using the process affinity mask and a positive count is exact; requests above
+the visible physical-core capacity fail before the native pool is built. Flag-sync
+may reserve one additional visible core for its coordinator and falls back to the
+host-function path when no spare core exists. Startup telemetry distinguishes the
+planned CPU IDs from native `verified` or `fallback` results; it never reports
+successful affinity without an exact read-back.
+
 ### Host expert-bank policy (Issue #18 H0/H1 slice)
 
 These flags are opt-in.
