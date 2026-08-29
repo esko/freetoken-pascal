@@ -7,11 +7,13 @@ which keeps fake-layer lifecycle tests independent from model construction.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Any
 
 from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
 from freetoken.moe.gguf_layer import QwenGGUFCpuMoELayer
+from freetoken.moe.gguf_transfer import EagerTransferSeam, GGUFCpuEagerBridge
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,8 @@ class GGUFCpuExpertAttachment:
 
     bundle: QwenGGUFCpuExpertBundle
     replacements: tuple[tuple[object, object, object, object], ...]
+    mode: str = "cpu"
+    owned_bridges: tuple[object, ...] = ()
 
 
 def validate_gguf_cpu_attachment(model: Any, bundle: QwenGGUFCpuExpertBundle) -> tuple[object, ...]:
@@ -131,66 +135,189 @@ def validate_gguf_cpu_attachment(model: Any, bundle: QwenGGUFCpuExpertBundle) ->
     return layers
 
 
-def attach_gguf_cpu_expert_bundle(model: Any, bundle: QwenGGUFCpuExpertBundle) -> None:
-    """Validate, construct, and atomically install all layer adapters."""
-    if getattr(model, "_gguf_cpu_attachment", None) is not None:
-        raise RuntimeError("Qwen GGUF CPU expert bundle is already attached")
-    layers = validate_gguf_cpu_attachment(model, bundle)
-    config = model._config
+def _attachment_lock(model: Any) -> threading.RLock:
+    lock = getattr(model, "_gguf_attachment_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        model._gguf_attachment_lock = lock
+    return lock
 
-    layer_records: list[tuple[object, object, object]] = []
-    for layer in layers:
-        mlp = getattr(layer, "mlp", None)
-        if mlp is None or not hasattr(mlp, "experts"):
-            raise ValueError(
-                f"Qwen4-Exp layer {getattr(layer, '_layer_id', '?')} has no sparse experts"
-            )
-        layer_records.append((layer, mlp, mlp.experts))
 
-    replacements: list[tuple[object, object, object, object]] = []
-    for layer, mlp, original in layer_records:
-        adapter = QwenGGUFCpuMoELayer(
-            bundle,
-            layer_id=layer._layer_id,
-            num_experts=config.num_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            renormalize=bool(config.norm_topk_prob),
-            activation=config.hidden_act,
-            apply_router_weight_on_input=False,
-        )
-        replacements.append((layer, mlp, original, adapter))
+def _close_bridges(bridges: tuple[object, ...]) -> None:
+    for bridge in reversed(bridges):
+        close = getattr(bridge, "close", None)
+        if close is not None:
+            close()
 
-    attachment = GGUFCpuExpertAttachment(bundle, tuple(replacements))
+
+def _freeze_bridges(bridges: tuple[object, ...]) -> tuple[object, ...]:
+    frozen: list[object] = []
     try:
-        for _layer, mlp, _original, adapter in replacements:
-            mlp.experts = adapter
+        for bridge in bridges:
+            freeze = getattr(bridge, "freeze_admission", None)
+            if freeze is None:
+                raise RuntimeError("eager bridge does not support transactional admission freeze")
+            freeze()
+            frozen.append(bridge)
     except BaseException:
-        for _layer, mlp, original, _adapter in reversed(replacements):
-            mlp.experts = original
+        _unfreeze_bridges(tuple(frozen))
         raise
-    model._gguf_cpu_attachment = attachment
+    return tuple(frozen)
+
+
+def _unfreeze_bridges(bridges: tuple[object, ...]) -> None:
+    for bridge in reversed(bridges):
+        unfreeze = getattr(bridge, "unfreeze_admission", None)
+        if unfreeze is not None:
+            unfreeze()
+
+
+def _rollback_closed_bridges(bridges: tuple[object, ...]) -> None:
+    for bridge in reversed(bridges):
+        rollback = getattr(bridge, "rollback_close", None)
+        if rollback is None:
+            raise RuntimeError("eager bridge cannot roll back a transactional close")
+        rollback()
+
+
+def _build_cpu_adapter(model: Any, bundle: QwenGGUFCpuExpertBundle, layer_id: int) -> object:
+    config = model._config
+    return QwenGGUFCpuMoELayer(
+        bundle,
+        layer_id=layer_id,
+        num_experts=config.num_experts,
+        top_k=config.num_experts_per_tok,
+        hidden_size=config.hidden_size,
+        intermediate_size=config.moe_intermediate_size,
+        renormalize=bool(config.norm_topk_prob),
+        activation=config.hidden_act,
+        apply_router_weight_on_input=False,
+    )
+
+
+def _attach_gguf_cpu_experts(
+    model: Any,
+    bundle: QwenGGUFCpuExpertBundle,
+    *,
+    eager_bridge: bool,
+    transfer: EagerTransferSeam | None,
+) -> None:
+    """Build every replacement before atomically changing the model graph."""
+    with _attachment_lock(model):
+        if getattr(model, "_gguf_cpu_attachment", None) is not None:
+            raise RuntimeError("Qwen GGUF CPU expert bundle is already attached")
+        layers = validate_gguf_cpu_attachment(model, bundle)
+        layer_records: list[tuple[object, object, object]] = []
+        for layer in layers:
+            mlp = getattr(layer, "mlp", None)
+            if mlp is None or not hasattr(mlp, "experts"):
+                raise ValueError(
+                    f"Qwen4-Exp layer {getattr(layer, '_layer_id', '?')} has no sparse experts"
+                )
+            layer_records.append((layer, mlp, mlp.experts))
+
+        replacements: list[tuple[object, object, object, object]] = []
+        owned_bridges: list[object] = []
+        try:
+            for layer, mlp, original in layer_records:
+                adapter = _build_cpu_adapter(model, bundle, layer._layer_id)
+                installed = adapter
+                if eager_bridge:
+                    installed = GGUFCpuEagerBridge(
+                        adapter,
+                        transfer=transfer,
+                        cache_size=0,
+                        tp_size=1,
+                    )
+                    owned_bridges.append(installed)
+                replacements.append((layer, mlp, original, installed))
+        except BaseException:
+            _close_bridges(tuple(owned_bridges))
+            raise
+
+        attachment = GGUFCpuExpertAttachment(
+            bundle,
+            tuple(replacements),
+            mode="eager" if eager_bridge else "cpu",
+            owned_bridges=tuple(owned_bridges),
+        )
+        try:
+            for _layer, mlp, _original, installed in replacements:
+                mlp.experts = installed
+            model._gguf_cpu_attachment = attachment
+        except BaseException:
+            for _layer, mlp, original, _installed in reversed(replacements):
+                mlp.experts = original
+            _close_bridges(tuple(owned_bridges))
+            raise
+
+
+def attach_gguf_cpu_expert_bundle(model: Any, bundle: QwenGGUFCpuExpertBundle) -> None:
+    """Validate, construct, and atomically install all CPU layer adapters."""
+    _attach_gguf_cpu_experts(model, bundle, eager_bridge=False, transfer=None)
+
+
+def attach_gguf_cpu_eager_bridge(
+    model: Any,
+    bundle: QwenGGUFCpuExpertBundle,
+    *,
+    transfer: EagerTransferSeam | None = None,
+) -> None:
+    """Attach explicit blocking device bridges around every CPU layer adapter."""
+    _attach_gguf_cpu_experts(model, bundle, eager_bridge=True, transfer=transfer)
 
 
 def detach_gguf_cpu_expert_bundle(model: Any) -> None:
-    """Restore exact pre-attachment objects; never close the borrowed bundle."""
-    attachment = getattr(model, "_gguf_cpu_attachment", None)
-    if attachment is None:
-        return
+    """Restore exact originals, quiesce owned bridges, and never close the bundle."""
+    with _attachment_lock(model):
+        attachment = getattr(model, "_gguf_cpu_attachment", None)
+        if attachment is None:
+            return
 
-    for layer, mlp, _original, adapter in attachment.replacements:
-        if getattr(layer, "mlp", None) is not mlp or getattr(mlp, "experts", None) is not adapter:
-            raise RuntimeError("Qwen GGUF CPU expert attachment was modified outside its lifecycle")
+        for layer, mlp, _original, installed in attachment.replacements:
+            if (
+                getattr(layer, "mlp", None) is not mlp
+                or getattr(mlp, "experts", None) is not installed
+            ):
+                raise RuntimeError(
+                    "Qwen GGUF CPU expert attachment was modified outside its lifecycle"
+                )
 
-    try:
-        for _layer, mlp, original, _adapter in attachment.replacements:
-            mlp.experts = original
-    except BaseException:
-        for _layer, mlp, _original, adapter in reversed(attachment.replacements):
-            mlp.experts = adapter
-        raise
-    model._gguf_cpu_attachment = None
+        if not attachment.owned_bridges:
+            frozen = ()
+            closed = ()
+        else:
+            frozen = _freeze_bridges(attachment.owned_bridges)
+            closed: list[object] = []
+            try:
+                for bridge in attachment.owned_bridges:
+                    close = getattr(bridge, "close", None)
+                    if close is None:
+                        raise RuntimeError("eager bridge cannot close during detach")
+                    close()
+                    closed.append(bridge)
+            except BaseException:
+                # A failed close leaves the model graph installed. Re-open any bridge
+                # that did close, then release the admission freeze for a retry.
+                failed = bridge
+                if bool(getattr(failed, "closed", False)) and failed not in closed:
+                    closed.append(failed)
+                _rollback_closed_bridges(tuple(closed))
+                _unfreeze_bridges(frozen)
+                raise
+            closed = tuple(closed)
+
+        try:
+            for _layer, mlp, original, _installed in attachment.replacements:
+                mlp.experts = original
+            model._gguf_cpu_attachment = None
+        except BaseException:
+            for _layer, mlp, _original, installed in reversed(attachment.replacements):
+                mlp.experts = installed
+            if closed:
+                _rollback_closed_bridges(closed)
+                _unfreeze_bridges(frozen)
+            raise
 
 
 def append_original_expert_state(
@@ -214,10 +341,30 @@ def append_original_expert_state(
     return result
 
 
+def gguf_cpu_expert_telemetry(model: Any) -> dict[int, dict[str, object]]:
+    """Return per-layer telemetry for the currently attached expert wrappers."""
+    attachment = getattr(model, "_gguf_cpu_attachment", None)
+    if attachment is None:
+        return {}
+    result: dict[int, dict[str, object]] = {}
+    for layer, _mlp, _original, installed in attachment.replacements:
+        telemetry = getattr(installed, "host_weight_telemetry", None)
+        if callable(telemetry):
+            value = telemetry()
+        elif isinstance(telemetry, dict):
+            value = dict(telemetry)
+        else:
+            value = {}
+        result[int(layer._layer_id)] = value
+    return result
+
+
 __all__ = [
     "GGUFCpuExpertAttachment",
     "append_original_expert_state",
+    "attach_gguf_cpu_eager_bridge",
     "attach_gguf_cpu_expert_bundle",
     "detach_gguf_cpu_expert_bundle",
+    "gguf_cpu_expert_telemetry",
     "validate_gguf_cpu_attachment",
 ]

@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import safetensors
@@ -30,10 +31,13 @@ from freetoken.models.qwen3_5_moe.gdn import Qwen3_5GatedDeltaNet
 from freetoken.models.qwen4_exp.gguf_attach import (
     GGUFCpuExpertAttachment,
     append_original_expert_state,
+    attach_gguf_cpu_eager_bridge,
     attach_gguf_cpu_expert_bundle,
     detach_gguf_cpu_expert_bundle,
+    gguf_cpu_expert_telemetry,
 )
 from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+from freetoken.moe.gguf_transfer import EagerTransferSeam
 from freetoken.utils import download_hf_weight, nvtx_annotate
 
 if TYPE_CHECKING:
@@ -43,6 +47,36 @@ if TYPE_CHECKING:
 
 
 ObservationHook = Callable[[str, dict[str, object]], None]
+
+
+@dataclass(frozen=True)
+class _MoeExecutionContext:
+    """Explicit per-forward facts needed by an optional eager expert bridge."""
+
+    phase: str
+    group_size: int
+    graph_capture: bool
+    cache_size: int = 0
+    workspace: object | None = None
+    num_token_non_padded: int | None = None
+
+
+def _validate_eager_moe_context(context: _MoeExecutionContext) -> None:
+    if context.phase != "decode":
+        raise ValueError(
+            f"eager GGUF expert attachment is decode-only; phase={context.phase!r} is unsupported"
+        )
+    if context.group_size != 1:
+        raise ValueError(
+            "eager GGUF expert attachment requires one request; "
+            f"group_size={context.group_size} is unsupported"
+        )
+    if context.graph_capture:
+        raise ValueError("eager GGUF expert attachment cannot run during graph capture")
+    if context.cache_size != 0:
+        raise ValueError("eager GGUF expert attachment requires cache_size=0")
+    if context.workspace is not None:
+        raise ValueError("eager GGUF expert attachment does not accept a workspace")
 
 
 def _debug_batch_metadata(
@@ -182,11 +216,39 @@ class _SparseMoE(BaseOP):
         self,
         hidden: torch.Tensor,
         debug_observer: ObservationHook | None = None,
+        *,
+        execution_context: _MoeExecutionContext | None = None,
     ) -> torch.Tensor:
+        eager = bool(getattr(self.experts, "requires_moe_execution_context", False))
+        if eager:
+            if execution_context is None:
+                raise RuntimeError("eager GGUF expert requires an explicit MoE execution context")
+            _validate_eager_moe_context(execution_context)
         router_logits = self.gate.forward(hidden)
         shared = self.shared_expert.forward(hidden)
         shared *= torch.sigmoid(self.shared_expert_gate.forward(hidden))
-        if debug_observer is None:
+        if eager:
+            eager_kwargs = {
+                "phase": execution_context.phase,
+                "group_size": execution_context.group_size,
+                "graph_capture": execution_context.graph_capture,
+                "workspace": execution_context.workspace,
+                "num_token_non_padded": execution_context.num_token_non_padded,
+            }
+            if debug_observer is None:
+                routed = self.experts.forward(
+                    hidden_states=hidden,
+                    router_logits=router_logits,
+                    **eager_kwargs,
+                )
+            else:
+                routed = self.experts.forward(
+                    hidden_states=hidden,
+                    router_logits=router_logits,
+                    debug_observer=debug_observer,
+                    **eager_kwargs,
+                )
+        elif debug_observer is None:
             routed = self.experts.forward(hidden_states=hidden, router_logits=router_logits)
         else:
             routed = self.experts.forward(
@@ -728,6 +790,8 @@ class Qwen4ExpDecoderLayer(BaseOP):
         self,
         hidden: torch.Tensor,
         debug_observer: ObservationHook | None = None,
+        *,
+        execution_context: _MoeExecutionContext | None = None,
     ) -> torch.Tensor:
         if self.ple is not None:
             ple_contribution = self.ple.forward(hidden)
@@ -755,7 +819,14 @@ class Qwen4ExpDecoderLayer(BaseOP):
         )
         hidden = residual + (mixed.unsqueeze(1) * weights.unsqueeze(-1)).flatten(1)
         mixed, residual, weights = self.mlp_hyper_connection.forward(hidden)
-        mixed = self.mlp.forward(mixed, debug_observer)
+        if execution_context is None:
+            mixed = self.mlp.forward(mixed, debug_observer)
+        else:
+            mixed = self.mlp.forward(
+                mixed,
+                debug_observer,
+                execution_context=execution_context,
+            )
         return residual + (mixed.unsqueeze(1) * weights.unsqueeze(-1)).flatten(1)
 
 
@@ -771,6 +842,7 @@ class Qwen4ExpModel(BaseOP):
         self._image_token_id = config.image_token_id
         self._debug_observer: ObservationHook | None = None
         self._gguf_cpu_attachment: GGUFCpuExpertAttachment | None = None
+        self._gguf_attachment_lock = threading.RLock()
 
     def set_debug_observer(self, observer: ObservationHook | None) -> None:
         """Enable semantic intermediate snapshots for an opt-in correctness probe."""
@@ -779,6 +851,15 @@ class Qwen4ExpModel(BaseOP):
     def attach_gguf_cpu_expert_bundle(self, bundle: QwenGGUFCpuExpertBundle) -> None:
         """Attach a borrowed decode-only bundle to every Qwen routed-expert layer."""
         attach_gguf_cpu_expert_bundle(self, bundle)
+
+    def attach_gguf_cpu_eager_bridge(
+        self,
+        bundle: QwenGGUFCpuExpertBundle,
+        *,
+        transfer: EagerTransferSeam | None = None,
+    ) -> None:
+        """Attach explicit blocking device bridges around every CPU expert layer."""
+        attach_gguf_cpu_eager_bridge(self, bundle, transfer=transfer)
 
     def detach_gguf_cpu_expert_bundle(self) -> None:
         """Restore the original routed-expert objects without closing the bundle."""
@@ -791,8 +872,27 @@ class Qwen4ExpModel(BaseOP):
         result: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Keep runtime expert attachment orthogonal to model weight serialization."""
-        result = super().state_dict(prefix=prefix, result=result)
-        return append_original_expert_state(self, result, prefix=prefix)
+        # Capture the graph and append resident expert state under the same lock as
+        # attach/detach. Otherwise a concurrent swap can produce a mixed snapshot.
+        with self._gguf_attachment_lock:
+            result = super().state_dict(prefix=prefix, result=result)
+            return append_original_expert_state(self, result, prefix=prefix)
+
+    def load_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        *,
+        prefix: str = "",
+        _internal: bool = False,
+    ) -> None:
+        # Serialize loading with attach/detach so a concurrent attach cannot become
+        # active after this check and mutate the graph while BaseOP walks it.
+        with self._gguf_attachment_lock:
+            if getattr(self, "_gguf_cpu_attachment", None) is not None:
+                raise RuntimeError(
+                    "detach the GGUF CPU expert attachment before load_state_dict"
+                )
+            super().load_state_dict(state_dict, prefix=prefix, _internal=_internal)
 
     def load_host_weights(
         self,
@@ -824,9 +924,54 @@ class Qwen4ExpModel(BaseOP):
             if layer.ple is not None
         }
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        hidden = self.embed_tokens.forward(input_ids)
+    def gguf_cpu_expert_telemetry(self) -> dict[int, dict[str, object]]:
+        """Return request-scoped telemetry from attached expert adapters or bridges."""
+        return gguf_cpu_expert_telemetry(self)
+
+    def _has_eager_gguf_attachment(self) -> bool:
+        attachment = getattr(self, "_gguf_cpu_attachment", None)
+        return attachment is not None and attachment.mode == "eager"
+
+    @staticmethod
+    def _graph_capture_active(batch: object) -> bool:
+        batch_value = getattr(batch, "graph_capture", None)
+        if batch_value is not None:
+            return bool(batch_value)
+        try:
+            if not torch.cuda.is_available():
+                return False
+            return bool(torch.cuda.is_current_stream_capturing())
+        except RuntimeError as error:
+            raise RuntimeError(
+                "cannot determine CUDA graph-capture state for eager GGUF experts"
+            ) from error
+
+    @classmethod
+    def _eager_execution_context(cls, batch: object) -> _MoeExecutionContext:
+        reqs = getattr(batch, "reqs", ())
+        valid_tokens = None
+        if reqs:
+            try:
+                valid_tokens = sum(int(req.extend_len) for req in reqs)
+            except (AttributeError, TypeError, ValueError):
+                valid_tokens = None
+        context = _MoeExecutionContext(
+            phase=str(batch.phase),
+            group_size=int(batch.size),
+            graph_capture=cls._graph_capture_active(batch),
+            cache_size=0,
+            workspace=None,
+            num_token_non_padded=valid_tokens,
+        )
+        _validate_eager_moe_context(context)
+        return context
+
+    def _forward_impl(self, input_ids: torch.Tensor, *, eager: bool) -> torch.Tensor:
         batch = get_global_ctx().batch
+        execution_context = self._eager_execution_context(batch) if eager else None
+        # Validate eager-only restrictions before embedding, routing, shared-expert
+        # work, or any host/device transfer can begin.
+        hidden = self.embed_tokens.forward(input_ids)
         if getattr(batch, "mm_embeds", None) is not None or (
             self._image_token_id is not None and bool((input_ids == self._image_token_id).any())
         ):
@@ -836,11 +981,30 @@ class Qwen4ExpModel(BaseOP):
         hidden = hidden.repeat(1, self.hc_count)
         if self._debug_observer is None:
             for layer in self.layers.op_list:
-                hidden = layer.forward(hidden)
+                if execution_context is None:
+                    hidden = layer.forward(hidden)
+                else:
+                    hidden = layer.forward(hidden, execution_context=execution_context)
         else:
             for layer in self.layers.op_list:
-                hidden = layer.forward(hidden, self._debug_observer)
+                if execution_context is None:
+                    hidden = layer.forward(hidden, self._debug_observer)
+                else:
+                    hidden = layer.forward(
+                        hidden,
+                        self._debug_observer,
+                        execution_context=execution_context,
+                    )
         return self.hyper_connection_mixer.forward(hidden)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        # The mode decision must be made while holding the same lock as attach and
+        # detach; otherwise a concurrent attachment can change the expert object
+        # between the check and the dispatch.
+        with self._gguf_attachment_lock:
+            if self._has_eager_gguf_attachment():
+                return self._forward_impl(input_ids, eager=True)
+            return self._forward_impl(input_ids, eager=False)
 
 
 class Qwen4ExpForCausalLM(BaseLLMModel):
@@ -871,6 +1035,15 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         """Attach a borrowed decode-only GGUF CPU bundle to the inner Qwen model."""
         self.model.attach_gguf_cpu_expert_bundle(bundle)
 
+    def attach_gguf_cpu_eager_bridge(
+        self,
+        bundle: QwenGGUFCpuExpertBundle,
+        *,
+        transfer: EagerTransferSeam | None = None,
+    ) -> None:
+        """Attach explicit blocking device bridges to the inner Qwen model."""
+        self.model.attach_gguf_cpu_eager_bridge(bundle, transfer=transfer)
+
     def detach_gguf_cpu_expert_bundle(self) -> None:
         """Detach the borrowed GGUF CPU bundle without closing its host mappings."""
         self.model.detach_gguf_cpu_expert_bundle()
@@ -880,6 +1053,9 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
 
     def host_weight_telemetry(self) -> dict[int, dict[str, object]]:
         return self.model.host_weight_telemetry()
+
+    def gguf_cpu_expert_telemetry(self) -> dict[int, dict[str, object]]:
+        return self.model.gguf_cpu_expert_telemetry()
 
     @torch.inference_mode()
     def encode_images(

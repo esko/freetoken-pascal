@@ -153,8 +153,18 @@ stream, overlap or performance contract. Request-scoped telemetry reports the tr
 path, copied fields/bytes, one CPU execution, adapter telemetry and errors; a failed
 request clears the prior success. Bridge close only rejects new work and never closes
 the borrowed layer or bundle. This is an experimental correctness boundary: real
-CUDA-transfer and serving evidence remain H2-unverified, and Engine/model defaults are
-unchanged.
+CUDA-transfer and serving evidence remain H2-unverified. An explicit
+`Qwen4ExpModel.attach_gguf_cpu_eager_bridge()` (and its `ForCausalLM` delegate) can
+transactionally install one bridge per routed-expert layer. The attachment derives
+phase and request group from the active batch, rejects prefill, grouped work and graph
+capture before expert execution, and exposes per-layer bridge telemetry. Detach restores
+the resident expert identities and closes only attachment-created wrappers; bridge
+admission is frozen across the whole detach transaction and both freezes and closes are
+rolled back if a bridge is busy or close fails. Model forward mode selection and
+`load_state_dict` are serialized with that lifecycle lock; loading while an attachment is
+active fails with a detach-before-load error. The borrowed bundle and transfer seam remain
+caller-owned. The resident originals are retained for state-dict fidelity, so this mode is
+not memory-saving or serving-ready. Engine, CLI and default paths remain unchanged.
 
 ## MoE decode operation
 
