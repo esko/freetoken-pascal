@@ -102,6 +102,13 @@ gguf-py and exercise invalid IDs, short ranges, hash mismatches and every warm m
 compiles the same GGUF CUDA translation unit for `sm_61`. CUDA expert parity and short
 generation remain H2 and require a real Tesla P4; they are not waived by host references.
 
+The GGUF vector MoE launcher carries routed pairs in `gridDim.z`, whose CUDA limit is 65,535.
+It therefore splits long prefill requests at token boundaries, preserving the kernel's local
+`blockIdx.z / top_k` indexing while keeping expert-row locality. The H0 source gate checks that
+all quant launchers use the shared helper; `tests/kernels/test_moe_vec_grid_z.py` exercises the
+boundary and multi-chunk parity on CUDA-capable hosts. This is a correctness fix only: no H2
+Tesla P4 result is implied by the hosted or compile checks.
+
 ## Real expert byte probe (H0)
 
 The bounded Issue #16 probe downloads one selected expert's gate, up and down packed ranges

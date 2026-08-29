@@ -161,6 +161,6 @@ def test_repository_manifest_and_offline_report_are_machine_readable():
     assert check.returncode == 0, check.stderr
     assert report.returncode == 0, report.stderr
     payload = json.loads(report.stdout)
-    assert len(payload["sources"]) == 12
+    assert len(payload["sources"]) == 13
     assert {row["status"] for row in payload["sources"]} == {"offline"}
     assert all(len(row["pinned"]) == 40 for row in payload["sources"])

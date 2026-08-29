@@ -21,6 +21,7 @@ from freetoken.gguf_types import (
 
 ROOT = Path(__file__).resolve().parents[2]
 KERNEL = ROOT / "python/freetoken/kernel/csrc/gguf/gguf_kernel.cu"
+MOE_VEC = ROOT / "python/freetoken/kernel/csrc/gguf/moe_vec.cuh"
 
 
 def _switch_cases(function_name: str) -> set[int]:
@@ -75,3 +76,35 @@ def test_capability_sets_are_consistent() -> None:
     assert MMQ_TYPES < MMVQ_TYPES
     assert DEQUANT_TYPES.isdisjoint(GGML_UNQUANTIZED)
     assert DEQUANT_TYPES | GGML_UNQUANTIZED == set(BLOCK_SHAPE)
+
+
+def test_moe_vector_launchers_chunk_tokens_before_grid_z_limit() -> None:
+    """Keep long-prefill routing below CUDA's gridDim.z ceiling.
+
+    The actual device parity test lives with the CUDA kernel tests and is skipped on H0.
+    This source-level gate ensures every quantized launcher uses the shared, token-aligned
+    helper rather than regressing to a direct ``tokens * top_k`` launch.
+    """
+    source = MOE_VEC.read_text(encoding="utf-8")
+    assert "#define MOE_VEC_MAX_GRID_Z 65535" in source
+    assert "const int tokens_per_chunk = MOE_VEC_MAX_GRID_Z / (top_k > 0 ? top_k : 1);" in source
+    assert "dst + (size_t)t0 * top_k * nrows" in source
+    assert "topk_ids + (size_t)t0 * top_k" in source
+    assert source.count("<<<block_nums") == 1
+    assert source.count("moe_vec_launch<") >= 19
+
+
+def test_moe_vector_rejects_invalid_top_k_before_narrowing_or_allocation() -> None:
+    source = KERNEL.read_text(encoding="utf-8")
+    function_start = source.index("torch::Tensor ggml_moe_a8_vec(")
+    function = source[function_start:]
+    positive_check = function.index(
+        'TORCH_CHECK(top_k > 0, "ggml_moe_a8_vec: top_k must be positive'
+    )
+    ceiling_check = function.index("TORCH_CHECK(\n      top_k <= MOE_VEC_MAX_GRID_Z")
+    narrowing = function.index("int col = X.sizes()[1];")
+    allocation = function.index("at::Tensor Y = torch::zeros", narrowing)
+    assert positive_check < narrowing
+    assert ceiling_check < narrowing
+    assert positive_check < allocation
+    assert ceiling_check < allocation

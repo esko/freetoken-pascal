@@ -546,6 +546,13 @@ torch::Tensor ggml_moe_a8_vec(
     int64_t type,
     int64_t row,
     int64_t tokens) {
+  TORCH_CHECK(top_k > 0, "ggml_moe_a8_vec: top_k must be positive, got ", top_k);
+  TORCH_CHECK(
+      top_k <= MOE_VEC_MAX_GRID_Z,
+      "ggml_moe_a8_vec: top_k must be <= ",
+      MOE_VEC_MAX_GRID_Z,
+      " for CUDA gridDim.z chunking, got ",
+      top_k);
   int col = X.sizes()[1];
   const int padded = (col + 512 - 1) / 512 * 512;
   const at::cuda::OptionalCUDAGuard device_guard(device_of(X));

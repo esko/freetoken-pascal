@@ -15,6 +15,8 @@ This product currently includes source from the following upstream distribution:
 - freetoken-gguf-pr131: FlashML-org/FreeToken pull request 131 (Apache-2.0), commit
   bb432e8c473c557cdef6517abccf0c129bd8c544; generic GGUF K/I tables, shard loading,
   mixed-projection handling, and Qwen converter reversals adapted
+- freetoken-gguf-grid-z: FlashML-org/FreeToken pull request 131 (Apache-2.0), commit
+  9952a39dd2a8718efca495940f78376f13f636ac; long-prefill GGUF MoE launch chunking adapted
 - llama-iq-reference: ggml-org/llama.cpp pull request 27742 (MIT), commit
   eaf93765572e794b8e3754fe45adbe12d381e997; IQ3_XXS grid and IQ4_NL codebook constants
   adapted from ggml/src/ggml-common.h and ggml/src/ggml-quants.c
