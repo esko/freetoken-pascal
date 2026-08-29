@@ -73,7 +73,7 @@ def test_no_swap_preflight_fails_before_host_bank_allocation(monkeypatch):
     policy = HostBankPolicy(
         strategy="pageable",
         require_no_swap=True,
-        swap_probe_reader=_swap_reader(total="1 MiB", free="1 MiB"),
+        swap_probe_reader=_swap_reader(total="1024 kB", free="1024 kB"),
     )
     called = False
 
@@ -88,16 +88,18 @@ def test_no_swap_preflight_fails_before_host_bank_allocation(monkeypatch):
     assert not called
 
 
-def test_default_swap_policy_reports_pressure_without_rejecting():
+def test_default_swap_policy_does_not_probe_pressure():
     from freetoken.moe.host_banks import HostBankPolicy
 
     policy = HostBankPolicy(
         strategy="pageable",
-        swap_probe_reader=_swap_reader(vm_swap="2 kB", total="1 MiB", free="1 MiB"),
+        swap_probe_reader=lambda _path: (_ for _ in ()).throw(
+            AssertionError("default policy must not probe procfs")
+        ),
     )
     policy.prepare_layer_bytes([4096])
 
-    assert policy.accounting.swap_status == "swap-active"
+    assert policy.accounting.swap_status == "not-requested"
     assert policy.accounting.as_dict()["no_swap_observed"] is False
 
 

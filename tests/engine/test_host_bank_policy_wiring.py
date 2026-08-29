@@ -184,8 +184,9 @@ def test_engine_constructor_rolls_back_late_startup_failure():
     def rollback(_self):
         cleanup.append(True)
 
-    with patch.object(Engine, "_initialize", fail), patch.object(
-        Engine, "_cleanup_host_bank_resources", rollback
+    with (
+        patch.object(Engine, "_initialize", fail),
+        patch.object(Engine, "_cleanup_host_bank_resources", rollback),
     ):
         with pytest.raises(RuntimeError, match="late startup failure"):
             Engine(object())
@@ -261,7 +262,7 @@ def test_ftw_no_swap_preflight_runs_before_index_open(tmp_path):
         require_no_swap=True,
         swap_probe_reader=lambda path: {
             "/proc/self/status": "VmSwap: 0 kB\n",
-            "/proc/meminfo": "SwapTotal: 1 MiB\nSwapFree: 1 MiB\n",
+            "/proc/meminfo": "SwapTotal: 1024 kB\nSwapFree: 1024 kB\n",
             "/proc/swaps": "Filename Type Size Used Priority\n",
         }[path],
     )
@@ -288,9 +289,7 @@ def test_ftw_no_swap_snapshot_is_threaded_without_second_probe(tmp_path):
         reads.append(path)
         return files[path]
 
-    policy = HostBankPolicy(
-        strategy="pageable", require_no_swap=True, swap_probe_reader=read
-    )
+    policy = HostBankPolicy(strategy="pageable", require_no_swap=True, swap_probe_reader=read)
     seen = {}
 
     def fake_load(path, **kwargs):
