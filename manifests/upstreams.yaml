@@ -228,17 +228,29 @@ sources:
         header_policy: preserved
         responsible_issue: 12
         responsible_pull_request: 36
-  - id: freetoken-qwen4-pr257-merge-reference
+  - id: freetoken-qwen4-pr257-merge
     repository: https://github.com/FlashML-org/FreeToken
     pull_request: 257
     upstream_ref: refs/pull/257/merge
     ref: bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40
     license: Apache-2.0
-    role: merged Qwen3.8 semantics, QSA, arbitrary-K router, PLE, graph and hybrid-MoE reference
-    usage: reference
+    role: authoritative Qwen3.8 semantics, QSA, arbitrary-K router, PLE, graph and hybrid-MoE source
+    usage: imported
     responsible_issue: 77
-    notice_required: false
-    imports: []
+    notice_required: true
+    imports:
+      - source_path: .
+        destination_path: .
+        source_ref: bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40
+        method: merge
+        local_modifications:
+          - retain downstream GGUF parsing and quantized host layouts
+          - retain dedicated NVMe PLE mapping and bounded host-table adapters
+          - retain Pascal fallbacks, CPU expert execution, placement safety and evidence contracts
+          - isolate pre-sync QSA and PLE helpers as reference-only test paths
+        license: Apache-2.0
+        header_policy: preserved by history
+        responsible_issue: 77
   - id: freetoken-fp8-rowwise-safety
     repository: https://github.com/FlashML-org/FreeToken
     upstream_ref: refs/heads/main
