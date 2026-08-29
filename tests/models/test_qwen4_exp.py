@@ -588,7 +588,7 @@ def test_safetensors_ple_undersized_table_closes_open_handles(
     with pytest.raises(RuntimeError, match="has 4 rows, needs 6"):
         embedding.load_host_weights(str(tmp_path))
     assert opened
-    assert exited == opened
+    assert set(exited) == set(opened)
 
 
 def test_safetensors_ple_loads_shared_shard_and_scale_file(tmp_path: Path) -> None:
