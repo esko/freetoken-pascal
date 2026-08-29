@@ -10,9 +10,11 @@ The project is based on [FlashML-org/FreeToken](https://github.com/FlashML-org/F
 
 The complete upstream runtime source tree was imported at the commit pinned in `manifests/upstreams.yaml`. Substantial H0/H1 work is already present for CUDA 12.6/`sm_61` compilation, the Qwen3.8 text architecture, heterogeneous GGUF ingestion, file-backed PLE/expert layouts, AVX2 low-bit CPU experts, topology/affinity controls, no-swap admission, and correctness-oriented Qwen GGUF bridges.
 
-The remaining critical path is the dedicated PLE serving artifact, serving-ready host-expert integration, Pascal GPU kernels, placement safety, one-/two-P4 ownership and cache policies, adaptive CPU/GPU execution, long-context serving, and hardware-qualified release evidence. See the [2026-08-29 status and evidence review](docs/reviews/2026-08-29-status-and-evidence-review.md).
+Upstream FreeToken merged its newer text-only Qwen3.8 implementation in PR #257 on August 28, 2026. The current downstream tree still contains earlier adaptations based partly on the now-closed PR #232, so issue #77 is the immediate integration priority: sync the pinned upstream main revision, reconcile duplicate model/QSA/PLE code, and preserve only the downstream Pascal, GGUF, CPU-expert, storage-tier, placement, and evidence deltas that remain necessary.
 
-The target P4 GPUs have not arrived yet. Hardware qualification issues [#9](https://github.com/esko/freetoken-pascal/issues/9) and [#29](https://github.com/esko/freetoken-pascal/issues/29) are explicitly blocked, while hosted, CPU, converter, storage, cache-simulation, tiny-model and `sm_61` compile work proceeds.
+After that reconciliation, the critical path is the dedicated PLE serving artifact, serving-ready host-expert integration, Pascal GPU kernels, post-prefill placement safety, QSA long-context workspace/synchronization work, one-/two-P4 ownership and cache policies, adaptive CPU/GPU execution, long-context serving, and hardware-qualified release evidence. See the [2026-08-29 status and evidence review](docs/reviews/2026-08-29-status-and-evidence-review.md).
+
+The target P4 GPUs have not arrived yet. Hardware qualification issues [#9](https://github.com/esko/freetoken-pascal/issues/9) and [#29](https://github.com/esko/freetoken-pascal/issues/29) are explicitly blocked, while upstream reconciliation, hosted, CPU, converter, storage, cache-simulation, tiny-model and `sm_61` compile work proceeds.
 
 ## Product target
 
@@ -27,7 +29,8 @@ The v1 product is a text-serving runtime with:
 - Pascal low-bit/DP4A expert kernels and a fused exact `topk=10` router;
 - per-GPU hot-expert caches with cache-zero and static-hot controls;
 - concurrent CPU and GPU expert execution with contention-aware scheduling;
-- per-GPU placement planning, a startup canary, automatic backoff and fail-readiness safety;
+- per-GPU placement planning through the first large prefill, a startup canary, automatic backoff and fail-readiness safety;
+- bounded QSA score/top-k/gather workspaces and measured long-context scaling;
 - named Q4 reference and Q3 throughput-candidate profiles;
 - long-context GDN/QSA/PLE correctness;
 - OpenAI-compatible serving, telemetry, reproducible benchmarks, and operational packaging;
@@ -73,10 +76,11 @@ python scripts/report_upstream_changes.py
 
 This work builds on and tracks:
 
-- [FlashML-org/FreeToken](https://github.com/FlashML-org/FreeToken)
+- [FlashML-org/FreeToken](https://github.com/FlashML-org/FreeToken), with merged Qwen3.8 support from PR #257 as the next downstream sync target
 - [FreeToken Pascal support PR #19](https://github.com/FlashML-org/FreeToken/pull/19)
 - [FreeToken CUDA 12.6 dependency PR #26](https://github.com/FlashML-org/FreeToken/pull/26)
-- [FreeToken Qwen3.8/Qwen4 PR #232](https://github.com/FlashML-org/FreeToken/pull/232), now closed unmerged and retained as a pinned downstream source
+- [FreeToken Qwen3.8/Qwen4 PR #232](https://github.com/FlashML-org/FreeToken/pull/232), retained only as historical provenance for downstream code that remains distinct after issue #77
+- [FreeToken mmap PLE PR #279](https://github.com/FlashML-org/FreeToken/pull/279), tracked through an immutable pin as an open donor/reference for issue #13 rather than a merged dependency
 - [FreeToken GGUF/K/I PR #131](https://github.com/FlashML-org/FreeToken/pull/131)
 - [FreeToken Qwen MoE TP PR #104](https://github.com/FlashML-org/FreeToken/pull/104)
 - [PXA/PXQ llama.cpp](https://github.com/poisonxa16/pxq_llama.cpp)
@@ -95,8 +99,9 @@ Exact revisions must be recorded in `manifests/upstreams.yaml`; branch names and
 3. Never claim a speedup without same-model, same-quant, same-prompt A/B evidence.
 4. Keep hardware-dependent work blocked until the P4s and self-hosted runner exist.
 5. Make every experimental optimization independently switchable and observable.
-6. Do not broaden the core v1 release to vision, GLM, native MTP, pruning, or general cloud serving before the release gates are met.
-7. Optional performance profiles must fail or disable safely without weakening ordinary decode readiness.
+6. Reconcile merged upstream functionality before extending duplicate downstream implementations.
+7. Do not broaden the core v1 release to vision, GLM, native MTP, pruning, or general cloud serving before the release gates are met.
+8. Optional performance profiles must fail or disable safely without weakening ordinary decode readiness.
 
 ## License
 
