@@ -491,10 +491,15 @@ def test_qwen4_ple_explicitly_loads_dedicated_artifact(tmp_path: Path) -> None:
     artifact = convert_gguf_ple_to_artifact(fixture, tmp_path / "ple")
 
     embedding.load_host_weights(
-        str(fixture), ple_artifact_path=str(artifact), ple_warm_mode="cold"
+        str(fixture),
+        ple_artifact_path=str(artifact),
+        ple_warm_mode="cold",
+        ple_backend="pread",
     )
 
     assert embedding.telemetry()["source"] == "dedicated-artifact"
+    assert embedding.telemetry()["backend"] == "pread"
+    assert embedding.telemetry()["mapped_bytes"] == 0
     assert embedding._gguf_ple.descriptor.shard_path == str(artifact / "ple.bin")
     embedding._gguf_ple.close()
 

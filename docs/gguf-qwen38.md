@@ -82,6 +82,11 @@ PYTHONPATH=python python scripts/extract_ple_artifact.py \
 
 Use `MappedPLETable.open_from_artifact` for serving warm modes. Its `full-ple-warm` mode
 touches only `ple.bin`; `open_from_gguf` remains available as the compatibility/reference path.
+Dedicated artifacts support explicit `mmap` and positional-read backends through
+`--ple-backend`. Both validate a complete batch before I/O, deduplicate and sort row
+reads, and restore caller order; positional short reads fail rather than zero-fill.
+The dedicated loader requests random-access advice (`MADV_RANDOM` or
+`POSIX_FADV_RANDOM`) where supported and reports the selected advice, success, and error.
 
 Inspect a complete local artifact without touching its tensor payload pages:
 

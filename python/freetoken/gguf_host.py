@@ -72,6 +72,17 @@ def _warm_model_files(paths: tuple[str, ...]) -> int:
     return warmed
 
 
+def _warm_pread_file(fd: int, size: int, chunk_size: int = 8 << 20) -> int:
+    offset = 0
+    while offset < size:
+        requested = min(chunk_size, size - offset)
+        chunk = os.pread(fd, requested, offset)
+        if len(chunk) != requested:
+            raise ValueError("short PLE positional warm read")
+        offset += requested
+    return offset
+
+
 def _publish_directory_noreplace(staging: Path, output: Path) -> None:
     """Atomically publish a directory without replacing a concurrent destination."""
     renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
@@ -717,12 +728,14 @@ def dequantize_iq4_nl(packed: np.ndarray) -> np.ndarray:
 
 
 class MappedPLETable:
-    _MODES = frozenset({"cold", "page-cache-warm", "targeted", "full-model-warm"})
+    _MODES = frozenset(
+        {"cold", "page-cache-warm", "targeted", "full-model-warm", "full-ple-warm"}
+    )
 
     def __init__(
         self,
         descriptor: PLEDescriptor,
-        mapping: MappedFileRange,
+        mapping: MappedFileRange | None,
         *,
         model_shard_paths: tuple[str, ...],
     ) -> None:
@@ -740,6 +753,31 @@ class MappedPLETable:
         self._storage_read_bytes = 0
         self._targeted_warm_rows = 0
         self._full_model_warm_bytes = 0
+        self.backend = "mmap"
+        self._pread_fd: int | None = None
+        self._batch_calls = self._batch_requested_rows = self._batch_unique_rows = 0
+        self._batch_positional_reads = self._batch_duplicate_rows = 0
+        self._batch_sorted_rows = self._batch_bytes_read = 0
+        self._targeted_positional_warm_reads = 0
+        self._short_reads = 0
+        self._advice = "not-requested"
+        self._advice_applied = False
+        self._advice_error: str | None = None
+
+    def _apply_random_advice(self) -> None:
+        try:
+            if self.mapping is not None and hasattr(mmap, "MADV_RANDOM"):
+                self._advice = "madv-random"
+                self.mapping.advise(mmap.MADV_RANDOM)
+            elif self._pread_fd is not None and hasattr(os, "POSIX_FADV_RANDOM"):
+                self._advice = "posix-fadv-random"
+                os.posix_fadvise(self._pread_fd, 0, 0, os.POSIX_FADV_RANDOM)
+            else:
+                self._advice = "unsupported"
+                return
+            self._advice_applied = True
+        except OSError as error:
+            self._advice_error = f"{type(error).__name__}: {error}"
 
     @classmethod
     def open_from_gguf(
@@ -767,6 +805,8 @@ class MappedPLETable:
             model_shard_paths=layout.shard_paths,
         )
         try:
+            if warm_mode == "full-ple-warm":
+                raise ValueError("GGUF warm mode is full-model-warm")
             table.set_warm_mode(warm_mode)
         except BaseException:
             table.close()
@@ -775,8 +815,10 @@ class MappedPLETable:
 
     @classmethod
     def open_from_artifact(
-        cls, path: str | Path, *, warm_mode: str = "cold"
+        cls, path: str | Path, *, warm_mode: str = "cold", backend: str = "mmap"
     ) -> MappedPLETable:
+        if backend not in {"mmap", "pread"}:
+            raise ValueError(f"unknown PLE backend {backend!r}")
         root = Path(path)
         try:
             manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
@@ -824,22 +866,21 @@ class MappedPLETable:
             shard_path=str(payload),
             data_offset=0,
         )
-        mapping = MappedFileRange(
-            str(payload),
-            offset=0,
-            length=tensor_bytes,
-            rows=rows,
-            row_bytes=row_bytes,
-            expected_file_sha256=manifest["sha256"],
-            verify_file_sha256=True,
-        )
+        mapping = None
+        if backend == "mmap":
+            mapping = MappedFileRange(
+                str(payload), offset=0, length=tensor_bytes, rows=rows, row_bytes=row_bytes,
+                expected_file_sha256=manifest["sha256"], verify_file_sha256=True,
+            )
         table = cls(descriptor, mapping, model_shard_paths=(str(payload),))
         table.source_kind = "dedicated-artifact"
         try:
+            table.backend = backend
+            if backend == "pread":
+                table._pread_fd = os.open(payload, os.O_RDONLY)
+            table._apply_random_advice()
             if warm_mode == "full-model-warm":
                 raise ValueError("artifact warm mode is full-ple-warm")
-            if warm_mode == "full-ple-warm":
-                warm_mode = "full-model-warm"
             table.set_warm_mode(warm_mode)
         except BaseException:
             table.close()
@@ -851,13 +892,24 @@ class MappedPLETable:
             raise ValueError(f"unknown PLE warm mode {mode!r}; expected {sorted(self._MODES)}")
         self.mode = mode
         if mode == "cold" and hasattr(mmap, "MADV_DONTNEED"):
-            self.mapping.advise(mmap.MADV_DONTNEED)
+            if self.mapping is not None:
+                self.mapping.advise(mmap.MADV_DONTNEED)
+            elif hasattr(os, "posix_fadvise"):
+                os.posix_fadvise(self._pread_fd, 0, 0, os.POSIX_FADV_DONTNEED)
         elif mode == "page-cache-warm" and hasattr(mmap, "MADV_WILLNEED"):
-            self.mapping.advise(mmap.MADV_WILLNEED)
-        if mode == "full-model-warm":
+            if self.mapping is not None:
+                self.mapping.advise(mmap.MADV_WILLNEED)
+            elif hasattr(os, "posix_fadvise"):
+                os.posix_fadvise(self._pread_fd, 0, 0, os.POSIX_FADV_WILLNEED)
+        if mode in {"full-model-warm", "full-ple-warm"}:
             # Explicitly touch every source shard, including ordinary tensors and
             # expert banks.  This is intentionally never the default.
-            self._full_model_warm_bytes += _warm_model_files(self._model_shard_paths)
+            if self.mapping is None:
+                self._full_model_warm_bytes += _warm_pread_file(
+                    self._pread_fd, self.descriptor.tensor_bytes
+                )
+            else:
+                self._full_model_warm_bytes += _warm_model_files(self._model_shard_paths)
 
     def _validate_ids(self, ids: np.ndarray) -> np.ndarray:
         values = np.asarray(ids)
@@ -872,18 +924,49 @@ class MappedPLETable:
     def warm_rows(self, ids: np.ndarray) -> None:
         flat = self._validate_ids(ids)
         unique = np.unique(flat)
-        if unique.size:
+        if unique.size and self.mapping is not None:
             _ = int(self.mapping.rows[unique, 0].sum(dtype=np.uint64))
+        elif unique.size:
+            for row in unique:
+                if len(os.pread(self._pread_fd, 1, int(row) * self.descriptor.row_bytes)) != 1:
+                    self._short_reads += 1
+                    raise ValueError("short PLE positional warm read")
+                self._targeted_positional_warm_reads += 1
         self._targeted_warm_rows += int(unique.size)
 
     def lookup(self, ids: np.ndarray) -> np.ndarray:
+        return self.lookup_batch(ids)
+
+    def lookup_batch(self, ids: np.ndarray) -> np.ndarray:
         original = np.asarray(ids).shape
         flat = self._validate_ids(ids)
         before_usage = resource.getrusage(resource.RUSAGE_SELF)
         before_storage = _proc_read_bytes()
         if self.mode == "targeted":
             self.warm_rows(flat)
-        packed = self.mapping.rows[flat].copy()
+        unique, inverse = np.unique(flat, return_inverse=True)
+        if not flat.size:
+            return np.empty((*original, self.descriptor.elements_per_row), dtype=np.float32)
+        if self.backend == "pread":
+            chunks = []
+            for row in np.sort(unique):
+                chunk = os.pread(
+                    self._pread_fd,
+                    self.descriptor.row_bytes,
+                    int(row) * self.descriptor.row_bytes,
+                )
+                if len(chunk) != self.descriptor.row_bytes:
+                    self._short_reads += 1
+                    raise ValueError("short PLE positional read")
+                chunks.append(np.frombuffer(chunk, dtype=np.uint8))
+            packed_unique = np.asarray(chunks, dtype=np.uint8).reshape(
+                -1, self.descriptor.row_bytes
+            )
+            order = np.argsort(unique)
+            packed = packed_unique[np.argsort(order)][inverse].copy()
+        else:
+            packed = self.mapping.rows[unique].copy()
+            packed = packed[inverse]
         result = dequantize_iq4_nl(packed).reshape(
             *original,
             self.descriptor.elements_per_row,
@@ -894,6 +977,14 @@ class MappedPLETable:
         self._lookup_rows += int(flat.size)
         self._packed_bytes_read += int(flat.size) * self.descriptor.row_bytes
         self._output_bytes += int(result.nbytes)
+        self._batch_calls += 1
+        self._batch_requested_rows += int(flat.size)
+        self._batch_unique_rows += int(unique.size)
+        if self.backend == "pread":
+            self._batch_positional_reads += int(unique.size)
+        self._batch_duplicate_rows += int(flat.size - unique.size)
+        self._batch_sorted_rows += int(unique.size)
+        self._batch_bytes_read += int(unique.size) * self.descriptor.row_bytes
         self._minor_faults += max(0, int(after_usage.ru_minflt - before_usage.ru_minflt))
         self._major_faults += max(0, int(after_usage.ru_majflt - before_usage.ru_majflt))
         if before_storage is not None and after_storage is not None:
@@ -901,10 +992,10 @@ class MappedPLETable:
         return result
 
     def telemetry(self) -> dict[str, int | str | None]:
-        resident_pages = self.mapping.resident_pages()
+        resident_pages = None if self.mapping is None else self.mapping.resident_pages()
         return {
             "mode": self.mode,
-            "mapped_bytes": self.mapping.length,
+            "mapped_bytes": 0 if self.mapping is None else self.mapping.length,
             "resident_pages": resident_pages,
             "resident_bytes": (None if resident_pages is None else resident_pages * mmap.PAGESIZE),
             "lookup_calls": self._lookup_calls,
@@ -916,13 +1007,39 @@ class MappedPLETable:
             "storage_read_bytes": self._storage_read_bytes,
             "targeted_warm_rows": self._targeted_warm_rows,
             "full_model_warm_bytes": self._full_model_warm_bytes,
+            "backend": self.backend,
+            "batch_calls": self._batch_calls,
+            "batch_requested_rows": self._batch_requested_rows,
+            "batch_unique_rows": self._batch_unique_rows,
+            "batch_positional_reads": self._batch_positional_reads,
+            "batch_duplicate_rows": self._batch_duplicate_rows,
+            "batch_sorted_rows": self._batch_sorted_rows,
+            "batch_bytes_read": self._batch_bytes_read,
+            "short_reads": self._short_reads,
+            "targeted_positional_warm_reads": self._targeted_positional_warm_reads,
+            "advice": self._advice,
+            "advice_applied": self._advice_applied,
+            "advice_error": self._advice_error,
         }
 
     def close(self) -> None:
         if self._closed:
             return
-        self.mapping.close()
+        failure: BaseException | None = None
+        if self.mapping is not None:
+            try:
+                self.mapping.close()
+            except BaseException as error:
+                failure = error
+        if self._pread_fd is not None:
+            try:
+                os.close(self._pread_fd)
+            except BaseException as error:
+                failure = failure or error
+            self._pread_fd = None
         self._closed = True
+        if failure is not None:
+            raise failure
 
     def __enter__(self) -> MappedPLETable:
         return self

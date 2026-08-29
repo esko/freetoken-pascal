@@ -375,17 +375,21 @@ class _HostNGramEmbedding(BaseOP):
         dummy: bool = False,
         ple_warm_mode: str = "cold",
         ple_artifact_path: str | None = None,
+        ple_backend: str = "mmap",
     ) -> None:
         if dummy:
             self._dummy = True
             return
         from freetoken.models.gguf.reader import is_gguf_path
 
+        if ple_artifact_path is None and ple_backend != "mmap":
+            raise ValueError("PLE pread backend requires --ple-artifact-path")
+
         if ple_artifact_path is not None:
             from freetoken.gguf_host import MappedPLETable
 
             self._gguf_ple = MappedPLETable.open_from_artifact(
-                ple_artifact_path, warm_mode=ple_warm_mode
+                ple_artifact_path, warm_mode=ple_warm_mode, backend=ple_backend
             )
         elif is_gguf_path(model_path):
             from freetoken.gguf_host import MappedPLETable
@@ -605,12 +609,14 @@ class _PLELayer(BaseOP):
         dummy: bool = False,
         ple_warm_mode: str = "cold",
         ple_artifact_path: str | None = None,
+        ple_backend: str = "mmap",
     ) -> None:
         self.ple_embedding.load_host_weights(
             model_path,
             dummy=dummy,
             ple_warm_mode=ple_warm_mode,
             ple_artifact_path=ple_artifact_path,
+            ple_backend=ple_backend,
         )
 
     def semantic_debug_state(self, batch) -> dict[str, object]:
@@ -952,6 +958,7 @@ class Qwen4ExpModel(BaseOP):
         dummy: bool = False,
         ple_warm_mode: str = "cold",
         ple_artifact_path: str | None = None,
+        ple_backend: str = "mmap",
     ) -> None:
         for layer in self.layers.op_list:
             if layer.ple is not None:
@@ -960,6 +967,7 @@ class Qwen4ExpModel(BaseOP):
                     dummy=dummy,
                     ple_warm_mode=ple_warm_mode,
                     ple_artifact_path=ple_artifact_path,
+                    ple_backend=ple_backend,
                 )
 
     def debug_state(self) -> dict[int, dict[str, object]]:
@@ -1126,12 +1134,14 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         dummy: bool = False,
         ple_warm_mode: str = "cold",
         ple_artifact_path: str | None = None,
+        ple_backend: str = "mmap",
     ) -> None:
         self.model.load_host_weights(
             model_path,
             dummy=dummy,
             ple_warm_mode=ple_warm_mode,
             ple_artifact_path=ple_artifact_path,
+            ple_backend=ple_backend,
         )
 
     def forward(self) -> torch.Tensor:
