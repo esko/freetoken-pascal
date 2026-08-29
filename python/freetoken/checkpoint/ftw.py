@@ -576,12 +576,27 @@ def load_ftw_banks(
         staging_ring = host_bank_policy.staging_ring()
 
     allocated_banks: list[HostBank] = []
+    numa_placement = (
+        host_bank_policy.numa_placement if host_bank_policy is not None else None
+    )
 
     def _new_bank(shape, dtype, backing):
         try:
-            bank = HostBank(shape, dtype, backing=backing)
+            bank = HostBank(
+                shape,
+                dtype,
+                backing=backing,
+                numa_placement=numa_placement if backing == "mmap" else None,
+            )
         except BaseException:
             _rollback_allocations()
+            # Allocation happens after the FTW reader is opened but before the
+            # read-job ``try`` block; close it here so a failed NUMA mapping
+            # cannot strand the descriptor while rolling back prior banks.
+            try:
+                reader.close()
+            except (NameError, UnboundLocalError):
+                pass
             raise
         allocated_banks.append(bank)
         return bank
@@ -735,6 +750,11 @@ def load_ftw_banks(
                 futures += [ex.submit(_read_layer, job) for job in layer_jobs]
                 for f in futures:
                     f.result()
+        if host_bank_policy is not None and host_bank_policy.sample_numa_residency:
+            # Reads and settles have completed, so the optional self-only
+            # residency sample cannot race the loader's writes.
+            for bank in allocated_banks:
+                host_bank_policy.sample_numa_bank(bank)
     finally:
         bar.close()
         reader.close()
@@ -801,6 +821,7 @@ def load_ftw_banks(
         bank for banks in row_hb.values() for bank in banks
     ) + (() if staging_ring is None else (staging_ring,))
     if host_bank_policy is not None:
+        host_bank_policy.refresh_numa_accounting()
         host_bank_policy.accounting.applied_layers = tuple(applied)
         host_bank_policy.accounting.applied_pinned_bytes = sum(
             bank.allocated_nbytes

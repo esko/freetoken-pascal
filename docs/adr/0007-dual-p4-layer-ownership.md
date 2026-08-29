@@ -15,6 +15,10 @@ Assign contiguous model-layer ranges to each P4 initially. Each GPU caches only 
 
 Layer balance and TP communication must be measured. Graph split may be benchmarked, but the release has one documented default. A per-rank cache simplifies correctness and recovery.
 
+The host-bank NUMA extension is not a layer-ownership default: its H0 placement
+hook is explicit, mapping-scoped, and reports fallback or sampled observations.
+It does not yet establish per-rank NUMA locality or a performance result.
+
 ## Alternatives considered
 
 Shared global cache: better theoretical utilization but requires coherence/P2P. Row-split experts: frequent inter-GPU reduction. One GPU only: valid bring-up, not release target.

@@ -36,6 +36,11 @@ from enum import Enum
 import torch
 
 from freetoken.moe.host_memory import SwapProbe, probe_swap
+from freetoken.moe.numa_memory import (
+    NumaPlacementController,
+    NumaSyscallBackend,
+    resolve_numa_placement,
+)
 from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
@@ -72,7 +77,7 @@ class HostBankStrategy(str, Enum):
 
 
 class NumaPolicy(str, Enum):
-    """Placement intent recorded by host-bank policy, without changing placement yet."""
+    """Placement mode; it is telemetry-only unless enforcement is explicitly enabled."""
 
     PREFERRED = "preferred"
     BIND = "bind"
@@ -116,6 +121,8 @@ class HostBankPlan:
     staging_slots: int
     numa_policy: NumaPolicy
     numa_node: int | None
+    numa_target_nodes: tuple[int, ...] = ()
+    numa_status: str = "not-requested"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -128,6 +135,11 @@ class HostBankPlan:
             "staging_slots": self.staging_slots,
             "numa_policy": self.numa_policy.value,
             "numa_node": self.numa_node,
+            "numa_target_nodes": list(self.numa_target_nodes),
+            "numa_status": self.numa_status,
+            "numa_requested": self.numa_status != "not-requested",
+            "numa_applied": self.numa_status == "applied",
+            "numa_fallback": self.numa_status == "fallback",
         }
 
 
@@ -156,6 +168,20 @@ class HostBankAccounting:
     swap_total_bytes: int | None = None
     swap_free_bytes: int | None = None
     active_swap_devices: tuple[str, ...] = ()
+    numa_enforced: bool = False
+    numa_status: str = "not-requested"
+    numa_target_nodes: tuple[int, ...] = ()
+    numa_allowed_nodes: tuple[int, ...] = ()
+    numa_applied_mappings: int = 0
+    numa_fallback_reason: str | None = None
+    numa_errors: tuple[str, ...] = ()
+    numa_sample_status: str = "not-requested"
+    numa_sample_counts: tuple[tuple[int, int], ...] = ()
+    numa_sample_unknown: int = 0
+    numa_sampled_pages: int = 0
+    numa_sample_errors: tuple[str, ...] = ()
+    numa_sample_banks: tuple[dict[str, object], ...] = ()
+    numa_sample_error: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -186,6 +212,24 @@ class HostBankAccounting:
                 if self.swap_status in ("swap-active", "process-swapped")
                 else None
             ),
+            "numa_enforced": self.numa_enforced,
+            "numa_requested": self.numa_enforced,
+            "numa_status": self.numa_status,
+            "numa_applied": self.numa_status == "applied",
+            "numa_fallback": self.numa_status == "fallback",
+            "numa_target_nodes": list(self.numa_target_nodes),
+            "numa_allowed_nodes": list(self.numa_allowed_nodes),
+            "numa_applied_mappings": self.numa_applied_mappings,
+            "numa_fallback_reason": self.numa_fallback_reason,
+            "numa_errors": list(self.numa_errors),
+            "numa_sample_status": self.numa_sample_status,
+            "numa_sample_counts": {str(node): count for node, count in self.numa_sample_counts},
+            "numa_sample_unknown": self.numa_sample_unknown,
+            "numa_sampled_pages": self.numa_sampled_pages,
+            "numa_sampled_total": self.numa_sampled_pages,
+            "numa_sample_errors": list(self.numa_sample_errors),
+            "numa_sample_banks": list(self.numa_sample_banks),
+            "numa_sample_error": self.numa_sample_error,
         }
 
 
@@ -209,9 +253,16 @@ class HostBankPolicy:
     numa_node: int | None = None
     require_no_swap: bool = False
     swap_probe_reader: Callable[[str], str] | None = field(default=None, repr=False, compare=False)
+    enforce_numa_placement: bool = False
+    numa_backend: object | None = field(default=None, repr=False, compare=False)
+    numa_reader: Callable[[str], str] | None = field(default=None, repr=False, compare=False)
+    sample_numa_residency: bool = False
+    numa_sample_stride: int = 4096
+    numa_sample_max_pages: int = 64
     accounting: HostBankAccounting = field(init=False)
     _plan: HostBankPlan | None = field(default=None, init=False, repr=False)
     _swap_probe: SwapProbe | None = field(default=None, init=False, repr=False)
+    _numa_controller: NumaPlacementController | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._validate_configuration()
@@ -227,6 +278,18 @@ class HostBankPolicy:
         self.strategy = _normalize_strategy(self.strategy)
         if not isinstance(self.require_no_swap, bool):
             raise ValueError("require_no_swap must be a boolean")
+        if not isinstance(self.enforce_numa_placement, bool):
+            raise ValueError("enforce_numa_placement must be a boolean")
+        if not isinstance(self.sample_numa_residency, bool):
+            raise ValueError("sample_numa_residency must be a boolean")
+        if self.sample_numa_residency and not self.enforce_numa_placement:
+            raise ValueError("sample_numa_residency requires enforce_numa_placement=True")
+        for name, value in (
+            ("numa_sample_stride", self.numa_sample_stride),
+            ("numa_sample_max_pages", self.numa_sample_max_pages),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
         try:
             self.numa_policy = (
                 self.numa_policy
@@ -284,10 +347,80 @@ class HostBankPolicy:
         """Discard a prior reservation before any new validation or probe."""
         self._plan = None
         self._swap_probe = None
+        self._numa_controller = None
         self.accounting = HostBankAccounting(
             strategy=HostBankStrategy.PAGEABLE,
             require_no_swap=self.require_no_swap,
         )
+
+    def _prepare_numa(self) -> None:
+        if not self.enforce_numa_placement:
+            self._numa_controller = None
+            return
+        plan = resolve_numa_placement(
+            self.numa_policy,
+            self.numa_node,
+            enforce=True,
+            read_text=self.numa_reader,
+        )
+        self._numa_controller = NumaPlacementController(
+            plan, self.numa_backend if self.numa_backend is not None else NumaSyscallBackend()
+        )
+
+    def _sync_numa_accounting(self) -> None:
+        controller = self._numa_controller
+        if controller is None:
+            self.accounting.numa_enforced = False
+            self.accounting.numa_status = "not-requested"
+            self.accounting.numa_target_nodes = ()
+            self.accounting.numa_allowed_nodes = ()
+            self.accounting.numa_applied_mappings = 0
+            self.accounting.numa_fallback_reason = None
+            self.accounting.numa_errors = ()
+            self.accounting.numa_sample_status = "not-requested"
+            self.accounting.numa_sample_counts = ()
+            self.accounting.numa_sample_unknown = 0
+            self.accounting.numa_sampled_pages = 0
+            self.accounting.numa_sample_errors = ()
+            self.accounting.numa_sample_banks = ()
+            self.accounting.numa_sample_error = None
+            return
+        telemetry = controller.telemetry()
+        self.accounting.numa_enforced = bool(telemetry["requested"])
+        self.accounting.numa_status = str(telemetry["status"])
+        self.accounting.numa_target_nodes = tuple(telemetry["target_nodes"])
+        self.accounting.numa_allowed_nodes = tuple(telemetry["allowed_nodes"])
+        self.accounting.numa_applied_mappings = int(telemetry["applied_mappings"])
+        self.accounting.numa_fallback_reason = telemetry["fallback_reason"]
+        self.accounting.numa_errors = tuple(telemetry["errors"])
+        sample = telemetry["sample"]
+        self.accounting.numa_sample_status = str(sample["status"])
+        self.accounting.numa_sample_counts = tuple(
+            (int(node), int(count)) for node, count in sample["counts"].items()
+        )
+        self.accounting.numa_sample_unknown = int(sample["unknown"])
+        self.accounting.numa_sampled_pages = int(sample["sampled_pages"])
+        self.accounting.numa_sample_errors = tuple(sample["errors"])
+        self.accounting.numa_sample_banks = tuple(telemetry["sample_banks"])
+        self.accounting.numa_sample_error = sample["error"]
+
+    @property
+    def numa_placement(self) -> NumaPlacementController | None:
+        """The prepared placement owner, or ``None`` for the default no-op path."""
+        return self._numa_controller
+
+    def refresh_numa_accounting(self) -> None:
+        self._sync_numa_accounting()
+
+    def sample_numa_bank(self, bank: HostBank) -> None:
+        if self.sample_numa_residency and self._numa_controller is not None:
+            self._numa_controller.sample(
+                bank.addr,
+                bank.allocated_nbytes,
+                stride=self.numa_sample_stride,
+                max_pages=self.numa_sample_max_pages,
+            )
+            self._sync_numa_accounting()
 
     def preflight_swap(self, *, probe: SwapProbe | None = None) -> SwapProbe:
         """Observe swap state and enforce ``require_no_swap`` before allocation.
@@ -316,11 +449,9 @@ class HostBankPolicy:
     def validate_for_config(self) -> None:
         """Validate strategy-level requirements before a model is loaded."""
         self._validate_configuration()
-        if (
-            self.strategy is HostBankStrategy.PINNED
-            and os.environ.get("FREETOKEN_SKIP_BANK_PIN", "").strip().lower()
-            in ("1", "true", "yes", "on")
-        ):
+        if self.strategy is HostBankStrategy.PINNED and os.environ.get(
+            "FREETOKEN_SKIP_BANK_PIN", ""
+        ).strip().lower() in ("1", "true", "yes", "on"):
             raise ValueError(
                 "pinned host-bank policy cannot run with FREETOKEN_SKIP_BANK_PIN enabled"
             )
@@ -400,11 +531,7 @@ class HostBankPolicy:
             raise ValueError("layer_bytes must contain positive integers")
         if source_bytes is None:
             source_bytes = sum(per_layer)
-        if (
-            isinstance(source_bytes, bool)
-            or not isinstance(source_bytes, int)
-            or source_bytes < 0
-        ):
+        if isinstance(source_bytes, bool) or not isinstance(source_bytes, int) or source_bytes < 0:
             raise ValueError("source_bytes must be a non-negative integer")
         return self._prepare_layer_bytes(
             per_layer, source_bytes=source_bytes, swap_probe=swap_probe
@@ -468,6 +595,7 @@ class HostBankPolicy:
                 )
         elif self.staging_bytes:
             raise ValueError("staging_bytes is only valid with the bounded-staging strategy")
+        self._prepare_numa()
         plan = HostBankPlan(
             strategy=self.strategy,
             source_bytes=source_bytes,
@@ -478,6 +606,14 @@ class HostBankPolicy:
             staging_slots=self.staging_slots,
             numa_policy=self.numa_policy,
             numa_node=self.numa_node,
+            numa_target_nodes=(
+                self._numa_controller.plan.target_nodes if self._numa_controller is not None else ()
+            ),
+            numa_status=(
+                self._numa_controller.status
+                if self._numa_controller is not None
+                else "not-requested"
+            ),
         )
         self._plan = plan
         self.accounting = HostBankAccounting(
@@ -493,6 +629,7 @@ class HostBankPolicy:
         )
         if swap_probe is not None:
             self._record_swap_probe(swap_probe)
+        self._sync_numa_accounting()
         return plan
 
     @property
@@ -521,6 +658,7 @@ class HostBankPolicy:
     def settle(self, banks: dict[str, HostBank | list[HostBank]]) -> None:
         """Apply the prepared source policy after banks have been filled."""
         pin_banks(banks, policy=self)
+        self._sync_numa_accounting()
 
 
 class HostStagingRing:
@@ -659,7 +797,14 @@ class HostBank:
         "tensor",
     )
 
-    def __init__(self, shape: tuple[int, ...], dtype: torch.dtype, *, backing: str | None = None):
+    def __init__(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        *,
+        backing: str | None = None,
+        numa_placement: NumaPlacementController | None = None,
+    ):
         if backing is None:
             plan = _requested_residency
             # a plan with non-pinned labels vetoes born-pinned: cudaHostAlloc spends the pin quota the plan exists to save
@@ -685,14 +830,41 @@ class HostBank:
             self._pinned = True  # born pinned+mapped; pin() is a no-op
             self._registered = False
         else:
-            self._buf = mmap.mmap(-1, asize)  # lazy: address space only, no resident pages yet
-            _LIVE_BUFFERS.append(self._buf)
+            # Explicit flags keep the placement contract auditable: this is a
+            # private anonymous writable mapping, not a file/shared mapping.
+            self._buf = mmap.mmap(
+                -1,
+                asize,
+                flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            )  # lazy: address space only, no resident pages yet
             self.addr = ctypes.addressof(ctypes.c_char.from_buffer(self._buf))
+            if numa_placement is not None:
+                try:
+                    numa_placement.apply(
+                        self.addr,
+                        asize,
+                        private_anonymous=True,
+                        before_touch=True,
+                    )
+                except BaseException:
+                    self._buf.close()
+                    raise
+            _LIVE_BUFFERS.append(self._buf)
             self._pinned = False
             self._registered = False
-        self.tensor = torch.frombuffer(self._buf, dtype=dtype, count=self.nbytes // elsize).view(
-            *shape
-        )
+        try:
+            self.tensor = torch.frombuffer(
+                self._buf, dtype=dtype, count=self.nbytes // elsize
+            ).view(*shape)
+        except BaseException:
+            if backing == "mmap":
+                try:
+                    _LIVE_BUFFERS.remove(self._buf)
+                except ValueError:
+                    pass
+                self._buf.close()
+            raise
         self._locked = False
 
     @property
@@ -860,10 +1032,13 @@ def alloc_banks(
     if policy is not None:
         policy.prepare(specs, 1)
     backing = "mmap" if policy is not None else None
+    numa_placement = policy.numa_placement if policy is not None else None
     allocated: dict[str, HostBank] = {}
     try:
         for name, (shape, dtype) in specs.items():
-            allocated[name] = HostBank(shape, dtype, backing=backing)
+            allocated[name] = HostBank(shape, dtype, backing=backing, numa_placement=numa_placement)
+        if policy is not None:
+            policy.refresh_numa_accounting()
         return allocated
     except BaseException:
         # The policy path is the owner of allocations created by this call.
@@ -887,10 +1062,23 @@ def alloc_layer_banks(
         # particular, FREETOKEN_BANK_CUDA_ALLOC cannot bypass a finite policy.
         policy.prepare(specs, num_layers)
     backing = "mmap" if policy is not None else None
+    numa_placement = policy.numa_placement if policy is not None else None
     allocated: dict[str, list[HostBank]] = {}
     try:
         for name, (shape, dtype) in specs.items():
-            allocated[name] = [HostBank(shape, dtype, backing=backing) for _ in range(num_layers)]
+            per_layer: list[HostBank] = []
+            allocated[name] = per_layer
+            for _ in range(num_layers):
+                per_layer.append(
+                    HostBank(
+                        shape,
+                        dtype,
+                        backing=backing,
+                        numa_placement=numa_placement,
+                    )
+                )
+        if policy is not None:
+            policy.refresh_numa_accounting()
     except BaseException:
         for per_layer in allocated.values():
             for bank in per_layer:
@@ -1019,6 +1207,7 @@ def pin_banks(
                 applied_pinned += sum(bank.allocated_nbytes for bank in layer_banks)
         policy.accounting.applied_layers = tuple(applied)
         policy.accounting.applied_pinned_bytes = applied_pinned
+        policy.refresh_numa_accounting()
 
 
 class PinPipeline:
@@ -1168,6 +1357,8 @@ __all__ = [
     "HostResidency",
     "HostStagingRing",
     "LayerCompletionTracker",
+    "NumaPlacementController",
+    "NumaSyscallBackend",
     "NumaPolicy",
     "PinPipeline",
     "alloc_banks",

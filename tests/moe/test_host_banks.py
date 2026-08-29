@@ -439,3 +439,118 @@ def test_prepare_revalidates_mutated_policy_configuration(field, value, message)
     assert policy.accounting.source_bytes == 0
     assert policy.accounting.pinned_bytes == 0
     assert policy.accounting.applied_pinned_bytes == 0
+
+
+def _numa_reader(path):
+    return {
+        "/proc/self/status": "Name:\tworker\nMems_allowed_list:\t0-1\n",
+        "/sys/devices/system/node/online": "0-1\n",
+    }[path]
+
+
+def test_enforced_numa_policy_applies_to_policy_owned_mmap_banks():
+    from freetoken.moe.host_banks import HostBankPolicy, alloc_layer_banks
+
+    class Backend:
+        def __init__(self):
+            self.calls = []
+
+        def mbind(self, addr, nbytes, mode, nodes):
+            self.calls.append((addr, nbytes, mode, tuple(nodes)))
+
+    backend = Backend()
+    policy = HostBankPolicy(
+        strategy="pageable",
+        numa_policy="interleave",
+        enforce_numa_placement=True,
+        numa_backend=backend,
+        numa_reader=_numa_reader,
+    )
+    banks = alloc_layer_banks({"x": ((1,), torch.uint8)}, 1, policy=policy)
+    assert len(backend.calls) == 1
+    assert backend.calls[0][2:] == (3, (0, 1))
+    assert policy.accounting.as_dict()["numa_status"] == "applied"
+    banks["x"][0].close()
+
+
+def test_default_policy_does_not_call_numa_backend():
+    from freetoken.moe.host_banks import HostBankPolicy, alloc_layer_banks
+
+    class Backend:
+        def mbind(self, *args):
+            raise AssertionError("default policy must not issue mbind")
+
+    policy = HostBankPolicy(strategy="pageable", numa_backend=Backend())
+    banks = alloc_layer_banks({"x": ((1,), torch.uint8)}, 1, policy=policy)
+    assert policy.accounting.as_dict()["numa_status"] == "not-requested"
+    banks["x"][0].close()
+
+
+def test_enforced_numa_policy_applies_to_scalar_policy_bank():
+    from freetoken.moe.host_banks import HostBankPolicy, alloc_banks
+
+    class Backend:
+        def __init__(self):
+            self.calls = 0
+
+        def mbind(self, *args):
+            self.calls += 1
+
+    backend = Backend()
+    policy = HostBankPolicy(
+        strategy="pageable",
+        numa_policy="interleave",
+        enforce_numa_placement=True,
+        numa_backend=backend,
+        numa_reader=_numa_reader,
+    )
+    banks = alloc_banks({"x": ((1,), torch.uint8)}, policy=policy)
+    assert backend.calls == 1
+    banks["x"].close()
+
+
+def test_bind_numa_failure_rolls_back_all_policy_mmaps():
+    from freetoken.moe.host_banks import _LIVE_BUFFERS, HostBankPolicy, alloc_layer_banks
+
+    class Backend:
+        def __init__(self):
+            self.calls = 0
+
+        def mbind(self, *args):
+            self.calls += 1
+            if self.calls == 2:
+                raise OSError("placement denied")
+
+    backend = Backend()
+    before = tuple(_LIVE_BUFFERS)
+    policy = HostBankPolicy(
+        strategy="pageable",
+        numa_policy="bind",
+        numa_node=0,
+        enforce_numa_placement=True,
+        numa_backend=backend,
+        numa_reader=_numa_reader,
+    )
+    with pytest.raises(ValueError, match="mbind failed"):
+        alloc_layer_banks({"x": ((1,), torch.uint8)}, 2, policy=policy)
+    assert backend.calls == 2
+    assert tuple(_LIVE_BUFFERS) == before
+
+
+def test_policy_mmap_uses_private_anonymous_read_write_flags(monkeypatch):
+    import freetoken.moe.host_banks as host_banks
+
+    original = host_banks.mmap.mmap
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(host_banks.mmap, "mmap", capture)
+    bank = host_banks.HostBank((1,), torch.uint8, backing="mmap")
+    bank.close()
+    assert calls
+    _args, kwargs = calls[-1]
+    assert kwargs["flags"] == host_banks.mmap.MAP_PRIVATE | host_banks.mmap.MAP_ANONYMOUS
+    assert kwargs["prot"] == host_banks.mmap.PROT_READ | host_banks.mmap.PROT_WRITE
