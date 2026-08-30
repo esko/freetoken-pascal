@@ -72,6 +72,9 @@ def test_phase_harness_runs_identical_batches_through_both_backends(tmp_path: Pa
             assert raw["after"]["table_telemetry"]["backend"] == backend["backend"]
         assert backend["telemetry"]["prefetch_submitted"] == 1
         assert backend["telemetry"]["planner_calls"] == 6
+        warm = backend["phases"][1]
+        assert warm["telemetry_delta"]["prefetch_submitted"] == 0
+        assert warm["telemetry_delta"]["prefetch_completed"] == 0
     json.dumps(report, allow_nan=False)
 
 

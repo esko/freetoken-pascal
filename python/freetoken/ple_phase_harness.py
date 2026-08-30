@@ -278,13 +278,15 @@ class PLEIOPhaseHarness:
                     self._phase_preparer(phase, table)
                 elif phase == "warm":
                     table.set_warm_mode("page-cache-warm")
-                before_count = len(snapshots)
-                recorder.begin_phase(phase)
                 if phase == "warm" and self._prefetch:
                     rows = np.asarray(
                         [row for batch in self._batches for row in batch], dtype=np.int64
                     )
+                    # Prefetch is phase preparation.  Its counters must not be
+                    # mistaken for the warm-cache lookup interval below.
                     table.prefetch(rows).result()
+                before_count = len(snapshots)
+                recorder.begin_phase(phase)
                 result_hashes: list[str] = []
                 for batch in self._batches:
                     output = table.lookup_batch(np.asarray(batch, dtype=np.int64))
