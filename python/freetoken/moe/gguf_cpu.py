@@ -598,6 +598,8 @@ def open_qwen_gguf_cpu_expert_bundle(
     grouped: bool = False,
     supported_expert_types: Collection[int] | None = None,
     ple_warm_mode: str = "cold",
+    ple_planner_mode: str = "vectorized",
+    ple_planner_direct_threshold: int = 8,
 ) -> QwenGGUFCpuExpertBundle:
     """Open GGUF mappings and transfer ownership to a CPU expert bundle."""
     _validate_cpu_bridge_config(
@@ -612,6 +614,8 @@ def open_qwen_gguf_cpu_expert_bundle(
         path,
         supported_expert_types=supported_expert_types,
         ple_warm_mode=ple_warm_mode,
+        ple_planner_mode=ple_planner_mode,
+        ple_planner_direct_threshold=ple_planner_direct_threshold,
     )
     try:
         return QwenGGUFCpuExpertBundle.from_host(

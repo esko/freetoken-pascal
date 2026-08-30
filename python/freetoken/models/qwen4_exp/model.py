@@ -324,6 +324,10 @@ class Qwen4ExpModel(BaseOP):
             ple_warm_mode=getattr(engine_config, "ple_warm_mode", "cold"),
             ple_artifact_path=getattr(engine_config, "ple_artifact_path", None),
             ple_backend=getattr(engine_config, "ple_backend", "mmap"),
+            ple_planner_mode=getattr(engine_config, "ple_planner_mode", "vectorized"),
+            ple_planner_direct_threshold=getattr(
+                engine_config, "ple_planner_direct_threshold", 8
+            ),
         )
 
     def load_host_weights(
@@ -334,6 +338,8 @@ class Qwen4ExpModel(BaseOP):
         ple_warm_mode: str = "cold",
         ple_artifact_path: str | None = None,
         ple_backend: str = "mmap",
+        ple_planner_mode: str = "vectorized",
+        ple_planner_direct_threshold: int = 8,
     ) -> int:
         if not self._ple:
             return 0
@@ -381,10 +387,19 @@ class Qwen4ExpModel(BaseOP):
 
             mapped = (
                 MappedPLETable.open_from_artifact(
-                    ple_artifact_path, warm_mode=ple_warm_mode, backend=ple_backend
+                    ple_artifact_path,
+                    warm_mode=ple_warm_mode,
+                    backend=ple_backend,
+                    planner_mode=ple_planner_mode,
+                    planner_direct_threshold=ple_planner_direct_threshold,
                 )
                 if ple_artifact_path is not None
-                else MappedPLETable.open_from_gguf(model_path, warm_mode=ple_warm_mode)
+                else MappedPLETable.open_from_gguf(
+                    model_path,
+                    warm_mode=ple_warm_mode,
+                    planner_mode=ple_planner_mode,
+                    planner_direct_threshold=ple_planner_direct_threshold,
+                )
             )
             self._attach_ple_table(_MappedPLETable(mapped, args.ngram_head_dim))
             return int(mapped.descriptor.tensor_bytes)

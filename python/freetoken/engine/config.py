@@ -37,6 +37,9 @@ class EngineConfig:
     ple_warm_mode: str = "cold"
     ple_artifact_path: str | None = None
     ple_backend: str = "mmap"
+    # PLE lookup planning is vectorized by default; direct and adaptive modes are opt-in.
+    ple_planner_mode: str = "vectorized"
+    ple_planner_direct_threshold: int = 8
     moe_cache_size: int = 0
     moe_cache_rate: float | None = None
     moe_cache_auto: bool = False
@@ -91,6 +94,17 @@ class EngineConfig:
     num_token_override: int | None = None
 
     def __post_init__(self) -> None:
+        if self.ple_planner_mode not in {"vectorized", "direct", "adaptive"}:
+            raise ValueError(
+                "invalid PLE planner mode "
+                f"{self.ple_planner_mode!r}; expected 'vectorized', 'direct', or 'adaptive'"
+            )
+        if (
+            isinstance(self.ple_planner_direct_threshold, bool)
+            or not isinstance(self.ple_planner_direct_threshold, int)
+            or self.ple_planner_direct_threshold <= 0
+        ):
+            raise ValueError("ple_planner_direct_threshold must be a positive integer")
         if self.host_bank_policy is None:
             return
         from freetoken.moe.host_banks import HostBankPolicy

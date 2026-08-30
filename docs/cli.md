@@ -85,6 +85,8 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--ple-artifact-path` | unset | Explicit dedicated PLE artifact directory; omission preserves the source-model loader and invalid artifacts never fall back silently |
 | `--ple-backend` | `mmap` | Dedicated-artifact lookup backend: pageable `mmap` or positional `pread`; `pread` requires `--ple-artifact-path` |
 | `--ple-warm-mode` | `cold` | PLE policy: `cold`, `page-cache-warm`, selected-row `targeted`, transitional GGUF `full-model-warm`, or dedicated-artifact `full-ple-warm` |
+| `--ple-planner-mode` | `vectorized` | PLE lookup planner: `vectorized`, `direct`, or opt-in `adaptive`; vectorized retains deduplication and offset ordering |
+| `--ple-planner-direct-threshold` | `8` | Adaptive planner request-row threshold; requests at or below it use direct caller-order reads |
 | `--moe-cpu-threads` | physical cores | CPU worker threads for the compiled cpu/hybrid executor |
 | `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, or a fraction) |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |

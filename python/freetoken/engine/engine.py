@@ -363,6 +363,8 @@ class Engine:
                 ple_warm_mode=config.ple_warm_mode,
                 ple_artifact_path=config.ple_artifact_path,
                 ple_backend=config.ple_backend,
+                ple_planner_mode=config.ple_planner_mode,
+                ple_planner_direct_threshold=config.ple_planner_direct_threshold,
             )
         if hasattr(self.model, "host_weight_telemetry"):
             logger.info_rank0(
