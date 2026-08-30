@@ -86,6 +86,8 @@ def _check_profile(wheel: Path, profile: dict[str, Any], role: str) -> None:
         raise WheelBundleError(f"{wheel.name}: metadata architectures must include 6.1")
     if not isinstance(profile.get("version"), str) or not profile["version"]:
         raise WheelBundleError(f"{wheel.name}: metadata must contain a version")
+    if not isinstance(profile.get("runtime_version"), str) or not profile["runtime_version"]:
+        raise WheelBundleError(f"{wheel.name}: metadata must contain runtime_version")
 
 
 def _inspect_wheel(
@@ -127,7 +129,7 @@ def verify_pascal_wheel_bundle(runtime: str | Path, cache: str | Path) -> dict[s
         raise WheelBundleError(
             "kernel-cache metadata runtime_version does not match the runtime wheel version"
         )
-    if runtime_profile.get("runtime_version", runtime_version) != runtime_version:
+    if runtime_profile["runtime_version"] != runtime_version:
         raise WheelBundleError("runtime metadata runtime_version does not match the runtime wheel")
     return {
         "runtime_version": runtime_version,

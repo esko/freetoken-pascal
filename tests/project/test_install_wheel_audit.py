@@ -141,6 +141,27 @@ def test_pascal_wheel_audit_rejects_mismatched_runtime_identity(tmp_path: Path) 
     assert "runtime_version" in result.stderr
 
 
+def test_pascal_wheel_audit_requires_explicit_runtime_identity(tmp_path: Path) -> None:
+    runtime = _write_wheel(
+        tmp_path / "runtime.whl",
+        role="runtime",
+        metadata={
+            "schema": "freetoken-pascal-bundle-v1",
+            "profile": "pascal",
+            "role": "runtime",
+            "cuda": "12.6",
+            "architectures": ["6.1"],
+            "version": "0.1.0",
+        },
+    )
+    cache = _write_wheel(tmp_path / "cache.whl", role="kernel-cache")
+
+    result = _audit(runtime, cache)
+
+    assert result.returncode != 0
+    assert "runtime_version" in result.stderr
+
+
 def test_installer_rejects_before_uv_or_filesystem_side_effects(tmp_path: Path) -> None:
     marker = tmp_path / "side-effect-marker"
     uv = tmp_path / "mock-bin" / "uv"
