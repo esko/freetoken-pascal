@@ -140,8 +140,11 @@ class _MappedPLETable(PLETableBackend):
         self.num_rows = rows
         self.head_dim = int(head_dim)
         self.dtype = torch.bfloat16
+        self._prefetch_lock = threading.RLock()
+        self._prefetch_handle: object | None = None
 
-    def lookup(self, row_ids: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+    @staticmethod
+    def _validated_row_ids(row_ids: torch.Tensor) -> np.ndarray:
         if not isinstance(row_ids, torch.Tensor) or row_ids.ndim != 2:
             raise ValueError(
                 "PLE row ids must have shape [tokens, heads], "
@@ -149,8 +152,22 @@ class _MappedPLETable(PLETableBackend):
             )
         if row_ids.dtype == torch.bool or row_ids.is_floating_point() or row_ids.is_complex():
             raise TypeError(f"PLE row ids must be integer, got {row_ids.dtype}")
-        ids = row_ids.detach().cpu().numpy()
-        values = np.asarray(self._table.lookup(ids)).astype(np.float32, copy=False)
+        return row_ids.detach().cpu().numpy()
+
+    def _wait_for_prefetch_locked(self) -> None:
+        handle, self._prefetch_handle = self._prefetch_handle, None
+        if handle is None:
+            return
+        result = getattr(handle, "result", None)
+        if not callable(result):
+            raise TypeError("mapped PLE prefetch handle must expose result()")
+        result()
+
+    def lookup(self, row_ids: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        ids = self._validated_row_ids(row_ids)
+        with self._prefetch_lock:
+            self._wait_for_prefetch_locked()
+            values = np.asarray(self._table.lookup(ids)).astype(np.float32, copy=False)
         expected = (*ids.shape, self.head_dim)
         if values.shape != expected:
             raise ValueError(
@@ -170,13 +187,36 @@ class _MappedPLETable(PLETableBackend):
         return result
 
     def prefetch(self, row_ids: torch.Tensor) -> None:
-        del row_ids
+        ids = self._validated_row_ids(row_ids)
+        with self._prefetch_lock:
+            # The downstream table permits one active request.  Waiting here also
+            # observes a completed prior handle before replacing it, so worker
+            # exceptions cannot disappear behind a later model-layer prefetch.
+            self._wait_for_prefetch_locked()
+            prefetch = getattr(self._table, "prefetch", None)
+            if not callable(prefetch):
+                return
+            handle = prefetch(ids)
+            if handle is not None and not callable(getattr(handle, "result", None)):
+                raise TypeError("mapped PLE prefetch handle must expose result()")
+            self._prefetch_handle = handle
 
     def telemetry(self) -> dict[str, object]:
         return self._table.telemetry()
 
     def close(self) -> None:
-        self._table.close()
+        failure: BaseException | None = None
+        with self._prefetch_lock:
+            try:
+                self._wait_for_prefetch_locked()
+            except BaseException as error:
+                failure = error
+            try:
+                self._table.close()
+            except BaseException as error:
+                failure = failure or error
+        if failure is not None:
+            raise failure
 
 
 class Qwen4ExpDecoderLayer(BaseOP):
@@ -381,8 +421,6 @@ class Qwen4ExpModel(BaseOP):
         from freetoken.models.gguf.reader import is_gguf_path
 
         if ple_artifact_path is not None or is_gguf_path(model_path):
-            if ple_artifact_path is None and ple_backend != "mmap":
-                raise ValueError("PLE pread backend requires --ple-artifact-path")
             from freetoken.gguf_host import MappedPLETable
 
             mapped = (
@@ -397,6 +435,7 @@ class Qwen4ExpModel(BaseOP):
                 else MappedPLETable.open_from_gguf(
                     model_path,
                     warm_mode=ple_warm_mode,
+                    backend=ple_backend,
                     planner_mode=ple_planner_mode,
                     planner_direct_threshold=ple_planner_direct_threshold,
                 )

@@ -593,7 +593,7 @@ def parse_args(
         "--ple-backend",
         choices=["mmap", "pread"],
         default=ServerArgs.ple_backend,
-        help="Dedicated PLE storage backend; pread requires --ple-artifact-path.",
+        help="PLE storage backend for a dedicated artifact or embedded GGUF range.",
     )
     parser.add_argument(
         "--ple-warm-mode",
@@ -603,7 +603,8 @@ def parse_args(
             "Qwen3.8 GGUF PLE page-cache policy. 'cold' drops the mapped range from "
             "cache at startup; 'page-cache-warm' requests OS readahead; 'targeted' "
             "warms only rows selected by each lookup; 'full-model-warm' synchronously "
-            "touches the complete PLE table and is never the default."
+            "touches the complete model; 'full-ple-warm' touches only the PLE range; "
+            "neither full-warm mode is the default."
         ),
     )
     parser.add_argument(

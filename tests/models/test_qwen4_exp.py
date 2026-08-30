@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import math
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -362,6 +363,55 @@ def test_qwen4_mapped_ple_table_flattens_rows_and_checks_geometry():
     torch.testing.assert_close(output.float(), torch.arange(8).reshape(2, 4).float())
     with pytest.raises(ValueError, match="geometry"):
         _MappedPLETable(Table(), head_dim=3)
+
+
+@pytest.mark.parametrize("backend", ["mmap", "pread"])
+def test_qwen4_mapped_ple_table_prefetch_bridges_backend(backend: str):
+    from freetoken.gguf_host import MappedPLETable
+
+    fixture = ROOT / "tests/fixtures/gguf/qwen-host-layout.gguf"
+    raw = MappedPLETable.open_from_gguf(fixture, backend=backend)
+    adapter = _MappedPLETable(raw, head_dim=160)
+    try:
+        row_ids = torch.tensor([[0, 16], [31, 16]], dtype=torch.int64)
+        adapter.prefetch(row_ids)
+        output = adapter.lookup(row_ids)
+        telemetry = adapter.telemetry()
+    finally:
+        adapter.close()
+
+    assert output.shape == (2, 320)
+    assert telemetry["source_kind"] == f"gguf-{backend}"
+    assert telemetry["prefetch_submitted"] == 1
+    assert telemetry["prefetch_completed"] == 1
+    assert telemetry["prefetch_requested_rows"] == 4
+    assert telemetry["prefetch_unique_rows"] == 3
+    assert telemetry["prefetch_warmed_rows"] == 3
+
+
+def test_qwen4_mapped_ple_table_prefetch_failure_is_observed_by_lookup(monkeypatch):
+    from freetoken.gguf_host import MappedPLETable
+
+    fixture = ROOT / "tests/fixtures/gguf/qwen-host-layout.gguf"
+    raw = MappedPLETable.open_from_gguf(fixture, backend="pread")
+    adapter = _MappedPLETable(raw, head_dim=160)
+    real_pread = os.pread
+
+    def fail_prefetch(fd: int, size: int, offset: int) -> bytes:
+        raise OSError("injected adapter prefetch failure")
+
+    monkeypatch.setattr("freetoken.gguf_host.os.pread", fail_prefetch)
+    try:
+        adapter.prefetch(torch.tensor([[0]], dtype=torch.int64))
+        with pytest.raises(OSError, match="adapter prefetch failure"):
+            adapter.lookup(torch.tensor([[0]], dtype=torch.int64))
+        telemetry = adapter.telemetry()
+    finally:
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", real_pread)
+        adapter.close()
+
+    assert telemetry["prefetch_failed"] == 1
+    assert telemetry["prefetch_active"] is False
 
 
 @pytest.mark.parametrize(

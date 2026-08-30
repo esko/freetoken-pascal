@@ -122,3 +122,13 @@ def test_ple_planner_cli_rejects_non_positive_threshold():
                 "0",
             ]
         )
+
+
+def test_ple_backend_help_includes_embedded_gguf_range(capsys):
+    with pytest.raises(SystemExit):
+        parse_args(["--help"])
+
+    output = capsys.readouterr().out
+    assert "PLE storage backend for a dedicated artifact" in output
+    assert "embedded GGUF range" in output
+    assert "pread requires --ple-artifact-path" not in output
