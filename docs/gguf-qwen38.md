@@ -34,6 +34,33 @@ torch-order shape, type, shard, absolute offset, bytes, rows and packed row stri
 also records every expert bank and compatible slot pool separately, because gate, up and
 down projections may use different formats and the down format varies by layer.
 
+For a profile census, pass `--profile reference-q4` or `--profile throughput-q3` and
+record immutable source/converter provenance with `--conversion-provenance`. The output
+then contains `sensitive_tensors` records for the exact router, shared-expert gate,
+reconciled GDN state projections (`in_proj` and fused `in_proj_qkvz` where present), the
+`in_proj_z` output gate, `in_proj_a`/`in_proj_b` (`ssm_alpha`/`ssm_beta`) and recurrent controls,
+hyperconnection mix/write controls, and norm identities. Each record includes `class`, source
+`dtype`/`quant_format`, structured `scale_representation`, `conversion_provenance`,
+`selected_precision`, promotion status/evidence, and a rationale. The accompanying
+`sensitive_policy` scopes ordinary quantization to explicit routed-expert identities and
+requires source/lossless runtime precision by default. This H0 census boundary accepts only
+`baseline` and `unqualified` records: representation changes and Q8 source bytes remain
+visible but cannot be serving-qualified here, and are never relabeled as F32. A later
+evidence-gated policy revision may define qualified statuses. Sub-8-bit sensitive formats,
+unknown formats, and missing required scale metadata fail closed.
+
+The checked-in Q3 and Q4 metadata censuses include this sensitive section with the
+immutable Qwen revision, converter merge, and parser commit in each record. The synthetic
+positive controls at `tests/fixtures/sensitive/shared-gate-mis-scaled.json` and
+`tests/fixtures/sensitive/gdn-control-perturbed.json` exercise tensor-level rejection
+of a mis-scaled shared gate and perturbed GDN control. They do not qualify the later
+long-horizon semantic gate owned by Issue #14. The checked-in profiles are therefore
+census-only: their existing Q8 GDN and hyperconnection-control records are marked `unqualified`, and
+`serving_qualification` remains blocked until a later policy revision consumes a real
+parity/quality evidence artifact. The packed Q8_0 scale/dequant fixture at
+`tests/fixtures/sensitive/q8-0-packed-scale-parity.json` is checked through the existing
+`ggml_reference` decoder; it is tensor-level parity only and is not qualification evidence.
+
 The Q4 artifact resolves to six slot geometries. Gate/up use Q4_K except layer 2, which
 uses Q5_K. Down uses Q5_1 except layers 2, 4, 30, 46 and 47, which use Q8_0. The Q3
 artifact also resolves to six geometries: gate/up use IQ3_XXS except layer 2 IQ4_XS;

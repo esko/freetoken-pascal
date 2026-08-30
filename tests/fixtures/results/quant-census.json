@@ -94,6 +94,53 @@
   "model_sha256": "6758491ef14294390bc79952eab2a7989b5066ed33d018296e6aa750d8783874",
   "schema_name": "quant-census.schema.json",
   "schema_version": 3,
+  "sensitive_policy": {
+    "allowed_formats": [
+      "BF16",
+      "F16",
+      "F32",
+      "Q8_0",
+      "Q8_K",
+      "Q8_K_XL"
+    ],
+    "baseline": "authoritative-source-or-nearest-lossless-runtime-representation",
+    "expert_rule": {
+      "match": "explicit ffn_*_exps.weight identities",
+      "scope": "routed-expert-tensors-only",
+      "sensitive_exclusion": true
+    },
+    "long_horizon_semantic_gate": "deferred",
+    "profile": "unassigned",
+    "q8_promotion": "per-class-evidence-required",
+    "schema_name": "sensitive-tensor-precision-policy",
+    "schema_version": 1,
+    "sensitive_rule": "exact-identity-only",
+    "serving_qualification": "blocked-until-sensitive-evidence",
+    "sub8_default": "reject"
+  },
+  "sensitive_tensors": [
+    {
+      "class": "norm",
+      "conversion_provenance": "gguf_census:direct-tensor-metadata",
+      "dtype": "F32",
+      "dtype_or_quant": "F32",
+      "identity": "output_norm.weight",
+      "name": "output_norm.weight",
+      "promotion_evidence": null,
+      "promotion_status": "baseline",
+      "quant_format": "F32",
+      "rationale": "Normalization is continuously active; preserve its authoritative source representation pending evidence.",
+      "scale_representation": {
+        "kind": "none",
+        "location": "authoritative-tensor",
+        "required": false
+      },
+      "selected_precision": "F32",
+      "shape": [
+        8
+      ]
+    }
+  ],
   "shard_count": 1,
   "shards": [
     {

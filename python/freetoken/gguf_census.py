@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from freetoken.gguf_validation import inspect_gguf
+from freetoken.sensitive_census import (
+    build_sensitive_precision_policy,
+    build_sensitive_tensor_census,
+    classify_sensitive_tensor,
+    default_scale_representation,
+)
 
 _EXPERT_RE = re.compile(r"^blk\.(?P<layer>[0-9]+)\.ffn_(?P<projection>[^.]+)_exps\.weight$")
 _PLE_TENSOR = "per_layer_token_embd.weight"
@@ -82,11 +88,59 @@ def add_host_layout_sections(document: dict[str, Any]) -> dict[str, Any]:
     return document
 
 
+def add_sensitive_tensor_sections(
+    document: dict[str, Any],
+    *,
+    profile: str = "unspecified",
+    conversion_provenance: str = "gguf_census:direct-tensor-metadata",
+    reference_identified_controls: dict[str, str] | None = None,
+    required_identities: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Attach the exact-identity sensitive precision island when tensors require it.
+
+    GGUF documents with recognized control tensors include both ``sensitive_tensors``
+    and the explicit policy boundary; documents with no such tensors retain the
+    historical shape.
+    """
+    # GGML stores scales inside the quantized block.  Materialize that format
+    # contract in the census record before the strict policy validator sees it;
+    # an explicitly supplied null still fails closed as missing metadata.
+    census_tensors: list[dict[str, Any]] = []
+    for tensor in document["tensors"]:
+        if (
+            classify_sensitive_tensor(
+                tensor["name"], reference_identified_controls=reference_identified_controls
+            )
+            is not None
+            and tensor.get("quant_name") in {"Q8_0", "Q8_K", "Q8_K_XL"}
+            and "scale_representation" not in tensor
+        ):
+            tensor = dict(tensor)
+            tensor["scale_representation"] = default_scale_representation(tensor["quant_name"])
+        census_tensors.append(tensor)
+    records = build_sensitive_tensor_census(
+        census_tensors,
+        profile=profile,
+        conversion_provenance=conversion_provenance,
+        reference_identified_controls=reference_identified_controls,
+        required_identities=required_identities,
+    )
+    if records:
+        document["sensitive_tensors"] = records
+        document["sensitive_policy"] = build_sensitive_precision_policy(profile)
+    else:
+        document.pop("sensitive_tensors", None)
+        document.pop("sensitive_policy", None)
+    return document
+
+
 def build_quant_census(
     path: str | Path,
     *,
     declared_shards: dict[str, dict[str, Any]] | None = None,
     verify_sha256: bool = True,
+    profile: str = "unassigned",
+    conversion_provenance: str = "gguf_census:direct-tensor-metadata",
 ) -> dict[str, Any]:
     """Build a census, optionally using pinned declared identities for huge artifacts.
 
@@ -203,7 +257,20 @@ def build_quant_census(
         "expert_pools": sorted(pools, key=lambda entry: (entry["layer"], entry["projection"])),
         "tensors": tensors,
     }
-    return add_host_layout_sections(document)
+    add_host_layout_sections(document)
+    return add_sensitive_tensor_sections(
+        document,
+        profile=profile,
+        conversion_provenance=conversion_provenance,
+    )
 
 
-__all__ = ["add_host_layout_sections", "build_quant_census", "model_sha256", "sha256_file"]
+__all__ = [
+    "add_host_layout_sections",
+    "add_sensitive_tensor_sections",
+    "build_quant_census",
+    "build_sensitive_precision_policy",
+    "build_sensitive_tensor_census",
+    "model_sha256",
+    "sha256_file",
+]
