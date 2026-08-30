@@ -411,6 +411,10 @@ def test_dedicated_pread_batch_fails_closed_on_short_read(
         assert telemetry["short_reads"] == 1
         assert telemetry["batch_calls"] == 0
         assert telemetry["lookup_rows"] == 0
+        assert telemetry["batch_positional_reads"] == 1
+        assert telemetry["application_reads"] == 1
+        assert telemetry["batch_bytes_read"] == 0
+        assert telemetry["application_bytes_read"] == 0
 
 
 def test_dedicated_pread_empty_and_invalid_batches_do_no_io(

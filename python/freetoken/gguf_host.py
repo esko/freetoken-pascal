@@ -69,8 +69,7 @@ def _resolve_planner_config(
             raise TypeError("planner_config must be a PLELookupPlannerConfig")
         if planner_mode != "vectorized" or planner_direct_threshold != 8:
             raise ValueError(
-                "planner_config cannot be combined with planner_mode or "
-                "planner_direct_threshold"
+                "planner_config cannot be combined with planner_mode or planner_direct_threshold"
             )
         resolved = planner_config
     else:
@@ -1292,9 +1291,7 @@ class MappedPLETable:
         planner_started = time.perf_counter_ns()
         if self._planner_config.mode == "adaptive":
             selected_planner = (
-                "direct"
-                if flat.size <= self._planner_config.direct_threshold
-                else "vectorized"
+                "direct" if flat.size <= self._planner_config.direct_threshold else "vectorized"
             )
         else:
             selected_planner = self._planner_config.mode
@@ -1324,11 +1321,17 @@ class MappedPLETable:
         if self.backend == "pread":
             chunks = []
             for row in read_rows:
+                with self._prefetch_lock:
+                    self._batch_positional_reads += 1
+                    self._application_reads += 1
                 chunk = os.pread(
                     self._pread_fd,
                     self.descriptor.row_bytes,
                     self.descriptor.data_offset + int(row) * self.descriptor.row_bytes,
                 )
+                with self._prefetch_lock:
+                    self._batch_bytes_read += len(chunk)
+                    self._application_bytes_read += len(chunk)
                 if len(chunk) != self.descriptor.row_bytes:
                     with self._prefetch_lock:
                         self._short_reads += 1
@@ -1360,14 +1363,13 @@ class MappedPLETable:
             self._batch_calls += 1
             self._batch_requested_rows += int(flat.size)
             self._batch_unique_rows += unique_rows
-            if self.backend == "pread":
-                self._batch_positional_reads += int(read_rows.size)
             self._batch_duplicate_rows += int(flat.size - unique_rows)
             if selected_planner == "vectorized":
                 self._batch_sorted_rows += unique_rows
-            self._batch_bytes_read += int(read_rows.size) * self.descriptor.row_bytes
-            self._application_reads += int(read_rows.size)
-            self._application_bytes_read += int(read_rows.size) * self.descriptor.row_bytes
+            if self.backend != "pread":
+                self._batch_bytes_read += int(read_rows.size) * self.descriptor.row_bytes
+                self._application_reads += int(read_rows.size)
+                self._application_bytes_read += int(read_rows.size) * self.descriptor.row_bytes
             self._minor_faults += max(0, int(after_usage.ru_minflt - before_usage.ru_minflt))
             self._major_faults += max(0, int(after_usage.ru_majflt - before_usage.ru_majflt))
             if before_storage is not None and after_storage is not None:
