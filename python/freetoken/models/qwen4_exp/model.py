@@ -381,8 +381,6 @@ class Qwen4ExpModel(BaseOP):
         from freetoken.models.gguf.reader import is_gguf_path
 
         if ple_artifact_path is not None or is_gguf_path(model_path):
-            if ple_artifact_path is None and ple_backend != "mmap":
-                raise ValueError("PLE pread backend requires --ple-artifact-path")
             from freetoken.gguf_host import MappedPLETable
 
             mapped = (
@@ -397,6 +395,7 @@ class Qwen4ExpModel(BaseOP):
                 else MappedPLETable.open_from_gguf(
                     model_path,
                     warm_mode=ple_warm_mode,
+                    backend=ple_backend,
                     planner_mode=ple_planner_mode,
                     planner_direct_threshold=ple_planner_direct_threshold,
                 )

@@ -127,6 +127,38 @@ def test_mapped_expert_sources_are_file_backed_and_not_copied() -> None:
     assert report["pinned_bytes"] == 0
 
 
+def test_open_qwen_host_weights_rolls_back_mmap_on_warm_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_warm_mode(self: MappedPLETable, mode: str) -> None:
+        raise RuntimeError(f"injected warm setup failure: {mode}")
+
+    def open_fd_count() -> int:
+        return len(list(Path("/proc/self/fd").iterdir()))
+
+    before = open_fd_count()
+    monkeypatch.setattr(MappedPLETable, "set_warm_mode", fail_warm_mode)
+    with pytest.raises(RuntimeError, match="warm setup failure"):
+        open_qwen_host_weights(FIXTURE)
+    assert open_fd_count() == before
+
+
+def test_open_qwen_host_weights_rolls_back_ple_mapping_on_table_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_table_setup(self: MappedPLETable, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("injected table setup failure")
+
+    def open_fd_count() -> int:
+        return len(list(Path("/proc/self/fd").iterdir()))
+
+    before = open_fd_count()
+    monkeypatch.setattr(MappedPLETable, "__init__", fail_table_setup)
+    with pytest.raises(RuntimeError, match="table setup failure"):
+        open_qwen_host_weights(FIXTURE)
+    assert open_fd_count() == before
+
+
 def test_iq4_nl_ple_lookup_matches_independent_gguf_oracle() -> None:
     with open_qwen_host_weights(FIXTURE) as weights:
         ids = np.array([[0, 15], [16, 31]], dtype=np.int64)
@@ -184,6 +216,13 @@ def test_ple_hash_size_and_short_range_fail_closed(tmp_path: Path) -> None:
     short.write_bytes(FIXTURE.read_bytes()[:-1])
     with pytest.raises(ValueError):
         MappedPLETable.open_from_gguf(short)
+    with pytest.raises(ValueError):
+        MappedPLETable.open_from_gguf(short, backend="pread")
+
+
+def test_source_ple_rejects_unknown_backend_before_opening() -> None:
+    with pytest.raises(ValueError, match="unknown PLE backend"):
+        MappedPLETable.open_from_gguf(FIXTURE, backend="other")
 
 
 def test_ple_warm_modes_and_fault_telemetry_are_observable() -> None:
@@ -208,19 +247,10 @@ def test_ple_warm_modes_and_fault_telemetry_are_observable() -> None:
         assert table.telemetry()["full_model_warm_bytes"] == FIXTURE.stat().st_size
 
 
-def _open_source_ple_pread_table() -> MappedPLETable:
-    layout = inspect_qwen_host_layout(FIXTURE)
-    table = MappedPLETable(layout.ple, None, model_shard_paths=layout.shard_paths)
-    table.backend = "pread"
-    table._pread_fd = os.open(layout.ple.shard_path, os.O_RDONLY)
-    return table
-
-
 def test_source_ple_pread_targeted_warm_uses_descriptor_offset_and_deduplicates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    table = _open_source_ple_pread_table()
-    try:
+    with MappedPLETable.open_from_gguf(FIXTURE, backend="pread") as table:
         real_pread = os.pread
         calls: list[tuple[int, int]] = []
 
@@ -231,8 +261,6 @@ def test_source_ple_pread_targeted_warm_uses_descriptor_offset_and_deduplicates(
         monkeypatch.setattr("freetoken.gguf_host.os.pread", recording_pread)
         table.warm_rows(np.array([31, 0, 31, 16, 0]))
         telemetry = table.telemetry()
-    finally:
-        table.close()
 
     descriptor = inspect_qwen_host_layout(FIXTURE).ple
     assert calls == [
@@ -266,8 +294,7 @@ def test_dedicated_ple_pread_targeted_warm_keeps_zero_artifact_offset(
 def test_source_ple_pread_async_prefetch_uses_descriptor_offset_and_deduplicates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    table = _open_source_ple_pread_table()
-    try:
+    with MappedPLETable.open_from_gguf(FIXTURE, backend="pread") as table:
         real_pread = os.pread
         calls: list[tuple[int, int]] = []
 
@@ -279,8 +306,6 @@ def test_source_ple_pread_async_prefetch_uses_descriptor_offset_and_deduplicates
         handle = table.prefetch(np.array([31, 0, 31, 16, 0]))
         handle.result()
         telemetry = table.telemetry()
-    finally:
-        table.close()
 
     descriptor = inspect_qwen_host_layout(FIXTURE).ple
     assert calls == [
@@ -291,11 +316,111 @@ def test_source_ple_pread_async_prefetch_uses_descriptor_offset_and_deduplicates
     assert telemetry["prefetch_warmed_rows"] == 3
 
 
+def test_source_ple_pread_full_ple_warm_uses_exact_descriptor_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_pread = os.pread
+    calls: list[tuple[int, int]] = []
+
+    def recording_pread(fd: int, size: int, offset: int) -> bytes:
+        calls.append((size, offset))
+        return real_pread(fd, size, offset)
+
+    monkeypatch.setattr("freetoken.gguf_host.os.pread", recording_pread)
+    with MappedPLETable.open_from_gguf(
+        FIXTURE,
+        backend="pread",
+        warm_mode="full-ple-warm",
+    ) as table:
+        telemetry = table.telemetry()
+
+    descriptor = inspect_qwen_host_layout(FIXTURE).ple
+    assert calls == [(descriptor.tensor_bytes, descriptor.data_offset)]
+    assert telemetry["full_model_warm_bytes"] == descriptor.tensor_bytes
+
+
+def test_source_ple_pread_full_model_warm_reports_all_source_bytes() -> None:
+    with MappedPLETable.open_from_gguf(
+        FIXTURE,
+        backend="pread",
+        warm_mode="full-model-warm",
+    ) as table:
+        telemetry = table.telemetry()
+
+    assert telemetry["full_model_warm_bytes"] == FIXTURE.stat().st_size
+
+
+def test_source_ple_pread_advice_is_scoped_to_descriptor_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = inspect_qwen_host_layout(FIXTURE).ple
+    calls: list[tuple[int, int, int, int]] = []
+
+    def recording_fadvise(fd: int, offset: int, length: int, advice: int) -> None:
+        calls.append((fd, offset, length, advice))
+
+    monkeypatch.setattr("freetoken.gguf_host.os.posix_fadvise", recording_fadvise)
+    with MappedPLETable.open_from_gguf(
+        FIXTURE,
+        backend="pread",
+        warm_mode="page-cache-warm",
+    ) as table:
+        telemetry = table.telemetry()
+
+    assert calls[0][1:3] == (descriptor.data_offset, descriptor.tensor_bytes)
+    assert calls[1][1:3] == (descriptor.data_offset, descriptor.tensor_bytes)
+    assert calls[0][3] == os.POSIX_FADV_RANDOM
+    assert calls[1][3] == os.POSIX_FADV_WILLNEED
+    assert telemetry["advice"] == "posix-fadv-random"
+    assert telemetry["advice_applied"] is True
+
+
+def test_source_ple_pread_lookup_matches_mmap_for_first_middle_last_and_duplicate() -> None:
+    ids = np.array([0, 16, 31, 16, 0], dtype=np.int64)
+    with MappedPLETable.open_from_gguf(FIXTURE) as mmap_table:
+        expected = mmap_table.lookup_batch(ids)
+    with MappedPLETable.open_from_gguf(FIXTURE, backend="pread") as pread_table:
+        actual = pread_table.lookup_batch(ids)
+        telemetry = pread_table.telemetry()
+
+    np.testing.assert_array_equal(actual, expected)
+    assert telemetry["backend"] == "pread"
+    assert telemetry["mapped_bytes"] == 0
+    assert telemetry["batch_unique_rows"] == 3
+    assert telemetry["batch_duplicate_rows"] == 2
+    assert telemetry["batch_positional_reads"] == 3
+    assert telemetry["batch_bytes_read"] == 3 * 90
+
+
+def test_source_ple_pread_async_prefetch_partial_failure_is_public_and_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with MappedPLETable.open_from_gguf(FIXTURE, backend="pread") as table:
+        real_pread = os.pread
+        calls = 0
+
+        def fail_second(fd: int, size: int, offset: int) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected second-row failure")
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", fail_second)
+        handle = table.prefetch(np.array([31, 0, 16]))
+        with pytest.raises(OSError, match="second-row"):
+            handle.result()
+        telemetry = table.telemetry()
+
+    assert telemetry["prefetch_failed"] == 1
+    assert telemetry["prefetch_warmed_rows"] == 1
+    assert telemetry["prefetch_active"] is False
+
+
 def test_source_ple_pread_targeted_warm_failure_does_not_claim_unwarmed_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    table = _open_source_ple_pread_table()
-    try:
+    with MappedPLETable.open_from_gguf(FIXTURE, backend="pread") as table:
         real_pread = os.pread
         calls = 0
 
@@ -310,29 +435,19 @@ def test_source_ple_pread_targeted_warm_failure_does_not_claim_unwarmed_rows(
         with pytest.raises(ValueError, match="short PLE positional warm read"):
             table.warm_rows(np.array([0, 16, 31]))
         telemetry = table.telemetry()
-    finally:
-        table.close()
 
     assert telemetry["short_reads"] == 1
     assert telemetry["targeted_positional_warm_reads"] == 1
     assert telemetry["targeted_warm_rows"] == 1
 
 
-def test_source_ple_pread_targeted_warm_without_fd_fails_without_claiming_rows() -> None:
-    table = _open_source_ple_pread_table()
-    opened_fd = table._pread_fd
-    assert opened_fd is not None
-    table._pread_fd = None
-    try:
-        with pytest.raises(RuntimeError, match="positional warm backend is unavailable"):
-            table.warm_rows(np.array([0]))
-        telemetry = table.telemetry()
-    finally:
-        table.close()
-        os.close(opened_fd)
-
-    assert telemetry["targeted_warm_rows"] == 0
-    assert telemetry["targeted_positional_warm_reads"] == 0
+def test_source_ple_pread_invalid_fd_fails_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "freetoken.gguf_host._open_validated_pread_fd",
+        lambda *_args, **_kwargs: -1,
+    )
+    with pytest.raises(RuntimeError, match="file descriptor is invalid"):
+        MappedPLETable.open_from_gguf(FIXTURE, backend="pread")
 
 
 def test_dedicated_ple_artifact_round_trip_and_manifest(tmp_path: Path) -> None:

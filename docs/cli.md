@@ -83,7 +83,7 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--moe-cache-size` / `--moe-cache-rate` / `--moe-cache-auto` | auto | GPU expert-cache size as slots / fraction of all experts / sized from free VRAM (mutually exclusive; auto is enabled by default for offload-family backends) |
 | `--kv-reserve-tokens` | 8192 | KV token floor reserved before `--moe-cache-auto` fills experts |
 | `--ple-artifact-path` | unset | Explicit dedicated PLE artifact directory; omission preserves the source-model loader and invalid artifacts never fall back silently |
-| `--ple-backend` | `mmap` | Dedicated-artifact lookup backend: pageable `mmap` or positional `pread`; `pread` requires `--ple-artifact-path` |
+| `--ple-backend` | `mmap` | PLE lookup backend for a dedicated artifact or embedded GGUF range: pageable `mmap` or positional `pread` |
 | `--ple-warm-mode` | `cold` | PLE policy: `cold`, `page-cache-warm`, selected-row `targeted`, transitional GGUF `full-model-warm`, or dedicated-artifact `full-ple-warm` |
 | `--ple-planner-mode` | `vectorized` | PLE lookup planner: `vectorized`, `direct`, or opt-in `adaptive`; vectorized retains deduplication and offset ordering |
 | `--ple-planner-direct-threshold` | `8` | Adaptive planner request-row threshold; requests at or below it use direct caller-order reads |

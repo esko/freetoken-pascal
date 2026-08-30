@@ -93,9 +93,10 @@ PYTHONPATH=python python scripts/extract_ple_artifact.py \
 ```
 
 Use `MappedPLETable.open_from_artifact` for serving warm modes. Its `full-ple-warm` mode
-touches only `ple.bin`; `open_from_gguf` remains available as the compatibility/reference path.
-Dedicated artifacts support explicit `mmap` and positional-read backends through
-`--ple-backend`. Both validate a complete batch before I/O, deduplicate and sort row
+touches only `ple.bin`; `open_from_gguf` supports the same `mmap` default and explicit
+positional-read backend for the embedded source PLE range. Dedicated artifacts and source
+GGUFs support explicit `mmap` and positional-read backends through `--ple-backend`. Both
+validate a complete batch before I/O, deduplicate and sort row
 reads, and restore caller order; positional short reads fail rather than zero-fill.
 The dedicated loader requests random-access advice (`MADV_RANDOM` or
 `POSIX_FADV_RANDOM`) where supported and reports the selected advice, success, and error.
@@ -129,13 +130,15 @@ validation:
 - `page-cache-warm` requests OS readahead for the complete PLE range;
 - `targeted` synchronously touches only rows selected by each lookup;
 - `full-model-warm` explicitly touches every page in every model shard.
+- `full-ple-warm` touches exactly the embedded PLE range for a source GGUF (or `ple.bin`
+  for a dedicated artifact).
 
 Telemetry reports the selected mode, mapped/resident bytes where `mincore` is available,
 lookup rows and packed bytes, output bytes, targeted rows, process minor/major page faults
 and `/proc/self/io` storage-read bytes. Full-model warm is never selected implicitly.
 Because `full-model-warm` touches unrelated weights, it is excluded from the v1 serving
-contract and will be removed from the dedicated-shard API. The serving API warms only its
-PLE shard and supports both mmap and positional reads.
+contract and remains an explicit source-GGUF measurement mode. The serving API warms only
+its PLE range by default and supports both mmap and positional reads.
 
 ## Validation status
 
