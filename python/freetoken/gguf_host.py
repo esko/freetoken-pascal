@@ -18,6 +18,7 @@ import resource
 import shutil
 import tempfile
 import threading
+import time
 from collections.abc import Collection
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -734,9 +735,10 @@ class _PrefetchCancelled(CancelledError):
         self.warmed_rows = warmed_rows
 
 
-class _PrefetchReadError(ValueError):
-    def __init__(self, message: str, warmed_rows: int) -> None:
-        super().__init__(message)
+class _PrefetchWorkerError(Exception):
+    def __init__(self, cause: BaseException, warmed_rows: int) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
         self.warmed_rows = warmed_rows
 
 
@@ -749,12 +751,14 @@ class PLEPrefetchHandle:
         requested_rows: int,
         future: Future[int],
         cancel_event: threading.Event,
+        finalized_event: threading.Event,
     ) -> None:
         self._row_ids = row_ids
         self.requested_rows = requested_rows
         self.unique_rows = len(row_ids)
         self._future = future
         self._cancel_event = cancel_event
+        self._finalized_event = finalized_event
 
     @property
     def row_ids(self) -> tuple[int, ...]:
@@ -773,7 +777,19 @@ class PLEPrefetchHandle:
 
     def result(self, timeout: float | None = None) -> None:
         """Wait for completion without exposing any prefetched row data."""
-        self._future.result(timeout=timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        failure: BaseException | None = None
+        try:
+            self._future.result(timeout=timeout)
+        except BaseException as error:
+            failure = error
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        if not self._finalized_event.wait(timeout=remaining):
+            raise TimeoutError("PLE prefetch finalization timed out")
+        if isinstance(failure, _PrefetchWorkerError):
+            raise failure.cause from failure
+        if failure is not None:
+            raise failure
         if self._cancel_event.is_set():
             raise CancelledError("PLE prefetch cancelled")
 
@@ -814,6 +830,7 @@ class MappedPLETable:
         self._prefetch_max_rows = prefetch_max_rows
         self._prefetch_chunk_rows = prefetch_chunk_rows
         self._prefetch_lock = threading.RLock()
+        self._io_lock = threading.RLock()
         self._prefetch_executor: ThreadPoolExecutor | None = None
         self._prefetch_active: PLEPrefetchHandle | None = None
         self._prefetch_submitted = 0
@@ -1005,7 +1022,10 @@ class MappedPLETable:
                 chunk = np.fromiter(row_ids[start:stop], dtype=np.int64)
                 # Touch the mapped rows to warm the page cache, but never expose
                 # the packed bytes through the prefetch handle.
-                _ = int(self.mapping.rows[chunk, 0].sum(dtype=np.uint64))
+                try:
+                    _ = int(self.mapping.rows[chunk].sum(dtype=np.uint64))
+                except BaseException as error:
+                    raise _PrefetchWorkerError(error, warmed) from error
                 warmed += stop - start
         else:
             fd = self._pread_fd
@@ -1014,15 +1034,20 @@ class MappedPLETable:
             for row in row_ids:
                 if cancel_event.is_set():
                     raise _PrefetchCancelled(warmed)
-                chunk = os.pread(
-                    fd,
-                    self.descriptor.row_bytes,
-                    self.descriptor.data_offset + row * self.descriptor.row_bytes,
-                )
+                try:
+                    chunk = os.pread(
+                        fd,
+                        self.descriptor.row_bytes,
+                        self.descriptor.data_offset + row * self.descriptor.row_bytes,
+                    )
+                except BaseException as error:
+                    raise _PrefetchWorkerError(error, warmed) from error
                 if len(chunk) != self.descriptor.row_bytes:
                     with self._prefetch_lock:
                         self._short_reads += 1
-                    raise _PrefetchReadError("short PLE positional prefetch read", warmed)
+                    raise _PrefetchWorkerError(
+                        ValueError("short PLE positional prefetch read"), warmed
+                    )
                 warmed += 1
         if cancel_event.is_set():
             raise _PrefetchCancelled(warmed)
@@ -1038,7 +1063,7 @@ class MappedPLETable:
             if isinstance(error, _PrefetchCancelled):
                 status = "cancelled"
                 warmed = error.warmed_rows
-            elif isinstance(error, _PrefetchReadError):
+            elif isinstance(error, _PrefetchWorkerError):
                 status = "failed"
                 warmed = error.warmed_rows
             elif error is not None:
@@ -1057,6 +1082,7 @@ class MappedPLETable:
                 self._prefetch_cancelled += 1
             else:
                 self._prefetch_failed += 1
+        handle._finalized_event.set()
 
     def prefetch(self, ids: np.ndarray) -> PLEPrefetchHandle:
         """Warm a bounded set of PLE rows asynchronously.
@@ -1084,6 +1110,7 @@ class MappedPLETable:
             self._prefetch_requested_rows += requested_rows
             self._prefetch_unique_rows += len(row_ids)
             cancel_event = threading.Event()
+            finalized_event = threading.Event()
             if row_ids:
                 if self._prefetch_executor is None:
                     self._prefetch_executor = ThreadPoolExecutor(
@@ -1093,7 +1120,9 @@ class MappedPLETable:
                 future = self._prefetch_executor.submit(self._prefetch_rows, row_ids, cancel_event)
             else:
                 future = Future()
-            handle = PLEPrefetchHandle(row_ids, requested_rows, future, cancel_event)
+            handle = PLEPrefetchHandle(
+                row_ids, requested_rows, future, cancel_event, finalized_event
+            )
             self._prefetch_active = handle
             future.add_done_callback(lambda completed: self._finish_prefetch(handle, completed))
             if not row_ids:
@@ -1134,7 +1163,17 @@ class MappedPLETable:
             raise IndexError(f"PLE row {bad} outside [0, {self.descriptor.rows})")
         return flat
 
+    def _ensure_io_open(self) -> None:
+        with self._prefetch_lock:
+            if self._closed or self._closing:
+                raise RuntimeError("PLE table is closed")
+
     def warm_rows(self, ids: np.ndarray) -> None:
+        with self._io_lock:
+            self._ensure_io_open()
+            self._warm_rows_impl(ids)
+
+    def _warm_rows_impl(self, ids: np.ndarray) -> None:
         flat = self._validate_ids(ids)
         unique = np.unique(flat)
         if unique.size and self.mapping is not None:
@@ -1154,12 +1193,17 @@ class MappedPLETable:
         return self.lookup_batch(ids)
 
     def lookup_batch(self, ids: np.ndarray) -> np.ndarray:
+        with self._io_lock:
+            self._ensure_io_open()
+            return self._lookup_batch_impl(ids)
+
+    def _lookup_batch_impl(self, ids: np.ndarray) -> np.ndarray:
         original = np.asarray(ids).shape
         flat = self._validate_ids(ids)
         before_usage = resource.getrusage(resource.RUSAGE_SELF)
         before_storage = _proc_read_bytes()
         if self.mode == "targeted":
-            self.warm_rows(flat)
+            self._warm_rows_impl(flat)
         unique, inverse = np.unique(flat, return_inverse=True)
         if not flat.size:
             return np.empty((*original, self.descriptor.elements_per_row), dtype=np.float32)
@@ -1210,8 +1254,10 @@ class MappedPLETable:
         return result
 
     def telemetry(self) -> dict[str, int | str | bool | None]:
-        with self._prefetch_lock:
-            resident_pages = None if self.mapping is None else self.mapping.resident_pages()
+        with self._io_lock, self._prefetch_lock:
+            resident_pages = (
+                None if self.mapping is None or self._closed else self.mapping.resident_pages()
+            )
             active = self._prefetch_active is not None and not self._prefetch_active.done()
             return {
                 "mode": self.mode,
@@ -1268,17 +1314,18 @@ class MappedPLETable:
             with self._prefetch_lock:
                 self._prefetch_executor = None
         failure: BaseException | None = None
-        if self.mapping is not None:
-            try:
-                self.mapping.close()
-            except BaseException as error:
-                failure = error
-        if self._pread_fd is not None:
-            try:
-                os.close(self._pread_fd)
-            except BaseException as error:
-                failure = failure or error
-            self._pread_fd = None
+        with self._io_lock:
+            if self.mapping is not None:
+                try:
+                    self.mapping.close()
+                except BaseException as error:
+                    failure = error
+            if self._pread_fd is not None:
+                try:
+                    os.close(self._pread_fd)
+                except BaseException as error:
+                    failure = failure or error
+                self._pread_fd = None
         with self._prefetch_lock:
             # Match the pre-prefetch close contract: resource cleanup is a
             # one-shot operation even when one close reports an error.

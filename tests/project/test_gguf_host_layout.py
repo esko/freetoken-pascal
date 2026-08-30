@@ -487,6 +487,63 @@ def test_ple_prefetch_failure_is_visible_and_does_not_poison_lookup(
         assert telemetry["lookup_rows"] == 1
 
 
+def test_ple_prefetch_partial_failure_reports_rows_and_finalizes_before_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        real_pread = os.pread
+        calls = 0
+
+        def fail_second(fd: int, size: int, offset: int) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected second-row failure")
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", fail_second)
+        handle = table.prefetch(np.array([0, 1, 2]))
+        with pytest.raises(OSError, match="second-row"):
+            handle.result()
+        telemetry = table.telemetry()
+        assert telemetry["prefetch_failed"] == 1
+        assert telemetry["prefetch_warmed_rows"] == 1
+        assert telemetry["prefetch_active"] is False
+
+
+def test_ple_close_waits_for_synchronous_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    table = MappedPLETable.open_from_artifact(artifact, backend="pread")
+    real_pread = os.pread
+    started = threading.Event()
+    release = threading.Event()
+    lookup_done = threading.Event()
+    close_done = threading.Event()
+
+    def blocked_pread(fd: int, size: int, offset: int) -> bytes:
+        started.set()
+        release.wait(timeout=2)
+        return real_pread(fd, size, offset)
+
+    monkeypatch.setattr("freetoken.gguf_host.os.pread", blocked_pread)
+    lookup = threading.Thread(target=lambda: (table.lookup_batch(np.array([0])), lookup_done.set()))
+    lookup.start()
+    assert started.wait(timeout=2)
+    closer = threading.Thread(target=lambda: (table.close(), close_done.set()))
+    closer.start()
+    assert not close_done.wait(timeout=0.05)
+    release.set()
+    lookup.join(timeout=2)
+    closer.join(timeout=2)
+    assert lookup_done.is_set()
+    assert close_done.is_set()
+    with pytest.raises(RuntimeError, match="closed"):
+        table.lookup_batch(np.array([0]))
+
+
 def test_ple_prefetch_empty_request_is_immediately_complete(tmp_path: Path) -> None:
     artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
     with MappedPLETable.open_from_artifact(artifact, prefetch_max_rows=0) as table:
