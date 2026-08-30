@@ -29,6 +29,15 @@ from .placement_profile import (
     PlacementProfileIdentity,
     canonical_json_bytes,
 )
+from .qsa_placement import (
+    QSA_PLACEMENT_CATEGORIES,
+    QSAPlacementBinding,
+    QSAPlacementError,
+    adapt_qsa_workspace_to_placement,
+    bind_qsa_workspace,
+    derive_qsa_placement_categories,
+    validate_qsa_workspace_placement,
+)
 
 if TYPE_CHECKING:
     from .config import EngineConfig
@@ -40,6 +49,7 @@ __all__ = [
     "PLACEMENT_PROFILE_IDENTITY_SCHEMA_NAME",
     "PLACEMENT_PROFILE_SCHEMA_NAME",
     "PLACEMENT_PROFILE_SCHEMA_VERSION",
+    "QSA_PLACEMENT_CATEGORIES",
     "BackoffDecision",
     "BackoffProfile",
     "BackoffStateMachine",
@@ -55,9 +65,15 @@ __all__ = [
     "PlacementPlannerError",
     "PlacementProfile",
     "PlacementProfileIdentity",
+    "QSAPlacementBinding",
+    "QSAPlacementError",
+    "adapt_qsa_workspace_to_placement",
+    "bind_qsa_workspace",
     "canonical_json_bytes",
+    "derive_qsa_placement_categories",
     "evaluate_canary",
     "plan_placement",
+    "validate_qsa_workspace_placement",
 ]
 
 

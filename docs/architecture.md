@@ -94,6 +94,11 @@ eager-only plan rather than being reported as capture-safe.
 Negative, zero-invalid, incomplete-category, shape-inconsistent, and checked 64-bit arithmetic inputs fail closed with a controlled `ValueError` subtype.
 This H0 contract makes no kernel, throughput, or Tesla P4 claim and does not change QSA selection, token budget, or dispatch defaults.
 
+The torch-free `freetoken.engine.qsa_placement` adapter projects the calculated component lifetimes into #73's exact ten QSA placement categories.
+It derives the persistent state bucket and category-specific transient envelopes from the workspace plan, retains the calculator's exact live/peak overlap, and rejects inconsistent or caller-forged totals.
+`bind_qsa_workspace()` validates those categories against each target `GPUPlacementPlan` and, when supplied, the profile's canonical QSA geometry and embedded plan.
+This binding is a preflight contract only and does not allocate CUDA memory, select a backoff, or claim H2/H3 evidence.
+
 The Torch-free `freetoken.engine.placement_plan` module is the H0 owner for the per-GPU placement schema and startup-canary decision contract.
 It keys each rank by stable GPU UUID plus rank and keeps dense/resident weights, shared experts, GDN/KV recurrent state, every persistent and transient QSA phase category, CUDA context, generic workspaces, transfer buffers, static and dynamic cache slots, and safety reserve explicit.
 Placement inputs require explicit non-placeholder UUIDs, reject duplicate cards, and permit zero observed free bytes while requiring positive physical capacity.
