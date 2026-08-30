@@ -158,6 +158,63 @@ def test_sample_reports_counts_and_unknown_pages():
     assert controller.telemetry()["sample"]["status"] == "partial"
 
 
+def test_sample_classifies_target_and_cross_node_pages():
+    backend = FakeBackend(statuses=(0, 1, 1, -14))
+    controller = NumaPlacementController(
+        resolve_numa_placement(
+            "preferred",
+            0,
+            enforce=True,
+            allowed=AllowedNumaNodes((0, 1), "available", "fixture"),
+        ),
+        backend,
+    )
+    controller.apply(0x2000, 16384, private_anonymous=True, before_touch=True)
+    controller.sample(0x2000, 16384, stride=4096, max_pages=4)
+
+    sample = controller.telemetry()["sample"]
+    assert sample["target_nodes"] == (0,)
+    assert sample["target_pages"] == 1
+    assert sample["off_target_pages"] == 2
+    assert sample["off_target_counts"] == {"1": 2}
+    assert sample["known_pages"] == 3
+    assert sample["target_fraction"] == pytest.approx(1 / 3)
+    assert sample["placement_match"] is False
+
+
+def test_sample_target_match_is_unknown_without_known_pages():
+    backend = FakeBackend(statuses=(-14,))
+    controller = NumaPlacementController(
+        resolve_numa_placement(
+            "bind", 0, enforce=True, allowed=AllowedNumaNodes((0,), "available", "fixture")
+        ),
+        backend,
+    )
+    controller.apply(0x2000, 4096, private_anonymous=True, before_touch=True)
+    controller.sample(0x2000, 4096, max_pages=1)
+    sample = controller.telemetry()["sample"]
+    assert sample["known_pages"] == 0
+    assert sample["target_fraction"] is None
+    assert sample["placement_match"] is None
+
+
+def test_complete_on_target_sample_reports_verified_match():
+    backend = FakeBackend(statuses=(1, 1))
+    controller = NumaPlacementController(
+        resolve_numa_placement(
+            "bind", 1, enforce=True, allowed=AllowedNumaNodes((0, 1), "available", "fixture")
+        ),
+        backend,
+    )
+    controller.apply(0x2000, 8192, private_anonymous=True, before_touch=True)
+    controller.sample(0x2000, 8192, max_pages=2)
+    sample = controller.telemetry()["sample"]
+    assert sample["target_pages"] == 2
+    assert sample["off_target_pages"] == 0
+    assert sample["target_fraction"] == 1.0
+    assert sample["placement_match"] is True
+
+
 def test_sampling_aggregates_counts_unknown_and_errors_across_banks():
     class BanksBackend:
         def __init__(self):
