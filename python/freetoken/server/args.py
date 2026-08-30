@@ -606,6 +606,24 @@ def parse_args(
             "touches the complete PLE table and is never the default."
         ),
     )
+    parser.add_argument(
+        "--ple-planner-mode",
+        choices=["vectorized", "direct", "adaptive"],
+        default=ServerArgs.ple_planner_mode,
+        help=(
+            "PLE lookup planner: vectorized deduplicate/sort (default), direct caller-order, "
+            "or adaptive threshold selection."
+        ),
+    )
+    parser.add_argument(
+        "--ple-planner-direct-threshold",
+        type=_positive_int,
+        default=ServerArgs.ple_planner_direct_threshold,
+        help=(
+            "Adaptive PLE planner request-row threshold for the direct path; requests above "
+            "it use vectorized planning."
+        ),
+    )
 
     moe_cache_group = parser.add_mutually_exclusive_group()
     moe_cache_group.add_argument(

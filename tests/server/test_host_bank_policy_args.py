@@ -90,3 +90,35 @@ def test_host_bank_cli_rejects_policy_options_without_strategy():
                 "4096",
             ]
         )
+
+
+def test_ple_planner_cli_preserves_default_and_accepts_opt_in_adaptive_mode():
+    with patch("freetoken.utils.cached_load_hf_config", lambda _path: _Config()):
+        default, _ = parse_args(["--model", "/models/anon"])
+        adaptive, _ = parse_args(
+            [
+                "--model",
+                "/models/anon",
+                "--ple-planner-mode",
+                "adaptive",
+                "--ple-planner-direct-threshold",
+                "3",
+            ]
+        )
+
+    assert default.ple_planner_mode == "vectorized"
+    assert default.ple_planner_direct_threshold == 8
+    assert adaptive.ple_planner_mode == "adaptive"
+    assert adaptive.ple_planner_direct_threshold == 3
+
+
+def test_ple_planner_cli_rejects_non_positive_threshold():
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--model",
+                "/models/anon",
+                "--ple-planner-direct-threshold",
+                "0",
+            ]
+        )

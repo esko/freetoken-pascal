@@ -81,6 +81,8 @@ Run the PLE suite separately for mmap and positional-read backends against the s
 - physical block-device bytes are reported alongside logical packed-row bytes and application reads;
 - major faults and read amplification are release metrics, not troubleshooting notes.
 
+The vectorized planner remains the default, and adaptive threshold selection carries no performance claim until a reproducible benchmark provides evidence.
+
 A large unexplained amplification or unrelated model-weight I/O invalidates the serving configuration.
 
 ## Placement-cliff benchmark contract

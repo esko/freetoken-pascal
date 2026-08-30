@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from freetoken.gguf_host import (
     MappedPLETable,
+    PLELookupPlannerConfig,
     convert_gguf_ple_to_artifact,
     dequantize_iq4_nl,
     expert_layout_from_census,
@@ -265,6 +266,123 @@ def test_dedicated_pread_batch_matches_mmap_and_deduplicates(tmp_path: Path) -> 
         assert pread_table.telemetry()["batch_bytes_read"] == 3 * 90
         assert pread_table.telemetry()["advice"] == "posix-fadv-random"
         assert pread_table.telemetry()["advice_applied"] is True
+
+
+@pytest.mark.parametrize("backend", ["mmap", "pread"])
+def test_adaptive_ple_planner_uses_direct_path_at_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / backend)
+    ids = np.array([31, 0, 31, 16], dtype=np.int64)
+    with MappedPLETable.open_from_artifact(artifact) as reference_table:
+        expected = reference_table.lookup_batch(ids)
+    calls: list[int] = []
+    real_pread = os.pread
+
+    def recording_pread(fd: int, size: int, offset: int) -> bytes:
+        calls.append(offset)
+        return real_pread(fd, size, offset)
+
+    monkeypatch.setattr("freetoken.gguf_host.os.pread", recording_pread)
+    with MappedPLETable.open_from_artifact(
+        artifact,
+        backend=backend,
+        planner_mode="adaptive",
+        planner_direct_threshold=4,
+    ) as table:
+        actual = table.lookup_batch(ids)
+        telemetry = table.telemetry()
+
+    assert actual.shape == (4, 160)
+    np.testing.assert_array_equal(actual, expected)
+    assert telemetry["planner_mode"] == "adaptive"
+    assert telemetry["planner_selected_mode"] == "direct"
+    assert telemetry["planner_calls"] == 1
+    assert telemetry["direct_calls"] == 1
+    assert telemetry["direct_rows"] == 4
+    assert telemetry["vectorized_calls"] == 0
+    assert telemetry["planner_time_ns"] >= 0
+    assert telemetry["application_reads"] == 4
+    assert telemetry["application_bytes_read"] == 4 * 90
+    if backend == "pread":
+        assert calls == [31 * 90, 0, 31 * 90, 16 * 90]
+
+
+@pytest.mark.parametrize("backend", ["mmap", "pread"])
+def test_adaptive_ple_planner_uses_vectorized_path_above_threshold(
+    tmp_path: Path, backend: str
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / backend)
+    ids = np.array([31, 0, 31, 16], dtype=np.int64)
+    with MappedPLETable.open_from_artifact(
+        artifact,
+        backend=backend,
+        planner_mode="adaptive",
+        planner_direct_threshold=3,
+    ) as table:
+        actual = table.lookup_batch(ids)
+        telemetry = table.telemetry()
+
+    assert actual.shape == (4, 160)
+    assert telemetry["planner_selected_mode"] == "vectorized"
+    assert telemetry["planner_calls"] == 1
+    assert telemetry["direct_calls"] == 0
+    assert telemetry["vectorized_calls"] == 1
+    assert telemetry["vectorized_rows"] == 4
+    assert telemetry["application_reads"] == 3
+    assert telemetry["application_bytes_read"] == 3 * 90
+    assert telemetry["batch_unique_rows"] == 3
+    assert telemetry["batch_duplicate_rows"] == 1
+    assert telemetry["batch_sorted_rows"] == 3
+
+
+def test_ple_planner_config_is_explicit_and_fails_before_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with pytest.raises(ValueError, match="planner mode"):
+        MappedPLETable.open_from_artifact(artifact, planner_mode="unknown")
+    with pytest.raises(TypeError, match="planner_direct_threshold"):
+        MappedPLETable.open_from_artifact(artifact, planner_direct_threshold=True)
+    with pytest.raises(ValueError, match="positive"):
+        MappedPLETable.open_from_artifact(artifact, planner_direct_threshold=0)
+
+    monkeypatch.setattr(
+        "freetoken.gguf_host.MappedFileRange",
+        lambda *_args, **_kwargs: pytest.fail("invalid planner config opened a mapping"),
+    )
+    with pytest.raises(ValueError, match="planner mode"):
+        MappedPLETable.open_from_artifact(
+            artifact,
+            planner_config=PLELookupPlannerConfig(mode="unknown"),
+        )
+
+
+def test_ple_planner_empty_and_invalid_requests_do_no_io_or_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(
+        artifact,
+        backend="pread",
+        planner_mode="adaptive",
+        planner_direct_threshold=1,
+    ) as table:
+        monkeypatch.setattr(
+            "freetoken.gguf_host.os.pread",
+            lambda *_args: pytest.fail("unexpected positional read"),
+        )
+        assert table.lookup_batch(np.array([], dtype=np.int64)).shape == (0, 160)
+        with pytest.raises(IndexError):
+            table.lookup_batch(np.array([table.descriptor.rows]))
+        telemetry = table.telemetry()
+
+    assert telemetry["planner_calls"] == 0
+    assert telemetry["planner_time_ns"] == 0
+    assert telemetry["direct_calls"] == 0
+    assert telemetry["vectorized_calls"] == 0
+    assert telemetry["application_reads"] == 0
+    assert telemetry["application_bytes_read"] == 0
 
 
 def test_dedicated_pread_full_warm_never_mmaps(

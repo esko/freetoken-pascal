@@ -35,6 +35,53 @@ _PLE_TENSOR = "per_layer_token_embd.weight"
 _PROJECTIONS = ("gate", "up", "down")
 
 
+@dataclass(frozen=True)
+class PLELookupPlannerConfig:
+    """Validated policy for selecting a PLE lookup read plan."""
+
+    mode: str = "vectorized"
+    direct_threshold: int = 8
+
+    def validate(self) -> None:
+        if not isinstance(self.mode, str) or self.mode not in {
+            "vectorized",
+            "direct",
+            "adaptive",
+        }:
+            raise ValueError(
+                "invalid PLE planner mode "
+                f"{self.mode!r}; expected 'vectorized', 'direct', or 'adaptive'"
+            )
+        if isinstance(self.direct_threshold, bool) or not isinstance(self.direct_threshold, int):
+            raise TypeError("planner_direct_threshold must be an integer")
+        if self.direct_threshold <= 0:
+            raise ValueError("planner_direct_threshold must be positive")
+
+
+def _resolve_planner_config(
+    planner_config: PLELookupPlannerConfig | None,
+    *,
+    planner_mode: str = "vectorized",
+    planner_direct_threshold: int = 8,
+) -> PLELookupPlannerConfig:
+    if planner_config is not None:
+        if not isinstance(planner_config, PLELookupPlannerConfig):
+            raise TypeError("planner_config must be a PLELookupPlannerConfig")
+        if planner_mode != "vectorized" or planner_direct_threshold != 8:
+            raise ValueError(
+                "planner_config cannot be combined with planner_mode or "
+                "planner_direct_threshold"
+            )
+        resolved = planner_config
+    else:
+        resolved = PLELookupPlannerConfig(
+            mode=planner_mode,
+            direct_threshold=planner_direct_threshold,
+        )
+    resolved.validate()
+    return resolved
+
+
 def _sha256_file(path: Path, chunk_size: int = 8 << 20) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -822,8 +869,16 @@ class MappedPLETable:
         model_shard_paths: tuple[str, ...],
         prefetch_max_rows: int = 4096,
         prefetch_chunk_rows: int = 64,
+        planner_config: PLELookupPlannerConfig | None = None,
+        planner_mode: str = "vectorized",
+        planner_direct_threshold: int = 8,
     ) -> None:
         _validate_prefetch_config(prefetch_max_rows, prefetch_chunk_rows)
+        resolved_planner = _resolve_planner_config(
+            planner_config,
+            planner_mode=planner_mode,
+            planner_direct_threshold=planner_direct_threshold,
+        )
         self.descriptor = descriptor
         self.mapping = mapping
         self._closed = False
@@ -843,6 +898,16 @@ class MappedPLETable:
         self._prefetch_unique_rows = 0
         self._prefetch_warmed_rows = 0
         self.mode = "cold"
+        self._planner_config = resolved_planner
+        self._planner_selected_mode = "none"
+        self._planner_calls = 0
+        self._planner_time_ns = 0
+        self._direct_calls = 0
+        self._direct_rows = 0
+        self._vectorized_calls = 0
+        self._vectorized_rows = 0
+        self._application_reads = 0
+        self._application_bytes_read = 0
         self._lookup_calls = 0
         self._lookup_rows = 0
         self._packed_bytes_read = 0
@@ -888,8 +953,16 @@ class MappedPLETable:
         warm_mode: str = "cold",
         prefetch_max_rows: int = 4096,
         prefetch_chunk_rows: int = 64,
+        planner_config: PLELookupPlannerConfig | None = None,
+        planner_mode: str = "vectorized",
+        planner_direct_threshold: int = 8,
     ) -> MappedPLETable:
         _validate_prefetch_config(prefetch_max_rows, prefetch_chunk_rows)
+        resolved_planner = _resolve_planner_config(
+            planner_config,
+            planner_mode=planner_mode,
+            planner_direct_threshold=planner_direct_threshold,
+        )
         layout = inspect_qwen_host_layout(path)
         descriptor = layout.ple
         mapping = MappedFileRange(
@@ -907,6 +980,7 @@ class MappedPLETable:
             model_shard_paths=layout.shard_paths,
             prefetch_max_rows=prefetch_max_rows,
             prefetch_chunk_rows=prefetch_chunk_rows,
+            planner_config=resolved_planner,
         )
         try:
             table._apply_random_advice()
@@ -927,8 +1001,16 @@ class MappedPLETable:
         backend: str = "mmap",
         prefetch_max_rows: int = 4096,
         prefetch_chunk_rows: int = 64,
+        planner_config: PLELookupPlannerConfig | None = None,
+        planner_mode: str = "vectorized",
+        planner_direct_threshold: int = 8,
     ) -> MappedPLETable:
         _validate_prefetch_config(prefetch_max_rows, prefetch_chunk_rows)
+        resolved_planner = _resolve_planner_config(
+            planner_config,
+            planner_mode=planner_mode,
+            planner_direct_threshold=planner_direct_threshold,
+        )
         if backend not in {"mmap", "pread"}:
             raise ValueError(f"unknown PLE backend {backend!r}")
         root = Path(path)
@@ -995,6 +1077,7 @@ class MappedPLETable:
             model_shard_paths=(str(payload),),
             prefetch_max_rows=prefetch_max_rows,
             prefetch_chunk_rows=prefetch_chunk_rows,
+            planner_config=resolved_planner,
         )
         table.source_kind = "dedicated-artifact"
         try:
@@ -1203,20 +1286,48 @@ class MappedPLETable:
     def _lookup_batch_impl(self, ids: np.ndarray) -> np.ndarray:
         original = np.asarray(ids).shape
         flat = self._validate_ids(ids)
+        if not flat.size:
+            return np.empty((*original, self.descriptor.elements_per_row), dtype=np.float32)
+
+        planner_started = time.perf_counter_ns()
+        if self._planner_config.mode == "adaptive":
+            selected_planner = (
+                "direct"
+                if flat.size <= self._planner_config.direct_threshold
+                else "vectorized"
+            )
+        else:
+            selected_planner = self._planner_config.mode
+        if selected_planner == "vectorized":
+            unique, inverse = np.unique(flat, return_inverse=True)
+            read_rows = unique
+        else:
+            unique = None
+            inverse = None
+            read_rows = flat
+        planner_elapsed = max(0, time.perf_counter_ns() - planner_started)
+        with self._prefetch_lock:
+            self._planner_calls += 1
+            self._planner_time_ns += planner_elapsed
+            self._planner_selected_mode = selected_planner
+            if selected_planner == "direct":
+                self._direct_calls += 1
+                self._direct_rows += int(flat.size)
+            else:
+                self._vectorized_calls += 1
+                self._vectorized_rows += int(flat.size)
+
         before_usage = resource.getrusage(resource.RUSAGE_SELF)
         before_storage = _proc_read_bytes()
         if self.mode == "targeted":
             self._warm_rows_impl(flat)
-        unique, inverse = np.unique(flat, return_inverse=True)
-        if not flat.size:
-            return np.empty((*original, self.descriptor.elements_per_row), dtype=np.float32)
         if self.backend == "pread":
             chunks = []
-            for row in np.sort(unique):
+            for row in read_rows:
                 chunk = os.pread(
                     self._pread_fd,
                     self.descriptor.row_bytes,
-                    int(row) * self.descriptor.row_bytes,
+                    self.descriptor.data_offset + int(row) * self.descriptor.row_bytes,
                 )
                 if len(chunk) != self.descriptor.row_bytes:
                     with self._prefetch_lock:
@@ -1226,15 +1337,19 @@ class MappedPLETable:
             packed_unique = np.asarray(chunks, dtype=np.uint8).reshape(
                 -1, self.descriptor.row_bytes
             )
-            order = np.argsort(unique)
-            packed = packed_unique[np.argsort(order)][inverse].copy()
+            if selected_planner == "direct":
+                packed = packed_unique
+            else:
+                packed = packed_unique[inverse].copy()
         else:
-            packed = self.mapping.rows[unique].copy()
-            packed = packed[inverse]
+            packed = self.mapping.rows[read_rows].copy()
+            if selected_planner == "vectorized":
+                packed = packed[inverse]
         result = dequantize_iq4_nl(packed).reshape(
             *original,
             self.descriptor.elements_per_row,
         )
+        unique_rows = int(unique.size) if unique is not None else len(set(flat.tolist()))
         after_usage = resource.getrusage(resource.RUSAGE_SELF)
         after_storage = _proc_read_bytes()
         with self._prefetch_lock:
@@ -1244,12 +1359,15 @@ class MappedPLETable:
             self._output_bytes += int(result.nbytes)
             self._batch_calls += 1
             self._batch_requested_rows += int(flat.size)
-            self._batch_unique_rows += int(unique.size)
+            self._batch_unique_rows += unique_rows
             if self.backend == "pread":
-                self._batch_positional_reads += int(unique.size)
-            self._batch_duplicate_rows += int(flat.size - unique.size)
-            self._batch_sorted_rows += int(unique.size)
-            self._batch_bytes_read += int(unique.size) * self.descriptor.row_bytes
+                self._batch_positional_reads += int(read_rows.size)
+            self._batch_duplicate_rows += int(flat.size - unique_rows)
+            if selected_planner == "vectorized":
+                self._batch_sorted_rows += unique_rows
+            self._batch_bytes_read += int(read_rows.size) * self.descriptor.row_bytes
+            self._application_reads += int(read_rows.size)
+            self._application_bytes_read += int(read_rows.size) * self.descriptor.row_bytes
             self._minor_faults += max(0, int(after_usage.ru_minflt - before_usage.ru_minflt))
             self._major_faults += max(0, int(after_usage.ru_majflt - before_usage.ru_majflt))
             if before_storage is not None and after_storage is not None:
@@ -1279,6 +1397,17 @@ class MappedPLETable:
                 "targeted_warm_rows": self._targeted_warm_rows,
                 "full_model_warm_bytes": self._full_model_warm_bytes,
                 "backend": self.backend,
+                "planner_mode": self._planner_config.mode,
+                "planner_direct_threshold": self._planner_config.direct_threshold,
+                "planner_selected_mode": self._planner_selected_mode,
+                "planner_calls": self._planner_calls,
+                "planner_time_ns": self._planner_time_ns,
+                "direct_calls": self._direct_calls,
+                "direct_rows": self._direct_rows,
+                "vectorized_calls": self._vectorized_calls,
+                "vectorized_rows": self._vectorized_rows,
+                "application_reads": self._application_reads,
+                "application_bytes_read": self._application_bytes_read,
                 "batch_calls": self._batch_calls,
                 "batch_requested_rows": self._batch_requested_rows,
                 "batch_unique_rows": self._batch_unique_rows,
@@ -1435,8 +1564,16 @@ def open_qwen_host_weights(
     ple_warm_mode: str = "cold",
     ple_prefetch_max_rows: int = 4096,
     ple_prefetch_chunk_rows: int = 64,
+    ple_planner_config: PLELookupPlannerConfig | None = None,
+    ple_planner_mode: str = "vectorized",
+    ple_planner_direct_threshold: int = 8,
 ) -> QwenGGUFHostWeights:
     _validate_prefetch_config(ple_prefetch_max_rows, ple_prefetch_chunk_rows)
+    resolved_planner = _resolve_planner_config(
+        ple_planner_config,
+        planner_mode=ple_planner_mode,
+        planner_direct_threshold=ple_planner_direct_threshold,
+    )
     layout = inspect_qwen_host_layout(
         path,
         supported_expert_types=supported_expert_types,
@@ -1456,6 +1593,7 @@ def open_qwen_host_weights(
             model_shard_paths=layout.shard_paths,
             prefetch_max_rows=ple_prefetch_max_rows,
             prefetch_chunk_rows=ple_prefetch_chunk_rows,
+            planner_config=resolved_planner,
         )
         ple._apply_random_advice()
         ple.set_warm_mode(ple_warm_mode)
@@ -1470,6 +1608,7 @@ __all__ = [
     "ExpertSlotPool",
     "GGUFExpertLayout",
     "MappedPLETable",
+    "PLELookupPlannerConfig",
     "PLEPrefetchHandle",
     "QwenGGUFHostWeights",
     "QwenHostLayout",

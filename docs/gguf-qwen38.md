@@ -87,6 +87,11 @@ Dedicated artifacts support explicit `mmap` and positional-read backends through
 reads, and restore caller order; positional short reads fail rather than zero-fill.
 The dedicated loader requests random-access advice (`MADV_RANDOM` or
 `POSIX_FADV_RANDOM`) where supported and reports the selected advice, success, and error.
+The lookup planner defaults to `vectorized`; opt-in `direct` reads caller order without
+deduplication, while `adaptive` selects direct requests at or below
+`--ple-planner-direct-threshold` and vectorized requests above it.
+Planner selection, direct/vectorized calls and rows, planner time, and logical application
+reads and bytes are reported for both mmap and positional-read backends.
 `MappedPLETable.prefetch` is an explicit, warming-only H0 operation with a configurable hard row bound and one active request per table.
 Its handle must be waited or cancelled, and its telemetry is separate from synchronous lookup counters.
 
