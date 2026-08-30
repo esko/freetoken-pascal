@@ -74,6 +74,18 @@ Create the H0 dedicated serving artifact with `scripts/extract_ple_artifact.py`.
 The output directory is published atomically and contains only `ple.bin` and `manifest.json`;
 the loader verifies geometry, exact size, and SHA-256 before mapping it.
 
+The dedicated manifest also contains one immutable `codec` descriptor.  Its stable `id`,
+`version`, packed/decoded dtypes, block geometry, and codec-specific `parameters` are
+resolved through the PLE codec registry before any payload mapping.  `iq4_nl` version 1
+(`uint8` packed rows, `float32` decoded rows, 32 elements in 18 bytes, GGML IQ4_NL
+codebook) is the only accepted codec in v1.  Unknown identities, unsupported versions,
+descriptor mismatches, invalid row geometry, and decoder output shape/dtype mismatches fail
+closed.  The generic descriptor keeps future BF16, FP8, INT4, NVFP4, Q6, and Q8 evaluation
+behind the same storage and ordered lookup contract; it does not accept or implement those
+codecs yet.
+Original v1 artifacts that predate the explicit `codec` object remain readable by their
+exact `IQ4_NL` quant identity; newly extracted manifests always include the descriptor.
+
 ```bash
 PYTHONPATH=python python scripts/extract_ple_artifact.py \
   /models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \

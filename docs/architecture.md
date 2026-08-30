@@ -37,6 +37,8 @@ N-gram/PLE in this document names the required table and lookup substrate; it do
 - dedicated contiguous PLE/N-gram file or shard set;
 - immutable GGUF model and expert source files;
 - independently identifiable PLE offsets and manifest identity.
+- one immutable row-codec descriptor and registry identity/version; IQ4_NL v1 is the only
+  accepted codec, while future row formats must retain the same storage/lookup contract.
 
 ### DDR4 tier
 
