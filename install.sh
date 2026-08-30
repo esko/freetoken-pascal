@@ -147,12 +147,12 @@ build_from_repo_if_needed() {
   # staleness to defend against. FREETOKEN_BUILD_NO_STAMP=0 forces a stamp anyway.
   FREETOKEN_BUILD_OUT_DIR="$out_dir" FREETOKEN_BUILD_NO_STAMP="${FREETOKEN_BUILD_NO_STAMP:-1}" bash "$builder"
 
-  rt="$(ls -t "$out_dir"/freetoken-*.whl 2>/dev/null | head -1)" || true
+  rt="$(find "$out_dir" -maxdepth 1 -type f -name 'freetoken-*.whl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)" || true
   [ -n "$rt" ] || die "build finished but no freetoken-*.whl found in $out_dir"
   WHEEL="$rt"
   say "built runtime wheel: $WHEEL"
   if [ -z "$KERNEL_CACHE_WHEEL" ]; then
-    kc="$(ls -t "$out_dir"/freetoken_kernel_cache-*.whl 2>/dev/null | head -1)" || true
+    kc="$(find "$out_dir" -maxdepth 1 -type f -name 'freetoken_kernel_cache-*.whl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)" || true
     if [ -n "$kc" ]; then
       KERNEL_CACHE_WHEEL="$kc"
       say "built kernel-cache wheel: $KERNEL_CACHE_WHEEL"
@@ -168,7 +168,7 @@ find_bundled_wheel() {
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
   dist="$script_dir/dist"
   [ -d "$dist" ] || return 0
-  rt="$(ls -t "$dist"/freetoken-*.whl 2>/dev/null | grep -Ev 'freetoken[_-]kernel[_-]cache-' | head -1)" || true
+  rt="$(find "$dist" -maxdepth 1 -type f -name 'freetoken-*.whl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)" || true
   [ -n "$rt" ] && { WHEEL="$rt"; say "found bundled runtime wheel: $WHEEL"; }
 }
 
