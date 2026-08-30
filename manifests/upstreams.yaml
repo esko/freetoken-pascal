@@ -1,5 +1,5 @@
 schema_version: 2
-updated: "2026-08-29"
+updated: "2026-08-30"
 policy:
   require_commit_sha: true
   require_license: true
@@ -379,12 +379,29 @@ sources:
   - id: pxq-llama
     repository: https://github.com/poisonxa16/pxq_llama.cpp
     upstream_ref: refs/heads/main
-    ref: 066a37e9540a1ca21375fdeb377836fe69ecb729
+    ref: d34d74e93b95761e67a17a649cf2faf039e7888e
     license: MIT
-    role: Pascal GPU and AVX2 low-bit kernel donor/reference
+    role: Pascal GDN/ssm_scan fusion donor audit and AVX2 low-bit kernel reference
     usage: planned
     responsible_issue: 19
     notice_required: false
+    audit_blobs:
+      - path: ggml/src/ggml-cuda/delta-net.cu
+        sha: 4f8e131c754a54423ab3c349f6bc072ac9973364
+      - path: ggml/src/ggml-cuda/delta-net.cuh
+        sha: 36c4c89e3f79b04ac84af04e69f6bb946ccd9c61
+      - path: ggml/src/ggml-cuda/pxa-deltanet-fuse.cuh
+        sha: f6d1d2bdd8773c919c5b8c8b4c882b48f2f47af9
+      - path: ggml/src/ggml-cuda/ssm-conv.cu
+        sha: d48f4435b0738ff34c8cd6784ff36cc66803d49b
+      - path: ggml/src/ggml-cuda/ssm-conv.cuh
+        sha: 8e6c1f00bfa03daf521694b24143f5d47c4019ae
+      - path: src/graphs/build_qwen4exp.cpp
+        sha: d35931a86ad4f2a1369e976493e87aad3bc5a814
+      - path: src/llama-delta-net.cpp
+        sha: dbb2d2383192577b297fd73b1c1093dadab499e0
+      - path: src/llama-delta-net.h
+        sha: b6de906074302d72a2dd8944da52fc655f370470
     imports: []
   - id: vllm-qwen38-pr53896
     repository: https://github.com/vllm-project/vllm

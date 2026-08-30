@@ -108,6 +108,18 @@
         "usage": {"enum": ["imported", "planned", "reference"]},
         "responsible_issue": {"type": "integer", "minimum": 1},
         "notice_required": {"type": "boolean"},
+        "audit_blobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha"],
+            "properties": {
+              "path": {"$ref": "#/$defs/relativePath"},
+              "sha": {"$ref": "#/$defs/sha"}
+            }
+          }
+        },
         "imports": {
           "type": "array",
           "items": {"$ref": "#/$defs/import"}

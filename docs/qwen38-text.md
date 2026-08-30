@@ -15,8 +15,20 @@ and RTX 3090 benchmark artifacts are not part of this downstream slice.
 GDN uses the existing per-request linear state pool. Fresh requests zero their recurrent state;
 chunked requests continue from their assigned slot. PLE owns a dilated-convolution state keyed by
 the same request table slot and replaces it whenever `cached_len == 0`, preventing state leakage
-when a slot is reused. The model forces the naive cache and disables CUDA graphs while the PLE
-reference path performs host work. Issue #13 owns the release PLE mmap/offload representation.
+when a slot is reused. Linear-attention models default to the hybrid-radix cache; CUDA graphs stay
+disabled while the PLE reference path performs host work. Issue #13 owns the release PLE
+mmap/offload representation.
+
+The Qwen4 GDN boundary resolves `FREETOKEN_GDN_MODE` (`auto`, `reference`, or
+`triton-candidate`) at construction, before importing a fused kernel. The mode and package
+availability probes are frozen for the lifetime of the GDN object. `auto` selects the eligible
+in-tree FLA implementation only on supported modern-GPU inputs; `sm_61`, unsupported dtypes, or
+unavailable packages select the stateful `torch-reference` fallback and expose the reason through
+the debug observer. `triton-candidate` is explicit-only and fails closed until its donor and H1/H2
+parity gates are complete. The immutable decision contract is Torch-free so this policy is
+testable in H0. The FLA recurrent-state view is [V,K] while the pool view is [K,V]; equal
+dimensions only make these views shape-compatible, so axis-order and nonzero-state parity remain
+H2 work. Backend switching and checkpoint parity are not claimed by H0.
 
 QSA retains full-resolution K/V and stores one compressed index key per configured token group.
 Before the token budget is reached, selection is dense-equivalent. Beyond it, the indexer selects
