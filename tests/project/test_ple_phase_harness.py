@@ -53,6 +53,7 @@ def test_phase_harness_runs_identical_batches_through_both_backends(tmp_path: Pa
 
     assert report["validation_class"] == "H0/no-P4"
     assert report["claim_status"] == "observation_only"
+    assert report["physical_counter_status"] == "injected"
     assert report["row_batches"] == [[31, 0, 31, 16], [16, 0]]
     assert [item["backend"] for item in report["backends"]] == ["mmap", "pread"]
     for backend in report["backends"]:

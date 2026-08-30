@@ -151,7 +151,11 @@ executes the same deterministic row batches in explicit `cold`, `warm`, and
 The report retains the artifact manifest/payload identity, backend/advice/codec,
 ordered result hashes, logical and unique rows, application reads/bytes, major
 faults, physical bytes and amplification, planner/prefetch deltas, and the raw
-before/after counter and table-telemetry samples. A mismatch between backends,
+before/after counter and table-telemetry samples. The envelope keeps
+`physical_counter_status` (`injected` or `measured`) separate from
+`cache_control` (`synthetic/advisory`, `callback-prepared` or
+`operator-declared`), so a Linux block counter never implies a proven cold-cache
+setup. A mismatch between backends,
 corrupt phase ordering or deltas, unstable physical provenance, or missing
 physical counters aborts the report. `warm` uses bounded prefetch when enabled;
 `steady` repeats the same batches without treating prefetch as row data.

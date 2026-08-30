@@ -227,6 +227,7 @@ class PLEIOPhaseHarness:
         self._planner_direct_threshold = planner_direct_threshold
         self._phase_preparer = phase_preparer
         self._operator_cache_control = operator_cache_control
+        self._artifact: dict[str, Any] | None = None
 
     def _sample(self, table: Any) -> tuple[PLEIOCounters, dict[str, Any]]:
         telemetry = dict(table.telemetry())
@@ -341,7 +342,7 @@ class PLEIOPhaseHarness:
         """Return one JSON-compatible H0 observation-only report."""
         if not self._root.is_dir():
             raise PLEIOEvidenceError(f"dedicated PLE artifact directory is missing: {self._root}")
-        artifact = _artifact_identity(self._root)
+        self._artifact = _artifact_identity(self._root)
         backends: list[dict[str, Any]] = []
         expected_hashes: list[str] | None = None
         for backend in ("mmap", "pread"):
@@ -349,7 +350,10 @@ class PLEIOPhaseHarness:
             backends.append(record)
         report = {
             "format": "freetoken-pascal-ple-io-phase-evidence-v1",
-            "evidence_status": "measured" if self._linux_probe is not None else "synthetic",
+            "evidence_status": "h0-observation",
+            "physical_counter_status": (
+                "measured" if self._linux_probe is not None else "injected"
+            ),
             "claim_status": "observation_only",
             "validation_class": "H0/no-P4",
             "cache_control": (
@@ -359,7 +363,7 @@ class PLEIOPhaseHarness:
                 if self._operator_cache_control
                 else "synthetic/advisory"
             ),
-            "artifact": artifact,
+            "artifact": dict(self._artifact),
             "row_batches": [list(batch) for batch in self._batches],
             "backends": backends,
         }
