@@ -60,7 +60,7 @@ def test_mapped_adapter_construction_failure_closes_open_mapping():
     mapped = _Owner("mapped")
     mapped.descriptor = SimpleNamespace(tensor_bytes=17)
     model = _model(_Embedding())
-    model._config = SimpleNamespace(qwen4_args=SimpleNamespace())
+    model._config = SimpleNamespace(qwen4_args=SimpleNamespace(ngram_head_dim=128))
 
     with (
         patch("freetoken.gguf_host.MappedPLETable.open_from_artifact", return_value=mapped),

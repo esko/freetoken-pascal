@@ -385,7 +385,13 @@ class Qwen4ExpModel(BaseOP):
     def _attach_ple_table(
         self, table: PLETableBackend, *, owners: tuple[object, ...] = ()
     ) -> None:
-        self._close_ple_tables()
+        try:
+            self._close_ple_tables()
+        except BaseException:
+            # The replacement was already acquired by the caller. Retain it alongside any
+            # old owners that could not be detached so rollback can attempt every cleanup.
+            self._ple_tables.extend((table, *owners))
+            raise
         # Register owners before touching layers so rollback can find them if attachment fails.
         self._ple_tables.extend((table, *owners))
         for layer in self._ple:
