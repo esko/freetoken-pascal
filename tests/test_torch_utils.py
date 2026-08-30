@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
 from freetoken.utils.torch_utils import nvtx_annotate
 
 

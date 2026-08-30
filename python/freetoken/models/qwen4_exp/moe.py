@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
+
 from freetoken.kernel.triton.moe_shared_gate import shared_gate_mul_add, shared_gate_sigmoid
 from freetoken.layers import silu_and_mul
 from freetoken.layers.moe import make_moe_layer

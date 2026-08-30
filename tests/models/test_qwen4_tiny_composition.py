@@ -13,14 +13,12 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
 from freetoken.core import Batch, Context, Req, SamplingParams, set_global_ctx
 from freetoken.distributed import set_tp_info, try_get_tp_info
 from freetoken.kvcache.linear_state_pool import LinearStatePool
-from freetoken.models.qwen4_exp.config import parse_config
 from freetoken.models.qwen4_exp.attention import TorchDenseQSAReference
+from freetoken.models.qwen4_exp.config import parse_config
 from freetoken.models.qwen4_exp.model import Qwen4ExpForCausalLM
-
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests" / "fixtures" / "qwen4-tiny"

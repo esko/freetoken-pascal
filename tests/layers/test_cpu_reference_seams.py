@@ -1,7 +1,6 @@
 import pytest
 import torch
 import torch.nn.functional as F
-
 from freetoken.distributed import set_tp_info, try_get_tp_info
 from freetoken.layers import (
     GemmaPlusOneRMSNorm,
@@ -31,9 +30,11 @@ def _single_rank():
         (gelu_tanh_and_mul, lambda x: F.gelu(x[..., :4], approximate="tanh") * x[..., 4:]),
         (
             swigluoai_and_mul,
-            lambda x: torch.clamp(x[..., :4], max=1.5)
-            * torch.sigmoid(1.2 * x[..., :4])
-            * (torch.clamp(x[..., 4:], -1.5, 1.5) + 1),
+            lambda x: (
+                torch.clamp(x[..., :4], max=1.5)
+                * torch.sigmoid(1.2 * x[..., :4])
+                * (torch.clamp(x[..., 4:], -1.5, 1.5) + 1)
+            ),
         ),
     ],
 )
