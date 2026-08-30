@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import json
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import numpy as np
 import pytest
-
 from freetoken.gguf_host import (
     IQ4_NL_CODEC_DESCRIPTOR,
-    PLECodecDescriptor,
     PLE_CODEC_REGISTRY,
     MappedPLETable,
+    PLECodecDescriptor,
     convert_gguf_ple_to_artifact,
 )
 
@@ -38,8 +38,10 @@ def test_iq4_nl_codec_descriptor_and_registry_are_immutable() -> None:
 
     with pytest.raises(TypeError):
         descriptor.parameters["scale_dtype"] = "float32"  # type: ignore[index]
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         descriptor.codec_id = "other"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        PLE_CODEC_REGISTRY.resolve(descriptor).descriptor = descriptor  # type: ignore[misc]
 
 
 def test_descriptor_manifest_round_trip_preserves_codec_parameters() -> None:
@@ -84,6 +86,18 @@ def test_mapped_table_uses_codec_interface_and_reports_identity(tmp_path: Path) 
     assert telemetry["codec_version"] == 1
 
 
+def test_original_v1_artifact_without_codec_metadata_remains_readable(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    manifest_path = artifact / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["codec"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with MappedPLETable.open_from_artifact(artifact) as table:
+        assert table.codec.descriptor == IQ4_NL_CODEC_DESCRIPTOR
+        assert table.lookup(np.array([0])).shape == (1, 160)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -110,6 +124,7 @@ def test_artifact_rejects_decoder_shape_and_dtype_contract_violations(
 ) -> None:
     artifact = _artifact(tmp_path)
     with MappedPLETable.open_from_artifact(artifact) as table:
+
         class BadCodec:
             descriptor = table.codec.descriptor
 

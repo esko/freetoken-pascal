@@ -83,6 +83,8 @@ descriptor mismatches, invalid row geometry, and decoder output shape/dtype mism
 closed.  The generic descriptor keeps future BF16, FP8, INT4, NVFP4, Q6, and Q8 evaluation
 behind the same storage and ordered lookup contract; it does not accept or implement those
 codecs yet.
+Original v1 artifacts that predate the explicit `codec` object remain readable by their
+exact `IQ4_NL` quant identity; newly extracted manifests always include the descriptor.
 
 ```bash
 PYTHONPATH=python python scripts/extract_ple_artifact.py \

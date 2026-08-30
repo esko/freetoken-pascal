@@ -19,12 +19,12 @@ import shutil
 import tempfile
 import threading
 import time
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -139,8 +139,7 @@ class PLECodecDescriptor:
             or row_bytes <= 0
             or elements_per_row % self.elements_per_block
             or row_bytes % self.bytes_per_block
-            or elements_per_row // self.elements_per_block
-            != row_bytes // self.bytes_per_block
+            or elements_per_row // self.elements_per_block != row_bytes // self.bytes_per_block
         ):
             raise ValueError(
                 f"invalid PLE codec row geometry for {self.identity}: "
@@ -227,8 +226,9 @@ IQ4_NL_CODEC_DESCRIPTOR = PLECodecDescriptor(
 )
 
 
+@dataclass(frozen=True)
 class _IQ4NLCodec:
-    descriptor = IQ4_NL_CODEC_DESCRIPTOR
+    descriptor: PLECodecDescriptor = IQ4_NL_CODEC_DESCRIPTOR
 
     def decode(
         self,
@@ -253,8 +253,7 @@ class _IQ4NLCodec:
         expected_shape = (rows, elements_per_row)
         if decoded.shape != expected_shape:
             raise ValueError(
-                f"PLE codec decoder output shape {decoded.shape} disagrees with "
-                f"{expected_shape}"
+                f"PLE codec decoder output shape {decoded.shape} disagrees with {expected_shape}"
             )
         if decoded.dtype != np.dtype(self.descriptor.decoded_dtype):
             raise ValueError(
@@ -1269,10 +1268,17 @@ class MappedPLETable:
             raise ValueError("PLE artifact manifest missing geometry or checksum")
         if manifest.get("payload") != "ple.bin":
             raise ValueError("invalid PLE artifact payload name")
-        try:
-            codec_descriptor = PLECodecDescriptor.from_manifest(manifest.get("codec"))
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"invalid PLE artifact codec descriptor: {error}") from error
+        codec_value = manifest.get("codec")
+        if codec_value is None:
+            # The original v1 artifact schema identified IQ4_NL through the
+            # quant fields alone. Keep those immutable artifacts readable while
+            # every newly emitted v1 manifest records the explicit descriptor.
+            codec_descriptor = IQ4_NL_CODEC_DESCRIPTOR
+        else:
+            try:
+                codec_descriptor = PLECodecDescriptor.from_manifest(codec_value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"invalid PLE artifact codec descriptor: {error}") from error
         PLE_CODEC_REGISTRY.resolve(codec_descriptor)
         if (
             manifest.get("tensor_name") != _PLE_TENSOR
@@ -1610,14 +1616,12 @@ class MappedPLETable:
         if not isinstance(decoded, np.ndarray) or decoded.shape != expected_shape:
             actual_shape = getattr(decoded, "shape", None)
             raise ValueError(
-                f"PLE codec decoder output shape {actual_shape} disagrees with "
-                f"{expected_shape}"
+                f"PLE codec decoder output shape {actual_shape} disagrees with {expected_shape}"
             )
         expected_dtype = np.dtype(self.codec.descriptor.decoded_dtype)
         if decoded.dtype != expected_dtype:
             raise ValueError(
-                f"PLE codec decoder output dtype {decoded.dtype} disagrees with "
-                f"{expected_dtype}"
+                f"PLE codec decoder output dtype {decoded.dtype} disagrees with {expected_dtype}"
             )
         result = decoded.reshape(*original, self.descriptor.elements_per_row)
         unique_rows = int(unique.size) if unique is not None else len(set(flat.tolist()))
@@ -1877,16 +1881,16 @@ def open_qwen_host_weights(
 
 
 __all__ = [
+    "IQ4_NL_CODEC",
+    "IQ4_NL_CODEC_DESCRIPTOR",
+    "PLE_CODEC_REGISTRY",
     "ExpertBankDescriptor",
     "ExpertSlotPool",
     "GGUFExpertLayout",
-    "IQ4_NL_CODEC",
-    "IQ4_NL_CODEC_DESCRIPTOR",
     "MappedPLETable",
     "PLECodec",
     "PLECodecDescriptor",
     "PLECodecRegistry",
-    "PLE_CODEC_REGISTRY",
     "PLELookupPlannerConfig",
     "PLEPrefetchHandle",
     "QwenGGUFHostWeights",
