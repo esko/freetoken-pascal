@@ -129,5 +129,6 @@ def test_ple_backend_help_includes_embedded_gguf_range(capsys):
         parse_args(["--help"])
 
     output = capsys.readouterr().out
-    assert "dedicated artifact or embedded GGUF range" in output
+    assert "PLE storage backend for a dedicated artifact" in output
+    assert "embedded GGUF range" in output
     assert "pread requires --ple-artifact-path" not in output
