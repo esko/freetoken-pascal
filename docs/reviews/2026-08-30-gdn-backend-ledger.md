@@ -63,7 +63,15 @@ No donor Triton or graph-fusion code is imported by this slice. The candidate re
 recurrent state is indexed as [V,K] while the current pool contract is [K,V]; equal head
 dimensions make the tensors shape-compatible but do not establish axis-order equivalence. The
 direct snapshot path therefore remains an explicit H0 limitation pending canonical nonzero-state
-H2 parity. Backend switching and checkpoint parity are not claimed. Hosted tests cover decision
+H2 parity. Cross-backend switching and checkpoint parity are not claimed. Hosted tests cover decision
 immutability, visible fallback reasons, invalid/forced modes, observer delivery, constructor
 snapshotting, reference state behavior, the standalone Pascal source/adapter contract, and the
 static guarantee that the Qwen4 GDN boundary resolves before any FLA call.
+
+The permanent Torch/reference seam additionally defines the H0 state semantics that every future
+backend must preserve. Deterministic CPU tests compare chunk evaluation with tokenwise decode from
+nonzero state, restore both convolution and recurrent state before replaying a suffix, reset and
+replay the complete sequence, exercise ragged requests mapped to noncontiguous slots, and verify
+that concurrent request updates leave unaddressed slots byte-for-byte unchanged. These checks are
+reference contracts only. They do not establish FLA/Pascal checkpoint interchangeability, kernel
+registration, device concurrency, or H2 parity; those remain issue #93 hardware work.
