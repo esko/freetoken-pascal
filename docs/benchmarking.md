@@ -224,7 +224,11 @@ This is preliminary H0 evidence, not a full-engine or P4 result. The report reta
 
 The benchmark requires at least five warmups, fails if forced AVX2 is not actually selected, and fails rather than reporting statistics when either reference comparison mismatches.
 
-Router qualification additionally alternates forced `torch-reference`, forced `pascal-fused` and `auto` modes with cache, scheduler, model, quant, prompt and sampling held fixed. A router microbenchmark alone cannot enable the fused default; the same-workload end-to-end result must improve outside run-to-run noise.
+Router qualification additionally alternates forced `torch-reference`, forced
+`triton-candidate` and `auto` modes with cache, scheduler, model, quant, prompt and
+sampling held fixed. The candidate remains default-off until H1/H2 evidence qualifies it;
+a router microbenchmark alone cannot enable the fused default, and the same-workload
+end-to-end result must improve outside run-to-run noise.
 
 Use the exact same model bytes where the runtime permits. If formats differ, state that the comparison is not a codec-controlled A/B.
 

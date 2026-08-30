@@ -42,6 +42,8 @@ env-clean:
 
 python-check:
 	python -m compileall -q python tests scripts benchmarks
+	ruff check python/freetoken/moe/router_contract.py tests/moe/test_router_contract.py
+	ruff format --check python/freetoken/moe/router_contract.py tests/moe/test_router_contract.py
 	ruff check python/freetoken/engine/placement_plan.py python/freetoken/engine/placement_profile.py tests/engine/test_placement_plan.py tests/engine/test_placement_profile.py
 	ruff format --check python/freetoken/engine/placement_plan.py python/freetoken/engine/placement_profile.py tests/engine/test_placement_plan.py tests/engine/test_placement_profile.py
 	ruff check scripts benchmarks/bench_qwen38_real_expert.py python/freetoken/kernel/pinned.py python/freetoken/moe/cpu_abi.py python/freetoken/moe/ggml_reference.py python/freetoken/moe/q4_k.py python/freetoken/moe/mixed_gemv.py python/freetoken/moe/gguf_cpu.py python/freetoken/moe/gguf_layer.py python/freetoken/moe/gguf_transfer.py python/freetoken/moe/real_artifact_probe.py python/freetoken/moe/real_artifact_benchmark.py python/freetoken/models/qwen4_exp/gguf_attach.py tests/models/test_qwen4_exp_gguf_attach.py tests/moe/test_host_banks.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py tests/moe/test_mixed_gemv.py tests/moe/test_q4_k_threaded.py tests/moe/test_q4_k_threaded_mixed.py tests/moe/test_gguf_cpu_bridge.py tests/moe/test_gguf_cpu_layer.py tests/moe/test_gguf_transfer.py tests/project/test_qwen38_real_expert_probe.py tests/project/test_qwen38_real_expert_benchmark.py tests/moe/test_stress_host_resources.py

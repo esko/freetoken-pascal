@@ -46,6 +46,10 @@ jobs:
         run: echo "::notice title=H2/H3 deferred::Tesla P4 hardware is not installed; only the manual inventory-verified self-hosted workflow may satisfy hardware gates."
       - name: Compile imported source and tests
         run: python -m compileall -q python tests scripts
+      - name: Lint H0 router contract
+        run: |
+          ruff check python/freetoken/moe/router_contract.py tests/moe/test_router_contract.py
+          ruff format --check python/freetoken/moe/router_contract.py tests/moe/test_router_contract.py
       - name: Run bounded host-resource lifecycle observation
         env:
           PYTHONPATH: python

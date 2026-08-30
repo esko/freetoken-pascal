@@ -9,6 +9,7 @@ from freetoken.distributed import DistributedCommunicator, get_tp_info
 from freetoken.moe import is_offload_moe_backend
 from freetoken.moe.fused import fused_experts_decode_impl, fused_experts_impl, fused_topk
 from freetoken.moe.offload_cache import OffloadMoeCache
+from freetoken.moe.router_contract import parse_router_mode, router_mode_from_env
 from freetoken.utils import div_even
 
 from .base import BaseOP
@@ -88,6 +89,7 @@ class MoELayer(BaseOP):
         apply_router_weight_on_input: bool = False,
         allocate_experts: bool = True,
         weight_format: str = "bf16",
+        router_mode: str | None = None,
     ):
         super().__init__()
 
@@ -103,6 +105,9 @@ class MoELayer(BaseOP):
         self.activation = activation
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.weight_format = weight_format
+        self.router_mode = (
+            router_mode_from_env() if router_mode is None else parse_router_mode(router_mode)
+        )
         intermediate_size_per_partition = div_even(intermediate_size, tp_size)
         if allocate_experts:
             self._alloc_resident_experts(intermediate_size_per_partition)
@@ -113,11 +118,20 @@ class MoELayer(BaseOP):
         router_logits: torch.Tensor | None,
         observer: DebugObserver | None,
     ) -> TopK:
+        router_observer = None
+        if observer is not None:
+
+            def observe_router_dispatch(decision) -> None:
+                observer("router_dispatch", decision.as_dict())
+
+            router_observer = observe_router_dispatch
         topk_weights, topk_ids = fused_topk(
             hidden_states=hidden_states,
             gating_output=router_logits,
             topk=self.top_k,
             renormalize=self.renormalize,
+            router_mode=self.router_mode,
+            router_observer=router_observer,
         )
         if observer is not None:
             metadata = _debug_batch_metadata(hidden_states)
@@ -303,6 +317,7 @@ class MoELayer(BaseOP):
                 activation=self.activation,
                 apply_router_weight_on_input=self.apply_router_weight_on_input,
                 debug_observer=self._backend_debug_observer(hidden_states, debug_observer),
+                router_mode=self.router_mode,
             )
             return self._maybe_all_reduce(final_hidden_states)
         final_hidden_states = ctx.moe_backend.forward(

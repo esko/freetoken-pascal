@@ -313,11 +313,21 @@ For each layer and decode step:
 
 The Qwen3.8 router selects 10 of 512 experts on every MoE layer. Its permanent
 `torch-reference` path computes the full FP32 softmax across all 512 logits before
-returning the selected weights. A `pascal-fused` path may select by logits, but it must
+returning the selected weights. An explicit `triton-candidate` path may select by logits, but it must
 preserve that complete denominator, both renormalization modes, padded-row behavior and
 the documented tie/NaN/Inf policy. Runtime logs expose the forced or `auto` path and
 fallback reason. The fused path remains opt-in until same-workload P4 measurements show
 an end-to-end improvement outside run-to-run noise.
+
+The H0 dispatch contract exposes `auto`, `torch-reference` and explicit
+`triton-candidate` modes through an immutable `RouterDispatchDecision` observer. Auto
+keeps Qwen's non-power-of-two `topk=10` route on the Torch reference with a
+`candidate-not-qualified` reason; the candidate is default-off pending H1 `sm_61`
+compilation and H2 P4 parity/performance evidence. Set `FREETOKEN_ROUTER_MODE` to one
+of those exact lowercase values to force a mode; when unset, the mode is `auto`, and
+invalid values fail during layer/backend construction. Debug observers receive the
+immutable `router_dispatch` decision before the route payload. Device-resident token-limit
+scalars remain on their CUDA stream so routing and CUDA-graph capture do not incur host sync.
 
 For `m` misses and `q` current GPU fetches, the autotuner minimizes the measured critical path:
 

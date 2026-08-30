@@ -74,7 +74,10 @@ def test_offload_moe_layer_prefill_forward_uses_single_layer_cache_view(monkeypa
 
     monkeypatch.setattr(
         "freetoken.layers.moe.fused_topk",
-        lambda *, hidden_states, gating_output, topk, renormalize: (topk_weights, topk_ids),
+        lambda *, hidden_states, gating_output, topk, renormalize, **kwargs: (
+            topk_weights,
+            topk_ids,
+        ),
     )
     monkeypatch.setattr(cache, "materialize_layer", lambda layer_id: calls.setdefault("layer_id", layer_id))
     monkeypatch.setattr(cache, "copy_missing", lambda: calls.setdefault("copied", True))
@@ -153,7 +156,7 @@ def test_offload_moe_layer_prefill_overlap_prefetches_layers_into_two_buffers(mo
 
     monkeypatch.setattr(
         "freetoken.layers.moe.fused_topk",
-        lambda *, hidden_states, gating_output, topk, renormalize: (
+        lambda *, hidden_states, gating_output, topk, renormalize, **kwargs: (
             topk_weights,
             topk_ids.clone(),
         ),
@@ -334,7 +337,10 @@ def test_offload_moe_layer_decode_forward_uses_remapped_slot_ids(monkeypatch):
 
     monkeypatch.setattr(
         "freetoken.layers.moe.fused_topk",
-        lambda *, hidden_states, gating_output, topk, renormalize: (topk_weights, topk_ids),
+        lambda *, hidden_states, gating_output, topk, renormalize, **kwargs: (
+            topk_weights,
+            topk_ids,
+        ),
     )
 
     def fake_ensure(layer_id, expert_ids):
