@@ -54,6 +54,6 @@ python-check:
 	ruff format --check python/freetoken/moe/cpu_affinity.py tests/moe/test_cpu_affinity.py tests/moe/test_cpu_moe_affinity_native.py
 
 hosted-tests:
-	PYTHONPATH=python pytest -q tests/project tests/daemon tests/engine/test_placement_plan.py tests/engine/test_placement_profile.py tests/models/test_qwen4_exp_gguf_attach.py tests/moe/test_host_banks.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py tests/moe/test_mixed_gemv.py tests/moe/test_q4_k_threaded.py tests/moe/test_q4_k_threaded_mixed.py tests/moe/test_gguf_cpu_bridge.py tests/moe/test_gguf_cpu_layer.py tests/moe/test_gguf_transfer.py tests/moe/test_stress_host_resources.py
+	PYTHONPATH=python pytest -q tests/project tests/daemon tests/engine/test_placement_plan.py tests/engine/test_placement_profile.py tests/engine/test_host_resource_lifecycle.py tests/models/test_qwen_host_resource_lifecycle.py tests/models/test_qwen4_exp_gguf_attach.py tests/moe/test_host_banks.py tests/moe/test_cpu_abi.py tests/moe/test_ggml_reference.py tests/moe/test_q4_k_mixed_reference.py tests/moe/test_q4_k.py tests/moe/test_mixed_gemv.py tests/moe/test_q4_k_threaded.py tests/moe/test_q4_k_threaded_mixed.py tests/moe/test_gguf_cpu_bridge.py tests/moe/test_gguf_cpu_layer.py tests/moe/test_gguf_transfer.py tests/moe/test_stress_host_resources.py
 	PYTHONPATH=python pytest -q tests/moe/test_cpu_topology.py
 	PYTHONPATH=python pytest -q tests/moe/test_cpu_affinity.py tests/moe/test_cpu_moe_affinity_native.py

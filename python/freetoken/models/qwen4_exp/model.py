@@ -341,34 +341,55 @@ class Qwen4ExpModel(BaseOP):
             super().load_state_dict(state_dict, prefix=prefix, _internal=_internal)
 
     def _close_ple_tables(self) -> None:
-        tables = getattr(self, "_ple_tables", ())
+        tables = list(getattr(self, "_ple_tables", ()))
         self._ple_tables = []
         # Drop layer references before closing owners so a pinned tensor cannot keep an
         # anonymous HostBank mapping exported while its registration is being released.
+        detach_error: BaseException | None = None
         for layer in getattr(self, "_ple", ()):
-            layer.ple_embedding.attach_table(None)
+            try:
+                layer.ple_embedding.attach_table(None)
+            except BaseException as error:
+                detach_error = detach_error or error
+        if detach_error is not None:
+            self._ple_tables = tables
+            raise detach_error
+
+        failed: list[object] = []
+        close_error: BaseException | None = None
         for table in tables:
             close = getattr(table, "close", None)
-            if close is not None:
+            if not callable(close):
+                continue
+            try:
                 close()
+            except BaseException as error:
+                failed.append(table)
+                close_error = close_error or error
+        self._ple_tables = failed
+        if close_error is not None:
+            raise close_error
 
     def close_host_resources(self) -> None:
-        """Close model-owned PLE resources; safe to call repeatedly during teardown."""
+        """Close model-owned PLE resources, retaining failed owners for retry."""
         with self._gguf_attachment_lock:
             if getattr(self, "_host_resources_closed", False):
                 return
-            self._host_resources_closed = True
             self._close_ple_tables()
+            self._host_resources_closed = True
 
     def _has_eager_gguf_attachment(self) -> bool:
         attachment = getattr(self, "_gguf_cpu_attachment", None)
         return attachment is not None and attachment.mode == "eager"
 
-    def _attach_ple_table(self, table: PLETableBackend) -> None:
+    def _attach_ple_table(
+        self, table: PLETableBackend, *, owners: tuple[object, ...] = ()
+    ) -> None:
         self._close_ple_tables()
+        # Register owners before touching layers so rollback can find them if attachment fails.
+        self._ple_tables.extend((table, *owners))
         for layer in self._ple:
             layer.ple_embedding.attach_table(table)
-        self._ple_tables.append(table)
 
     def load_host_tables(self, engine_config) -> int:
         """Compatibility entry point for the upstream engine's explicit host-table phase."""
@@ -456,15 +477,42 @@ class Qwen4ExpModel(BaseOP):
                     planner_direct_threshold=ple_planner_direct_threshold,
                 )
             )
-            self._attach_ple_table(_MappedPLETable(mapped, args.ngram_head_dim))
+            try:
+                table = _MappedPLETable(mapped, args.ngram_head_dim)
+            except BaseException:
+                try:
+                    mapped.close()
+                except BaseException:
+                    pass
+                raise
+            try:
+                self._attach_ple_table(table)
+            except BaseException:
+                if not any(owner is table for owner in self._ple_tables):
+                    table.close()
+                raise
             return int(mapped.descriptor.tensor_bytes)
 
         from .weight import load_ple_table
         from .ple import PinnedUVATable
 
         table = load_ple_table(model_path, args)
-        self._attach_ple_table(PinnedUVATable(table.bank.tensor, float(table.weight_scale)))
-        self._ple_tables.append(table)
+        try:
+            host_table = PinnedUVATable(table.bank.tensor, float(table.weight_scale))
+        except BaseException:
+            try:
+                table.close()
+            except BaseException:
+                pass
+            raise
+        try:
+            self._attach_ple_table(host_table, owners=(table,))
+        except BaseException:
+            if not any(owner is host_table for owner in self._ple_tables):
+                host_table.close()
+            if not any(owner is table for owner in self._ple_tables):
+                table.close()
+            raise
         return int(table.bank.nbytes)
 
     def host_weight_telemetry(self) -> dict[int, dict[str, object]]:
