@@ -173,9 +173,18 @@ def test_degraded_gdn_control_fails_long_horizon_state_gate(tmp_path: Path) -> N
     assert all(
         item["passed"] for item in evidence["comparisons"] if item["observation"] != "gdn_state"
     )
-    assert not any(
-        item["observation"] == "sensitive_control_input" for item in evidence["comparisons"]
-    )
+    control_comparisons = [
+        item for item in evidence["comparisons"] if item["observation"] == "sensitive_control_input"
+    ]
+    assert control_comparisons == [
+        {
+            "observation": "sensitive_control_input",
+            "metric": "expected_control_difference",
+            "observed": True,
+            "limit": True,
+            "passed": True,
+        }
+    ]
 
 
 @pytest.mark.parametrize(

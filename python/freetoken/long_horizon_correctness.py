@@ -512,7 +512,7 @@ def compare_long_horizon_bundles(
     exact_observations = {
         name
         for name, descriptor in document["observations"].items()
-        if descriptor["comparison"] == "exact"
+        if descriptor["comparison"] in {"exact", "control_input"}
     }
     tolerances = {
         name: Tolerance(**descriptor["tolerance"])
@@ -526,12 +526,22 @@ def compare_long_horizon_bundles(
         exact_observations=exact_observations,
         require_independent=require_independent,
         evidence_status=evidence_status,
-        ignored_observations={document["sensitive_control"]["input_observation"]},
     )
     sensitive_fixture, sensitive_result, sensitive_path = _load_sensitive_fixture(document)
     control_input = _compare_sensitive_control_input(
         document, subject, reference, sensitive_fixture
     )
+    control_observation = document["sensitive_control"]["input_observation"]
+    for comparison in evidence["comparisons"]:
+        if comparison["observation"] == control_observation:
+            comparison.update(
+                {
+                    "metric": "expected_control_difference",
+                    "observed": control_input["passed"],
+                    "limit": True,
+                    "passed": control_input["passed"],
+                }
+            )
     evidence["long_horizon"] = {
         "contract_id": document["contract_id"],
         "minimum_steps": document["minimum_steps"],
@@ -555,7 +565,8 @@ def compare_long_horizon_bundles(
             "control_input": control_input,
         },
     }
-    evidence["passed"] = bool(evidence["passed"] and semantic_passed and control_input["passed"])
+    numeric_passed = all(item["passed"] for item in evidence["comparisons"])
+    evidence["passed"] = bool(numeric_passed and semantic_passed and control_input["passed"])
     return evidence
 
 
