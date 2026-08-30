@@ -141,6 +141,7 @@ def test_tiny_qwen_text_composes_prefill_decode_and_is_deterministic():
     )
     replay = _run(model, context, _batch(prompt, phase="prefill"))
     assert torch.equal(first, replay)
+    assert int(first.argmax()) == int(replay.argmax())
     model.close_host_resources()
 
 
@@ -179,4 +180,27 @@ def test_tiny_qwen_vision_input_fails_closed():
     batch.mm_embeds = torch.zeros(1, config.hidden_size)
     with pytest.raises(RuntimeError, match="vision inputs are outside"):
         _run(model, context, batch)
+    model.close_host_resources()
+
+
+def test_tiny_qwen_debug_hook_reports_reference_boundaries():
+    config = _fixture_config()
+    model = _new_model(config)
+    context = _new_runtime(config)
+    model.load_host_weights("fixture", dummy=True)
+    records: list[dict[str, object]] = []
+    model.set_debug_hook(records.append)
+
+    logits = _run(model, context, _batch([3, 4, 5, 6], phase="prefill"))
+
+    assert len(records) == 1
+    assert torch.equal(records[0]["logits"], logits)
+    observations = records[0]["observations"]
+    assert len(observations["gdn_backend"]) == 1
+    assert len(observations["ple"]) == 1
+    assert len(observations["router"]) == config.num_layers
+    route = observations["router"][0]
+    assert route["ids"].shape == (4, config.num_experts_per_tok)
+    assert route["weights"].shape == route["ids"].shape
+    assert route["valid_token_count"] == 4
     model.close_host_resources()

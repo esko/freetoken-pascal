@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -35,7 +36,11 @@ class Qwen4ExpMoE(Qwen3_5MoE):
             weight_format="fp8_block",
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        debug_observer: Callable[[str, dict[str, object]], None] | None = None,
+    ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate.forward(hidden_states)
@@ -48,6 +53,9 @@ class Qwen4ExpMoE(Qwen3_5MoE):
 
             shared = self.shared_expert.forward(hidden_states)
             shared_gate = self.shared_expert_gate.forward(hidden_states)
+            topk_weights, topk_ids = self.experts._route_and_observe(
+                hidden_states, router_logits, debug_observer
+            )
             gate_up = self.experts.gate_up_proj
             down = self.experts.down_proj
 
@@ -67,6 +75,7 @@ class Qwen4ExpMoE(Qwen3_5MoE):
                 shared_output=shared,
                 shared_gate=shared_gate,
                 renormalize=self.experts.renormalize,
+                routing=(topk_weights, topk_ids),
             )
             return output.view(num_tokens, hidden_dim)
         shared = self.shared_expert.forward(hidden_states)

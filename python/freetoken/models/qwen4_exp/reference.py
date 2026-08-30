@@ -115,12 +115,18 @@ def routed_shared_expert_reference(
     shared_output: torch.Tensor,
     shared_gate: torch.Tensor,
     renormalize: bool,
+    routing: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Reference Qwen routed experts plus its independently gated shared expert."""
-    probabilities = torch.softmax(router_logits.float(), dim=-1)
-    weights, expert_ids = torch.topk(probabilities, topk, dim=-1)
-    if renormalize:
-        weights = weights / weights.sum(dim=-1, keepdim=True)
+    if routing is None:
+        probabilities = torch.softmax(router_logits.float(), dim=-1)
+        weights, expert_ids = torch.topk(probabilities, topk, dim=-1)
+        if renormalize:
+            weights = weights / weights.sum(dim=-1, keepdim=True)
+    else:
+        weights, expert_ids = routing
+        if weights.shape != (hidden.shape[0], topk) or expert_ids.shape != weights.shape:
+            raise ValueError("precomputed routing must be [tokens, topk]")
     expert_list = list(experts)
     routed = torch.zeros_like(hidden)
     for token in range(hidden.shape[0]):
