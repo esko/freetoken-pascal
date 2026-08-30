@@ -127,6 +127,7 @@ is the outer protection. Teardown never marks incomplete flag work complete.
 
 These flags are opt-in.
 When `--host-bank-strategy` is omitted, `EngineConfig.host_bank_policy` is `None` and the legacy expert-bank loader behavior is preserved exactly.
+The legacy path still performs the common metadata-only FTW identity/layout validation before its first host-bank allocation and rolls back an allocation prefix if loading fails; this safety check does not select a policy or change successful-load residency.
 The explicit policy is preflighted from FTW metadata before host-bank allocation or shard reads.
 
 | Flag | Default | Meaning |

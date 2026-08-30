@@ -623,6 +623,171 @@ def test_ftw_ambiguous_sample_identities_fail_before_allocation(tmp_path, layout
     assert tuple(_LIVE_BUFFERS) == before
 
 
+@pytest.mark.parametrize(
+    ("layout", "message"),
+    [
+        ("duplicate-alpha", "duplicate NUMA sample identity"),
+        ("duplicate-flat", "duplicate NUMA sample identity"),
+        ("duplicate-per-layer", "duplicate layer 0"),
+        ("mixed", "mix flat and per-layer"),
+        ("malformed-name", "bank_name"),
+    ],
+)
+def test_ftw_default_path_rejects_ambiguous_identities_before_allocation(
+    tmp_path, monkeypatch, layout, message
+):
+    import freetoken.moe.host_banks as host_banks
+    from freetoken.checkpoint.ftw import FTWWriter, layer_bank_entry_name, load_ftw_banks
+
+    checkpoint = tmp_path / f"default-{layout}"
+    writer = FTWWriter(str(checkpoint))
+    if layout == "duplicate-alpha":
+        writer.add_tensor("gate_up_alpha", torch.ones(2), kind="experts_bank")
+        writer.add_tensor("gate_up_alpha", torch.zeros(2), kind="experts_bank")
+    elif layout == "malformed-name":
+        writer.add_tensor(" ", torch.ones((2, 8), dtype=torch.uint8), kind="experts_bank")
+    else:
+        writer.add_tensor("gate_up", torch.ones((2, 8), dtype=torch.uint8), kind="experts_bank")
+        if layout == "duplicate-flat":
+            writer.add_tensor(
+                "gate_up", torch.zeros((2, 8), dtype=torch.uint8), kind="experts_bank"
+            )
+        elif layout == "duplicate-per-layer":
+            name = layer_bank_entry_name("down", 0)
+            writer.add_tensor(name, torch.ones((2, 8), dtype=torch.uint8), kind="experts_bank")
+            writer.add_tensor(name, torch.zeros((2, 8), dtype=torch.uint8), kind="experts_bank")
+        else:
+            writer.add_tensor(
+                layer_bank_entry_name("gate_up", 0),
+                torch.zeros((2, 8), dtype=torch.uint8),
+                kind="experts_bank",
+            )
+    writer.finalize({"quant_format": "bf16", "expert_bank_num_layers": 1})
+    before = tuple(host_banks._LIVE_BUFFERS)
+
+    def forbidden_allocation(*args, **kwargs):
+        raise AssertionError("invalid FTW layout reached HostBank allocation")
+
+    monkeypatch.setattr(host_banks, "HostBank", forbidden_allocation)
+    with pytest.raises(ValueError, match=message):
+        load_ftw_banks(str(checkpoint), num_layers=1, workers=1)
+
+    assert tuple(host_banks._LIVE_BUFFERS) == before
+
+
+def test_ftw_default_path_rolls_back_owned_prefix_on_early_allocation_failure(
+    tmp_path, monkeypatch
+):
+    import freetoken.moe.host_banks as host_banks
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
+
+    checkpoint = tmp_path / "default-allocation-failure"
+    writer = FTWWriter(str(checkpoint))
+    writer.add_tensor("gate_up_alpha", torch.ones(2), kind="experts_bank")
+    writer.add_tensor("gate_up", torch.ones((2, 8), dtype=torch.uint8), kind="experts_bank")
+    writer.finalize({"quant_format": "bf16", "expert_bank_num_layers": 1})
+
+    original = host_banks.HostBank
+    calls = 0
+
+    def fail_second_allocation(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise MemoryError("injected HostBank allocation failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(host_banks, "born_pinned_default", lambda: False)
+    monkeypatch.setattr(host_banks, "HostBank", fail_second_allocation)
+    before = tuple(host_banks._LIVE_BUFFERS)
+
+    with pytest.raises(MemoryError, match="injected HostBank allocation failure"):
+        load_ftw_banks(str(checkpoint), num_layers=1, workers=1)
+
+    assert calls == 2
+    assert tuple(host_banks._LIVE_BUFFERS) == before
+
+
+def test_ftw_default_path_rolls_back_derived_views_when_bundle_construction_fails(
+    tmp_path, monkeypatch
+):
+    import freetoken.moe.expert_banks as expert_banks
+    import freetoken.moe.host_banks as host_banks
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
+
+    checkpoint = tmp_path / "default-bundle-failure"
+    writer = FTWWriter(str(checkpoint))
+    writer.add_tensor("gate_up_alpha", torch.ones(2), kind="experts_bank")
+    writer.add_tensor("gate_up", torch.ones((2, 8), dtype=torch.uint8), kind="experts_bank")
+    writer.finalize({"quant_format": "bf16", "expert_bank_num_layers": 1})
+
+    class FailingExpertBanks:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("injected ExpertBanks construction failure")
+
+    monkeypatch.setattr(host_banks, "born_pinned_default", lambda: False)
+    monkeypatch.setattr(expert_banks, "ExpertBanks", FailingExpertBanks)
+    monkeypatch.setenv("FREETOKEN_SKIP_BANK_PIN", "1")
+    before = tuple(host_banks._LIVE_BUFFERS)
+
+    with pytest.raises(RuntimeError, match="injected ExpertBanks construction failure"):
+        load_ftw_banks(str(checkpoint), num_layers=1, workers=1)
+
+    assert tuple(host_banks._LIVE_BUFFERS) == before
+
+
+def test_ftw_default_path_preserves_empty_expert_bundle_probe(tmp_path, monkeypatch):
+    import freetoken.moe.host_banks as host_banks
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
+
+    checkpoint = tmp_path / "no-expert-banks"
+    writer = FTWWriter(str(checkpoint))
+    writer.add_tensor("model.embed_tokens.weight", torch.ones(2), kind="weight")
+    writer.finalize({"quant_format": "bf16", "expert_bank_num_layers": 1})
+
+    def forbidden_allocation(*args, **kwargs):
+        raise AssertionError("empty expert-bank probe reached HostBank allocation")
+
+    monkeypatch.setattr(host_banks, "HostBank", forbidden_allocation)
+    before = tuple(host_banks._LIVE_BUFFERS)
+    assert load_ftw_banks(str(checkpoint), num_layers=1, workers=1) is None
+    assert tuple(host_banks._LIVE_BUFFERS) == before
+
+
+def test_ftw_default_path_keeps_successful_allocations_live(tmp_path, monkeypatch):
+    import freetoken.moe.host_banks as host_banks
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
+
+    checkpoint = tmp_path / "valid-default"
+    writer = FTWWriter(str(checkpoint))
+    writer.add_tensor("gate_up_alpha", torch.ones(2), kind="experts_bank")
+    writer.add_tensor("gate_up", torch.arange(16, dtype=torch.uint8).view(2, 8), kind="experts_bank")
+    writer.finalize({"quant_format": "bf16", "expert_bank_num_layers": 1})
+
+    original = host_banks.HostBank
+    allocated = []
+
+    def track_allocation(*args, **kwargs):
+        bank = original(*args, **kwargs)
+        allocated.append(bank)
+        return bank
+
+    monkeypatch.setattr(host_banks, "born_pinned_default", lambda: False)
+    monkeypatch.setattr(host_banks, "HostBank", track_allocation)
+    monkeypatch.setenv("FREETOKEN_SKIP_BANK_PIN", "1")
+    result = load_ftw_banks(str(checkpoint), num_layers=1, workers=1)
+    assert result is not None
+    assert result.sources["gate_up"][0].tolist() == [list(range(8)), list(range(8, 16))]
+    assert all(bank.tensor is not None for bank in allocated)
+
+    # The default path retains its historical tensor-owned lifetime.  Drop the
+    # returned aliases before explicit test cleanup of the tracked owners.
+    result.sources.clear()
+    object.__setattr__(result, "gate_up_alpha", None)
+    for bank in reversed(allocated):
+        bank.close()
+
+
 def test_default_policy_does_not_call_numa_backend():
     from freetoken.moe.host_banks import HostBankPolicy, alloc_layer_banks
 

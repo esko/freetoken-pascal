@@ -152,6 +152,7 @@ The backing mappings are private and exposed read-only, remain unpinned, and ret
 original artifact as their source of truth.
 
 The Issue #18 host-bank policy provides an explicit pre-load gate for FTW checkpoints.
+Independently of policy selection, the FTW loader validates the complete alpha/flat/per-layer bank identity set and rejects duplicate or mixed layouts before constructing any `HostBank`; every allocation owned by an unsuccessful load is rolled back, including the legacy no-policy path.
 Its omitted CLI/config value remains `None` and preserves legacy loader behavior, while an explicit `pageable` strategy leaves every source mapping in page-backed host memory and cannot consume the CUDA pin quota.
 The explicit `pinned` strategy registers only its selected layers after fill and rejects a page-rounded source size above `max_pinned_bytes` before FTW reads or allocation.
 The explicit `bounded-staging` strategy keeps all sources pageable and allocates a fixed `HostStagingRing` only within `max_staging_bytes`.

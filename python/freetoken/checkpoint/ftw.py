@@ -108,16 +108,19 @@ def prepare_ftw_host_bank_policy(
     policy,
     swap_probe=None,
 ):
-    """Preflight every FTW expert-bank allocation from index metadata only."""
+    """Validate every FTW expert-bank identity and allocation from index metadata.
+
+    Validation is independent of whether a host-bank policy was requested so the
+    legacy/default loader cannot allocate from an ambiguous index.  When ``policy``
+    is present, the same pass also prepares its bounded allocation plan.
+    """
     from freetoken.moe.numa_memory import NumaSampleIdentity
 
-    if policy is None:
-        return None
     if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers <= 0:
         raise ValueError(f"num_layers must be a positive integer, got {num_layers}")
     # Swap admission is intentionally before opening the index: an explicit
     # no-swap policy must not inspect checkpoint metadata before it can fail.
-    if policy.require_no_swap:
+    if policy is not None and policy.require_no_swap:
         swap_probe = policy.preflight_swap(probe=swap_probe)
     with open(os.path.join(path, INDEX_NAME), encoding="utf-8") as f:
         index = json.load(f)
@@ -131,6 +134,10 @@ def prepare_ftw_host_bank_policy(
             "match its config"
         )
     entries = [entry for entry in index.get("tensors", []) if entry.get("kind") == "experts_bank"]
+    if not entries and policy is None:
+        # Preserve the legacy probe contract: a valid FTW checkpoint without
+        # expert banks is not an expert-bank bundle.
+        return None
     if not entries:
         raise ValueError(f"{path!r} contains no experts_bank entries")
     alpha_entries = [entry for entry in entries if entry["name"] in _ALPHA_NAMES]
@@ -220,6 +227,8 @@ def prepare_ftw_host_bank_policy(
             if expected != int(entry["nbytes"]):
                 raise ValueError(f"FTW bank {base!r} layer {layer_id} byte count is invalid")
             layer_bytes[layer_id] += max(ALIGN, _align_up(expected))
+    if policy is None:
+        return None
     return policy.prepare_layer_bytes(layer_bytes, swap_probe=swap_probe)
 
 
@@ -575,13 +584,13 @@ def load_ftw_banks(
 
     if host_bank_policy is not None and layer_residency is not None:
         raise ValueError("host_bank_policy and layer_residency cannot be combined")
+    prepare_ftw_host_bank_policy(
+        path,
+        num_layers=num_layers,
+        policy=host_bank_policy,
+        swap_probe=swap_probe,
+    )
     if host_bank_policy is not None:
-        prepare_ftw_host_bank_policy(
-            path,
-            num_layers=num_layers,
-            policy=host_bank_policy,
-            swap_probe=swap_probe,
-        )
         residency = list(host_bank_policy.plan.layer_residency)
     else:
         residency = (
@@ -746,7 +755,7 @@ def load_ftw_banks(
 
     total_bytes = sum(e["nbytes"] for e in bank_entries)
     bar = byte_bar(total_bytes, "Loading expert banks (FTW)")
-    completed = False
+    reads_completed = False
 
     # Jobs are per (bank, layer) -- many small reads, so a wider pool; each bank pins
     # as its read completes, overlapping cudaHostRegister with the remaining reads.
@@ -787,19 +796,76 @@ def load_ftw_banks(
             # residency sample cannot race the loader's writes.
             for identity, bank in allocated_banks:
                 host_bank_policy.sample_numa_bank(bank, identity=identity)
-        completed = True
+        reads_completed = True
     finally:
         bar.close()
         reader.close()
-        if host_bank_policy is not None and not completed:
+        if not reads_completed:
             _rollback_allocations()
 
+    from freetoken.moe.expert_banks import ExpertBanks
+
+    sources: dict[str, list] = {}
+    alpha_kw: dict[str, torch.Tensor] = {}
     try:
-        sources: dict[str, list] = {}
+        # A failed mlock leaves a LOCKED layer pageable; the log and labels report what
+        # the banks actually settled at.
+        applied = list(residency)
+        for banks in row_hb.values():
+            for layer_id, bank in enumerate(banks):
+                if (
+                    applied[layer_id] == HostResidency.LOCKED.value
+                    and bank.residency is not HostResidency.LOCKED
+                ):
+                    applied[layer_id] = HostResidency.PAGEABLE.value
+        unpinned = [i for i, r in enumerate(applied) if r != HostResidency.PINNED.value]
+        if unpinned:
+            by_layer = [0] * num_layers
+            for banks in row_hb.values():
+                for layer_id, bank in enumerate(banks):
+                    by_layer[layer_id] += bank.nbytes
+            locked = [i for i in unpinned if applied[i] == HostResidency.LOCKED.value]
+            pageable = [i for i in unpinned if i not in set(locked)]
+            pinned_b = sum(b for i, b in enumerate(by_layer) if i not in set(unpinned))
+            locked_b = sum(by_layer[i] for i in locked)
+            pageable_part = ""
+            if pageable:
+                pageable_b = sum(by_layer[i] for i in pageable)
+                pageable_part = (
+                    f" + {pageable_b / 2**30:.2f} GiB pageable "
+                    f"(lock failed, {len(pageable)} CPU layers: {pageable})"
+                )
+            logger.info(
+                f"MoE bank split residency: {pinned_b / 2**30:.2f} GiB pinned "
+                f"({'born-pinned cudaHostAlloc' if born else 'cudaHostRegister'}, "
+                f"{num_layers - len(unpinned)} GPU layers) + "
+                f"{locked_b / 2**30:.2f} GiB OS-locked ({len(locked)} CPU layers: {locked})"
+                f"{pageable_part}"
+            )
+
+        owners = tuple(alpha_hb.values()) + tuple(
+            bank for banks in row_hb.values() for bank in banks
+        ) + (() if staging_ring is None else (staging_ring,))
+        if host_bank_policy is not None:
+            host_bank_policy.refresh_numa_accounting()
+            host_bank_policy.accounting.applied_layers = tuple(applied)
+            host_bank_policy.accounting.applied_pinned_bytes = sum(
+                bank.allocated_nbytes
+                for bank in owners
+                if getattr(bank, "residency", None) is HostResidency.PINNED
+            )
+            accounting = host_bank_policy.accounting.as_dict()
+            if host_bank_policy.strategy.value == "bounded-staging":
+                accounting["applied_staging_bytes"] = host_bank_policy.plan.staging_bytes
+        else:
+            accounting = None
+
+        # Materialize aliases only after accounting has succeeded.  On a later failure,
+        # clear every derived view before closing its mmap owner.
         for name, banks in row_hb.items():
             views = []
-            for bank, view_args in zip(banks, row_view_args[name]):
-                if view_args is None:  # per-layer entry: already shaped [num_experts, ...]
+            for bank, view_args in zip(banks, row_view_args[name], strict=True):
+                if view_args is None:
                     views.append(bank.tensor)
                     continue
                 head_pad, layer_bytes, num_experts, row_shape, dtype = view_args
@@ -807,68 +873,11 @@ def load_ftw_banks(
                 views.append(
                     raw.view(num_experts, *row_shape) if row_shape else raw.view(num_experts)
                 )
+                raw = None
             sources[name] = views
-    except BaseException:
-        if host_bank_policy is not None:
-            _rollback_allocations()
-        raise
-
-    from freetoken.moe.expert_banks import ExpertBanks
-
-    # a failed mlock leaves a LOCKED layer pageable; the log and labels report what the banks actually settled at
-    applied = list(residency)
-    for banks in row_hb.values():
-        for layer_id, bank in enumerate(banks):
-            if (applied[layer_id] == HostResidency.LOCKED.value
-                    and bank.residency is not HostResidency.LOCKED):
-                applied[layer_id] = HostResidency.PAGEABLE.value
-    unpinned = [i for i, r in enumerate(applied) if r != HostResidency.PINNED.value]
-    if unpinned:
-        by_layer = [0] * num_layers
-        for name, banks in row_hb.items():
-            for layer_id, bank in enumerate(banks):
-                by_layer[layer_id] += bank.nbytes
-        locked = [i for i in unpinned if applied[i] == HostResidency.LOCKED.value]
-        pageable = [i for i in unpinned if i not in set(locked)]
-        pinned_b = sum(b for i, b in enumerate(by_layer) if i not in set(unpinned))
-        locked_b = sum(by_layer[i] for i in locked)
-        pageable_part = ""
-        if pageable:
-            pageable_b = sum(by_layer[i] for i in pageable)
-            pageable_part = (
-                f" + {pageable_b / 2**30:.2f} GiB pageable "
-                f"(lock failed, {len(pageable)} CPU layers: {pageable})"
-            )
-        logger.info(
-            f"MoE bank split residency: {pinned_b / 2**30:.2f} GiB pinned "
-            f"({'born-pinned cudaHostAlloc' if born else 'cudaHostRegister'}, "
-            f"{num_layers - len(unpinned)} GPU layers) + "
-            f"{locked_b / 2**30:.2f} GiB OS-locked ({len(locked)} CPU layers: {locked})"
-            f"{pageable_part}"
-        )
-
-    # alphas are the small per-expert scale vectors, distinguished by their reserved names
-    # (not a separate kind); everything else under experts_bank is a weight source.
-    alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
-    owners = tuple(alpha_hb.values()) + tuple(
-        bank for banks in row_hb.values() for bank in banks
-    ) + (() if staging_ring is None else (staging_ring,))
-    if host_bank_policy is not None:
-        host_bank_policy.refresh_numa_accounting()
-        host_bank_policy.accounting.applied_layers = tuple(applied)
-        host_bank_policy.accounting.applied_pinned_bytes = sum(
-            bank.allocated_nbytes
-            for bank in owners
-            if getattr(bank, "residency", None) is HostResidency.PINNED
-        )
-        accounting = host_bank_policy.accounting.as_dict()
-        if host_bank_policy.strategy.value == "bounded-staging":
-            # The ring is allocated below the policy gate and retained with the source owners.
-            accounting["applied_staging_bytes"] = host_bank_policy.plan.staging_bytes
-    else:
-        accounting = None
-    retained_owners = owners if host_bank_policy is not None else ()
-    try:
+            views = []
+        alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
+        retained_owners = owners if host_bank_policy is not None else ()
         result = ExpertBanks(
             reader.meta("quant_format"), sources, **alpha_kw,
             layer_residency=applied,
@@ -876,10 +885,18 @@ def load_ftw_banks(
             host_bank_owners=retained_owners,
         )
     except BaseException:
-        if host_bank_policy is not None:
-            _rollback_allocations()
+        sources.clear()
+        alpha_kw.clear()
+        try:
+            views.clear()
+        except (NameError, AttributeError):
+            pass
+        try:
+            raw = None
+        except NameError:
+            pass
+        _rollback_allocations()
         raise
-    completed = True
     return result
 
 
