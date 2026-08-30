@@ -90,6 +90,16 @@ def _observation(plan, *, rank: int = 0, **overrides):
     )
 
 
+def _evaluate(plan, *, checkpoint: str, observations, profile_name: str, **kwargs):
+    return evaluate_canary(
+        plan,
+        checkpoint=checkpoint,
+        profile_name=profile_name,
+        observations=observations,
+        **kwargs,
+    )
+
+
 def test_plan_has_exact_release_categories_per_rank_and_structured_telemetry() -> None:
     plan = plan_placement((_gpu(), _gpu(capacity=600, gpu_uuid="gpu-1")), safety_reserve_bytes=50)
 
@@ -224,9 +234,10 @@ def test_canary_accepts_bounded_category_drift_and_reports_checkpoint() -> None:
     plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
     observed = _observation(plan, categories={"qsa_transient_score": 12})
 
-    result = evaluate_canary(
+    result = _evaluate(
         plan,
         checkpoint="post-first-large-prefill",
+        profile_name="full-cache",
         observations=(observed,),
         tolerance_bytes=2,
     )
@@ -241,9 +252,10 @@ def test_canary_accepts_bounded_category_drift_and_reports_checkpoint() -> None:
 
 def test_two_gpu_canary_allows_mixed_child_statuses_on_aggregate_failure() -> None:
     plan = plan_placement((_gpu(), _gpu(capacity=600, gpu_uuid="gpu-1")), safety_reserve_bytes=50)
-    result = evaluate_canary(
+    result = _evaluate(
         plan,
         checkpoint="post-first-large-prefill",
+        profile_name="full-cache",
         observations=(_observation(plan), _observation(plan, rank=1, fallback=True)),
     )
 
@@ -267,9 +279,10 @@ def test_two_gpu_canary_allows_mixed_child_statuses_on_aggregate_failure() -> No
 )
 def test_canary_rejects_unsafe_observation_flags(kwargs, reason: str) -> None:
     plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
-    result = evaluate_canary(
+    result = _evaluate(
         plan,
         checkpoint="post-load",
+        profile_name="full-cache",
         observations=(_observation(plan, **kwargs),),
         tolerance_bytes=2,
     )
@@ -298,7 +311,7 @@ def test_canary_rejects_allocator_inconsistency_missing_categories_and_low_reser
         )
 
     low = _observation(plan, driver_free_bytes=49)
-    result = evaluate_canary(plan, checkpoint="post-load", observations=(low,))
+    result = _evaluate(plan, checkpoint="post-load", profile_name="full-cache", observations=(low,))
     assert result.status == "fail"
     assert any("reserve" in item for item in result.reasons)
 
@@ -306,9 +319,10 @@ def test_canary_rejects_allocator_inconsistency_missing_categories_and_low_reser
 def test_canary_bounds_tolerance_and_requires_exact_driver_allocator_consistency() -> None:
     plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
     with pytest.raises(PlacementPlannerError, match=r"tolerance.*reserve"):
-        evaluate_canary(
+        _evaluate(
             plan,
             checkpoint="post-load",
+            profile_name="full-cache",
             observations=(_observation(plan),),
             tolerance_bytes=51,
         )
@@ -319,9 +333,16 @@ def test_canary_bounds_tolerance_and_requires_exact_driver_allocator_consistency
 
 def test_canary_telemetry_and_result_schema_fail_closed() -> None:
     plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
-    result = evaluate_canary(
+    with pytest.raises(TypeError):
+        evaluate_canary(
+            plan,
+            checkpoint="post-load",
+            observations=(_observation(plan),),
+        )
+    result = _evaluate(
         plan,
         checkpoint="post-load",
+        profile_name="full-cache",
         observations=(_observation(plan),),
     )
     telemetry = result.gpus[0]
@@ -336,17 +357,29 @@ def test_canary_telemetry_and_result_schema_fail_closed() -> None:
         replace(telemetry, status="pass", reasons=("unexpected",))
 
     with pytest.raises(PlacementPlannerError, match="exactly 1 or 2"):
-        CanaryResult("post-load", "pass", ())
+        CanaryResult("post-load", "full-cache", "pass", ())
+    with pytest.raises(PlacementPlannerError, match="profile_name"):
+        CanaryResult("post-load", "", "pass", (telemetry,))
     with pytest.raises(PlacementPlannerError, match="status"):
-        CanaryResult("post-load", "pass", (replace(telemetry, status="fail", reasons=("bad",)),))
+        CanaryResult(
+            "post-load",
+            "full-cache",
+            "pass",
+            (replace(telemetry, status="fail", reasons=("bad",)),),
+        )
     with pytest.raises(PlacementPlannerError, match="exactly 1 or 2"):
-        CanaryResult("post-load", "fail", (telemetry, telemetry, telemetry))
+        CanaryResult("post-load", "full-cache", "fail", (telemetry, telemetry, telemetry))
 
 
 def test_canary_requires_exact_checkpoint_and_rejects_unavailable_high_water() -> None:
     plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
     with pytest.raises(PlacementPlannerError, match="unknown checkpoint"):
-        evaluate_canary(plan, checkpoint="unknown", observations=(_observation(plan),))
+        _evaluate(
+            plan,
+            checkpoint="unknown",
+            profile_name="full-cache",
+            observations=(_observation(plan),),
+        )
 
     with pytest.raises(PlacementPlannerError, match="driver_total_bytes"):
         PlacementObservation(
@@ -361,16 +394,19 @@ def test_canary_requires_exact_checkpoint_and_rejects_unavailable_high_water() -
         )
 
     high = _observation(plan, allocator_high_water_bytes=331)
-    result = evaluate_canary(plan, checkpoint="post-load", observations=(high,))
+    result = _evaluate(
+        plan, checkpoint="post-load", profile_name="full-cache", observations=(high,)
+    )
     assert result.status == "fail"
     assert any("high-water" in item for item in result.reasons)
 
 
 def test_canary_telemetry_rejects_forged_pass_and_invalid_allocator_counters() -> None:
     plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
-    telemetry = evaluate_canary(
+    telemetry = _evaluate(
         plan,
         checkpoint="post-load",
+        profile_name="full-cache",
         observations=(_observation(plan),),
     ).gpus[0]
 
@@ -422,9 +458,10 @@ def test_canary_distinguishes_live_allocation_from_qsa_transient_peak() -> None:
 
     passing = _observation(plan, allocator_allocated_bytes=live, allocator_high_water_bytes=peak)
     assert (
-        evaluate_canary(
+        _evaluate(
             plan,
             checkpoint="post-first-large-prefill",
+            profile_name="full-cache",
             observations=(passing,),
         ).status
         == "pass"
@@ -436,26 +473,29 @@ def test_canary_distinguishes_live_allocation_from_qsa_transient_peak() -> None:
         allocator_high_water_bytes=peak,
     )
     assert (
-        evaluate_canary(
+        _evaluate(
             plan,
             checkpoint="post-first-large-prefill",
+            profile_name="full-cache",
             observations=(under_materialized,),
         ).status
         == "fail"
     )
     assert any(
         "live" in reason
-        for reason in evaluate_canary(
+        for reason in _evaluate(
             plan,
             checkpoint="post-first-large-prefill",
+            profile_name="full-cache",
             observations=(under_materialized,),
         ).reasons
     )
 
     conflated = _observation(plan, allocator_allocated_bytes=peak, allocator_high_water_bytes=peak)
-    result = evaluate_canary(
+    result = _evaluate(
         plan,
         checkpoint="post-first-large-prefill",
+        profile_name="full-cache",
         observations=(conflated,),
         tolerance_bytes=0,
     )
@@ -471,9 +511,10 @@ def test_synthetic_observation_factory_keeps_resident_and_peak_distinct() -> Non
     assert observation.allocator_reserved_bytes == plan.gpus[0].peak_required_bytes
     assert observation.allocator_high_water_bytes == plan.gpus[0].peak_required_bytes
     assert (
-        evaluate_canary(
+        _evaluate(
             plan,
             checkpoint="post-load",
+            profile_name="full-cache",
             observations=(observation,),
         ).status
         == "pass"
@@ -490,9 +531,10 @@ def test_backoff_starts_pending_and_becomes_safe_only_after_a_pass() -> None:
     assert machine.status == "pending"
     assert not machine.ready
 
-    failed = evaluate_canary(
+    failed = _evaluate(
         plan,
         checkpoint="post-load",
+        profile_name="full-cache",
         observations=(_observation(plan, fallback=True),),
     )
     decision = machine.observe(failed)
@@ -500,9 +542,10 @@ def test_backoff_starts_pending_and_becomes_safe_only_after_a_pass() -> None:
     assert machine.status == "pending"
     assert not machine.ready
 
-    passed_load = evaluate_canary(
+    passed_load = _evaluate(
         plan,
         checkpoint="post-load",
+        profile_name="cache-zero",
         observations=(_observation(plan),),
     )
     decision = machine.observe(passed_load)
@@ -510,9 +553,10 @@ def test_backoff_starts_pending_and_becomes_safe_only_after_a_pass() -> None:
     assert machine.status == "pending"
     assert not machine.ready
 
-    passed_large = evaluate_canary(
+    passed_large = _evaluate(
         plan,
         checkpoint="post-first-large-prefill",
+        profile_name="cache-zero",
         observations=(_observation(plan),),
     )
     decision = machine.observe(passed_large)
@@ -521,9 +565,10 @@ def test_backoff_starts_pending_and_becomes_safe_only_after_a_pass() -> None:
     assert machine.ready
     assert machine.passed_checkpoints == ("post-load", "post-first-large-prefill")
 
-    failed_later = evaluate_canary(
+    failed_later = _evaluate(
         plan,
         checkpoint="post-first-large-prefill",
+        profile_name="cache-zero",
         observations=(_observation(plan, fallback=True),),
     )
     decision = machine.observe(failed_later)
@@ -559,14 +604,16 @@ def test_backoff_resets_checkpoint_evidence_when_profile_changes() -> None:
             BackoffProfile("safe", cache_slots=0, context_tokens=1024, batch_size=1),
         )
     )
-    post_load = evaluate_canary(
+    post_load = _evaluate(
         plan,
         checkpoint="post-load",
+        profile_name="full",
         observations=(_observation(plan),),
     )
-    large_fail = evaluate_canary(
+    large_fail = _evaluate(
         plan,
         checkpoint="post-first-large-prefill",
+        profile_name="full",
         observations=(_observation(plan, fallback=True),),
     )
     assert machine.observe(post_load).status == "pending"
@@ -574,17 +621,51 @@ def test_backoff_resets_checkpoint_evidence_when_profile_changes() -> None:
     assert machine.observe(large_fail).status == "backoff"
     assert machine.passed_checkpoints == ()
 
-    assert machine.observe(post_load).status == "pending"
+    with pytest.raises(PlacementPlannerError, match="profile"):
+        machine.observe(post_load)
+    new_post_load = _evaluate(
+        plan,
+        checkpoint="post-load",
+        profile_name="safe",
+        observations=(_observation(plan),),
+    )
+    assert machine.observe(new_post_load).status == "pending"
     assert (
         machine.observe(
-            evaluate_canary(
+            _evaluate(
                 plan,
                 checkpoint="post-first-large-prefill",
+                profile_name="safe",
                 observations=(_observation(plan),),
             )
         ).status
         == "safe"
     )
+
+
+def test_backoff_does_not_credit_large_prefill_before_post_load() -> None:
+    plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
+    machine = plan.backoff(
+        (BackoffProfile("full-cache", cache_slots=1, context_tokens=1024, batch_size=1),)
+    )
+    large = _evaluate(
+        plan,
+        checkpoint="post-first-large-prefill",
+        profile_name="full-cache",
+        observations=(_observation(plan),),
+    )
+    assert machine.observe(large).status == "pending"
+    assert machine.passed_checkpoints == ()
+
+    post_load = _evaluate(
+        plan,
+        checkpoint="post-load",
+        profile_name="full-cache",
+        observations=(_observation(plan),),
+    )
+    assert machine.observe(post_load).status == "pending"
+    assert machine.passed_checkpoints == ("post-load",)
+    assert machine.observe(large).status == "safe"
 
 
 def test_backoff_profiles_are_ordered_and_never_oscillate() -> None:
@@ -595,16 +676,17 @@ def test_backoff_profiles_are_ordered_and_never_oscillate() -> None:
         BackoffProfile("cache-zero", cache_slots=0, context_tokens=2048, batch_size=1),
     )
     machine = plan.backoff(profiles)
-    failed = evaluate_canary(
+    failed = _evaluate(
         plan,
         checkpoint="post-load",
+        profile_name="full-cache",
         observations=(_observation(plan, fallback=True),),
     )
 
     first = machine.observe(failed)
-    second = machine.observe(failed)
-    third = machine.observe(failed)
-    fourth = machine.observe(failed)
+    second = machine.observe(replace(failed, profile_name="small-cache"))
+    third = machine.observe(replace(failed, profile_name="cache-zero"))
+    fourth = machine.observe(replace(failed, profile_name="cache-zero"))
 
     assert (first.profile.name, second.profile.name, third.profile.name) == (
         "small-cache",

@@ -787,6 +787,7 @@ class CanaryResult:
     """Deterministic aggregate result for one named startup/high-water checkpoint."""
 
     checkpoint: str
+    profile_name: str
     status: str
     gpus: tuple[GPUCanaryTelemetry, ...]
     reasons: tuple[str, ...] = ()
@@ -797,6 +798,8 @@ class CanaryResult:
             raise PlacementInputError(
                 f"unknown checkpoint {self.checkpoint!r}; expected one of {PLACEMENT_CHECKPOINTS}"
             )
+        if not isinstance(self.profile_name, str) or not self.profile_name.strip():
+            raise PlacementInputError("profile_name must be a non-empty backoff profile identity")
         if not isinstance(self.status, str) or self.status not in {"pass", "fail"}:
             raise PlacementInputError(f"unknown canary status {self.status!r}")
         tolerance = _int(self.tolerance_bytes, "tolerance_bytes")
@@ -824,6 +827,7 @@ class CanaryResult:
         if (self.status == "pass") != (not reasons):
             raise PlacementInputError("canary result status must agree with reasons")
         object.__setattr__(self, "gpus", gpus)
+        object.__setattr__(self, "profile_name", self.profile_name.strip())
         object.__setattr__(self, "reasons", reasons)
         object.__setattr__(self, "tolerance_bytes", tolerance)
 
@@ -831,6 +835,7 @@ class CanaryResult:
         return {
             "schema_version": PLACEMENT_SCHEMA_VERSION,
             "checkpoint": self.checkpoint,
+            "profile_name": self.profile_name,
             "status": self.status,
             "tolerance_bytes": self.tolerance_bytes,
             "gpus": [item.as_dict() for item in self.gpus],
@@ -844,6 +849,7 @@ def evaluate_canary(
     plan: PlacementPlan,
     *,
     checkpoint: str,
+    profile_name: str,
     observations: Iterable[PlacementObservation],
     tolerance_bytes: int = 0,
 ) -> CanaryResult:
@@ -990,7 +996,9 @@ def evaluate_canary(
         telemetry.append(item)
         all_reasons.extend(f"gpu{expected.rank}:{reason}" for reason in reasons)
     status = "pass" if not all_reasons else "fail"
-    return CanaryResult(checkpoint, status, tuple(telemetry), tuple(all_reasons), tolerance)
+    return CanaryResult(
+        checkpoint, profile_name, status, tuple(telemetry), tuple(all_reasons), tolerance
+    )
 
 
 run_startup_canary = evaluate_canary
@@ -1137,8 +1145,24 @@ class BackoffStateMachine:
         """
         if not isinstance(result, CanaryResult):
             raise PlacementInputError("result must be a CanaryResult")
+        if result.profile_name != self.profile.name:
+            raise PlacementInputError(
+                f"canary profile {result.profile_name!r} does not match "
+                f"active backoff profile {self.profile.name!r}"
+            )
         if result.status == "pass" and self._status != "fail-readiness":
-            self._passed_checkpoints = frozenset((*self._passed_checkpoints, result.checkpoint))
+            if (
+                result.checkpoint == "post-first-large-prefill"
+                and "post-load" not in self._passed_checkpoints
+            ):
+                return BackoffDecision(
+                    "pending",
+                    self.profile,
+                    self._index,
+                    "awaiting-post-load",
+                )
+            if result.checkpoint in _READINESS_CHECKPOINTS:
+                self._passed_checkpoints = frozenset((*self._passed_checkpoints, result.checkpoint))
             if _READINESS_CHECKPOINTS.issubset(self._passed_checkpoints):
                 self._status = "safe"
                 return BackoffDecision("safe", self.profile, self._index, "canary-pass")
