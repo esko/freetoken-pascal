@@ -225,11 +225,16 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         weight = self._conv_weight().unsqueeze(1)
         starts = fla.cu_seqlens.detach().cpu().tolist()
         slots = fla.cache_indices.detach().cpu().tolist()
+        has_initial_state = (
+            None if fla.has_initial_state is None else fla.has_initial_state.detach().cpu().tolist()
+        )
         result = torch.empty_like(conv_in)
         for index, slot in enumerate(slots):
             start, end = int(starts[index]), int(starts[index + 1])
             sequence = conv_in[start:end].transpose(0, 1)
             previous = pool.conv_states[li, int(slot)]
+            if has_initial_state is not None and not bool(has_initial_state[index]):
+                previous = torch.zeros_like(previous)
             context = torch.cat((previous, sequence), dim=-1).unsqueeze(0)
             mixed = F.conv1d(context, weight, groups=self.conv_dim).squeeze(0).transpose(0, 1)
             result[start:end] = F.silu(mixed)
@@ -282,6 +287,8 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         if repeat > 1:
             q = q.repeat_interleave(repeat, dim=2)
             k = k.repeat_interleave(repeat, dim=2)
+        # HF/FLA apply the head-key-dimension scale after q/k normalization.
+        q = q * (self.head_k_dim**-0.5)
 
         starts = fla.cu_seqlens.detach().cpu().tolist()
         slots = fla.cache_indices.detach().cpu().tolist()
