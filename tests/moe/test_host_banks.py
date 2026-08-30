@@ -473,6 +473,37 @@ def test_enforced_numa_policy_applies_to_policy_owned_mmap_banks():
     banks["x"][0].close()
 
 
+def test_host_bank_accounting_exposes_cross_node_residency():
+    from freetoken.moe.host_banks import HostBankPolicy, alloc_layer_banks
+
+    class Backend:
+        def mbind(self, *args):
+            return None
+
+        def move_pages(self, addresses):
+            return tuple(0 if index == 0 else 1 for index, _ in enumerate(addresses))
+
+    policy = HostBankPolicy(
+        strategy="pageable",
+        numa_policy="preferred",
+        numa_node=0,
+        enforce_numa_placement=True,
+        sample_numa_residency=True,
+        numa_sample_max_pages=2,
+        numa_backend=Backend(),
+        numa_reader=_numa_reader,
+    )
+    banks = alloc_layer_banks({"x": ((8192,), torch.uint8)}, 1, policy=policy)
+    policy.sample_numa_bank(banks["x"][0])
+    report = policy.accounting.as_dict()
+    assert report["numa_sample_target_pages"] == 1
+    assert report["numa_sample_off_target_pages"] == 1
+    assert report["numa_sample_off_target_counts"] == {"1": 1}
+    assert report["numa_sample_target_fraction"] == 0.5
+    assert report["numa_sample_placement_match"] is False
+    banks["x"][0].close()
+
+
 def test_default_policy_does_not_call_numa_backend():
     from freetoken.moe.host_banks import HostBankPolicy, alloc_layer_banks
 

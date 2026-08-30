@@ -436,6 +436,41 @@ class NumaPlacementController:
         )
         return self.sample_result
 
+    def _sample_telemetry(self, sample: NumaSample) -> dict[str, object]:
+        """Classify one residency sample against the requested node set.
+
+        Raw node counts remain available, while the derived counters make
+        cross-node residency explicit.  Unknown pages never count as either
+        target or off-target and prevent a positive placement verdict.
+        """
+        payload = sample.as_dict()
+        target_nodes = set(self.plan.target_nodes)
+        target_pages = sum(count for node, count in sample.counts if node in target_nodes)
+        off_target = tuple(
+            (node, count) for node, count in sample.counts if node not in target_nodes
+        )
+        off_target_pages = sum(count for _, count in off_target)
+        known_pages = target_pages + off_target_pages
+        target_fraction = target_pages / known_pages if known_pages else None
+        if off_target_pages:
+            placement_match: bool | None = False
+        elif known_pages and sample.unknown == 0 and sample.status == "verified":
+            placement_match = True
+        else:
+            placement_match = None
+        payload.update(
+            {
+                "target_nodes": self.plan.target_nodes,
+                "target_pages": target_pages,
+                "off_target_pages": off_target_pages,
+                "off_target_counts": {str(node): count for node, count in off_target},
+                "known_pages": known_pages,
+                "target_fraction": target_fraction,
+                "placement_match": placement_match,
+            }
+        )
+        return payload
+
     def telemetry(self) -> dict[str, object]:
         return {
             "status": self.status,
@@ -450,8 +485,8 @@ class NumaPlacementController:
             "applied_mappings": self.applied_mappings,
             "errors": tuple(self.errors),
             "fallback_reason": self.fallback_reason,
-            "sample": self.sample_result.as_dict(),
-            "sample_banks": tuple(sample.as_dict() for sample in self.sample_history),
+            "sample": self._sample_telemetry(self.sample_result),
+            "sample_banks": tuple(self._sample_telemetry(sample) for sample in self.sample_history),
         }
 
 

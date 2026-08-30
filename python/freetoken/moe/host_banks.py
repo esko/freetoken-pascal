@@ -179,6 +179,11 @@ class HostBankAccounting:
     numa_sample_counts: tuple[tuple[int, int], ...] = ()
     numa_sample_unknown: int = 0
     numa_sampled_pages: int = 0
+    numa_sample_target_pages: int = 0
+    numa_sample_off_target_pages: int = 0
+    numa_sample_off_target_counts: tuple[tuple[int, int], ...] = ()
+    numa_sample_target_fraction: float | None = None
+    numa_sample_placement_match: bool | None = None
     numa_sample_errors: tuple[str, ...] = ()
     numa_sample_banks: tuple[dict[str, object], ...] = ()
     numa_sample_error: str | None = None
@@ -227,6 +232,13 @@ class HostBankAccounting:
             "numa_sample_unknown": self.numa_sample_unknown,
             "numa_sampled_pages": self.numa_sampled_pages,
             "numa_sampled_total": self.numa_sampled_pages,
+            "numa_sample_target_pages": self.numa_sample_target_pages,
+            "numa_sample_off_target_pages": self.numa_sample_off_target_pages,
+            "numa_sample_off_target_counts": {
+                str(node): count for node, count in self.numa_sample_off_target_counts
+            },
+            "numa_sample_target_fraction": self.numa_sample_target_fraction,
+            "numa_sample_placement_match": self.numa_sample_placement_match,
             "numa_sample_errors": list(self.numa_sample_errors),
             "numa_sample_banks": list(self.numa_sample_banks),
             "numa_sample_error": self.numa_sample_error,
@@ -381,6 +393,11 @@ class HostBankPolicy:
             self.accounting.numa_sample_counts = ()
             self.accounting.numa_sample_unknown = 0
             self.accounting.numa_sampled_pages = 0
+            self.accounting.numa_sample_target_pages = 0
+            self.accounting.numa_sample_off_target_pages = 0
+            self.accounting.numa_sample_off_target_counts = ()
+            self.accounting.numa_sample_target_fraction = None
+            self.accounting.numa_sample_placement_match = None
             self.accounting.numa_sample_errors = ()
             self.accounting.numa_sample_banks = ()
             self.accounting.numa_sample_error = None
@@ -400,6 +417,15 @@ class HostBankPolicy:
         )
         self.accounting.numa_sample_unknown = int(sample["unknown"])
         self.accounting.numa_sampled_pages = int(sample["sampled_pages"])
+        self.accounting.numa_sample_target_pages = int(sample["target_pages"])
+        self.accounting.numa_sample_off_target_pages = int(sample["off_target_pages"])
+        self.accounting.numa_sample_off_target_counts = tuple(
+            (int(node), int(count)) for node, count in sample["off_target_counts"].items()
+        )
+        fraction = sample["target_fraction"]
+        self.accounting.numa_sample_target_fraction = None if fraction is None else float(fraction)
+        match = sample["placement_match"]
+        self.accounting.numa_sample_placement_match = None if match is None else bool(match)
         self.accounting.numa_sample_errors = tuple(sample["errors"])
         self.accounting.numa_sample_banks = tuple(telemetry["sample_banks"])
         self.accounting.numa_sample_error = sample["error"]
