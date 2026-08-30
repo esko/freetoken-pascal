@@ -94,6 +94,17 @@ eager-only plan rather than being reported as capture-safe.
 Negative, zero-invalid, incomplete-category, shape-inconsistent, and checked 64-bit arithmetic inputs fail closed with a controlled `ValueError` subtype.
 This H0 contract makes no kernel, throughput, or Tesla P4 claim and does not change QSA selection, token budget, or dispatch defaults.
 
+The Torch-free `freetoken.engine.placement_plan` module is the H0 owner for the per-GPU placement schema and startup-canary decision contract.
+It keys each rank by stable GPU UUID plus rank and keeps dense/resident weights, shared experts, GDN/KV recurrent state, every persistent and transient QSA phase category, CUDA context, generic workspaces, transfer buffers, static and dynamic cache slots, and safety reserve explicit.
+Placement inputs require explicit non-placeholder UUIDs, reject duplicate cards, and permit zero observed free bytes while requiring positive physical capacity.
+QSA state is represented only by the explicit `qsa_persistent_state` and `qsa_transient_state` categories; it is not folded into the GDN/KV recurrent-state bucket.
+Its required high-water is non-QSA demand plus QSA persistent bytes plus QSA transient high-water bytes plus reserve, so lifetime phases are not double-counted.
+The planner and canary evaluator are immutable, versioned, allocation-free accounting only; they do not claim runtime placement or hardware qualification.
+Canary observations compare allocator allocated bytes with the live non-QSA plus persistent-QSA demand and allocator high-water with the live plus transient-QSA peak, while keeping driver total/free and allocator reserved bytes separate.
+They reject unavailable or inconsistent samples before readiness.
+Each child telemetry record carries the aggregate tolerance and a passing record independently enforces category, live-allocation, and peak high-water agreement within that bound.
+The bounded backoff remains pending until both profile-bound post-load and post-first-large-prefill results pass in order; a failure resets checkpoint evidence before advancing, stale-profile results are rejected, and readiness is never inferred from a boolean.
+
 The exact ordinary-tensor placement is measured. The architecture requires the routed expert bank to remain complete in DDR4 even when a subset is cached in VRAM.
 The PLE file or shard set has a separate ownership and accounting boundary so model-weight mappings cannot be accidentally paged, prefetched, or pinned with it.
 
