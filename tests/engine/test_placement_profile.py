@@ -103,22 +103,39 @@ def _identity(*, topology: tuple[GPUProfileTopology, ...] | None = None, **overr
             "context_tokens": 1024,
             "batch_size": 1,
             "prefill_chunk_tokens": 512,
+            "microbatch_size": 1,
         },
         "state_geometry": {
-            "cache_slots": 0,
-            "gdn_slots": 1,
+            "num_request_slots": 1,
+            "kv_page_size": 16,
             "kv_pages": 4,
+            "gdn_state_bytes": 1024,
+            "kv_state_bytes": 2048,
+            "expert_cache_slots": 0,
         },
         "qsa_geometry": {
             "context_tokens": 1024,
             "token_rows": 512,
-            "page_table_token_slots": 1024,
+            "page_table_width": 1024,
             "page_size": 16,
-            "index_ratio": 4,
+            "index_heads": 4,
+            "query_heads": 8,
+            "kv_heads": 4,
+            "head_dim": 64,
             "index_head_dim": 32,
+            "top_k": 8,
+            "compression_ratio": 4,
             "num_index_layers": 2,
             "num_req_slots": 1,
-            "dtype": "bf16",
+            "ring_capacity": 4,
+            "num_pages": 4,
+            "max_position": 1024,
+            "rotary_dim": 16,
+            "batch_size": 1,
+            "capture_max_batch_size": 1,
+            "phase": "eager",
+            "topk_backend": "triton",
+            "dtype_bytes": 2,
         },
         "topology": topology,
     }
@@ -145,7 +162,18 @@ def _profile(*, two_gpus: bool = False):
         identity = replace(
             identity,
             context_geometry={**identity.context_geometry, "batch_size": 2},
-            qsa_geometry={**identity.qsa_geometry, "token_rows": 1024},
+            state_geometry={
+                **identity.state_geometry,
+                "num_request_slots": 2,
+                "expert_cache_slots": 0,
+            },
+            qsa_geometry={
+                **identity.qsa_geometry,
+                "token_rows": 1024,
+                "batch_size": 2,
+                "num_req_slots": 2,
+                "capture_max_batch_size": 2,
+            },
         )
     backoff = BackoffProfile("cache-zero", cache_slots=0, context_tokens=1024, batch_size=1)
     if two_gpus:
@@ -191,7 +219,13 @@ def test_identity_mutation_changes_digest_and_reports_field(field: str) -> None:
     original = _profile()
     value = getattr(original.identity, field)
     if isinstance(value, dict) or hasattr(value, "items"):
-        changed = {**value, "mutation": 1}
+        changed = dict(value)
+        mutation_key = {
+            "context_geometry": "prefill_chunk_tokens",
+            "state_geometry": "gdn_state_bytes",
+            "qsa_geometry": "token_rows",
+        }[field]
+        changed[mutation_key] += 1
     elif field.endswith("sha256"):
         changed = "f" * 64
     elif field == "runtime_commit":
@@ -231,7 +265,7 @@ def test_plan_and_backoff_mutations_change_digest_and_report_paths() -> None:
     changed_backoff = replace(original.backoff_profile, cache_slots=1)
     changed_identity = replace(
         original.identity,
-        state_geometry={**original.identity.state_geometry, "cache_slots": 1},
+        state_geometry={**original.identity.state_geometry, "expert_cache_slots": 1},
     )
     changed_backoff_profile = replace(
         original, identity=changed_identity, backoff_profile=changed_backoff
@@ -351,6 +385,62 @@ def test_geometry_and_topology_require_explicit_non_placeholder_values() -> None
             pci_bus_id="0000:01:00.0",
             numa_node=0,
             peer_ownership=(1 << 63,),
+        )
+
+
+def test_geometry_cannot_omit_required_fields_or_use_unknown_fields() -> None:
+    identity = _identity()
+    with pytest.raises(PlacementPlannerError, match="context_geometry"):
+        replace(identity, context_geometry={"tag": "x"})
+    with pytest.raises(PlacementPlannerError, match="state_geometry"):
+        replace(identity, state_geometry={"tag": "x"})
+    with pytest.raises(PlacementPlannerError, match="qsa_geometry"):
+        replace(identity, qsa_geometry={"tag": "x"})
+
+
+def test_qsa_geometry_is_reconstructed_and_validated() -> None:
+    identity = _identity()
+    with pytest.raises(PlacementPlannerError, match="phase"):
+        replace(
+            identity,
+            qsa_geometry={
+                **identity.qsa_geometry,
+                "phase": "capture",
+                "topk_backend": "torch",
+            },
+        )
+    with pytest.raises(PlacementPlannerError, match="compression_ratio"):
+        replace(identity, qsa_geometry={**identity.qsa_geometry, "compression_ratio": 3})
+
+
+def test_geometry_cross_fields_must_match_plan_and_backoff() -> None:
+    identity = _identity()
+    with pytest.raises(PlacementPlannerError, match="context geometry"):
+        PlacementProfile(
+            replace(
+                identity,
+                context_geometry={**identity.context_geometry, "context_tokens": 2048},
+            ),
+            _plan(),
+            BackoffProfile("cache-zero", cache_slots=0, context_tokens=1024, batch_size=1),
+        )
+    with pytest.raises(PlacementPlannerError, match="state geometry"):
+        PlacementProfile(
+            replace(
+                identity,
+                state_geometry={**identity.state_geometry, "expert_cache_slots": 1},
+            ),
+            _plan(),
+            BackoffProfile("cache-zero", cache_slots=0, context_tokens=1024, batch_size=1),
+        )
+    with pytest.raises(PlacementPlannerError, match="request-slot"):
+        PlacementProfile(
+            replace(
+                identity,
+                state_geometry={**identity.state_geometry, "num_request_slots": 2},
+            ),
+            _plan(),
+            BackoffProfile("cache-zero", cache_slots=0, context_tokens=1024, batch_size=1),
         )
 
 

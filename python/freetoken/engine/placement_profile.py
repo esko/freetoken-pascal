@@ -8,11 +8,14 @@ does not inspect CUDA, load a profile at runtime, or select a serving configurat
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import operator
 import re
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -31,6 +34,45 @@ PLACEMENT_PROFILE_IDENTITY_SCHEMA_NAME = "freetoken-placement-profile-identity"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _PLACEHOLDERS = frozenset({"", "na", "n/a", "none", "null", "placeholder", "unknown"})
+_CONTEXT_GEOMETRY_FIELDS = frozenset(
+    {"context_tokens", "batch_size", "prefill_chunk_tokens", "microbatch_size"}
+)
+_STATE_GEOMETRY_FIELDS = frozenset(
+    {
+        "num_request_slots",
+        "kv_page_size",
+        "kv_pages",
+        "gdn_state_bytes",
+        "kv_state_bytes",
+        "expert_cache_slots",
+    }
+)
+_QSA_GEOMETRY_FIELDS = frozenset(
+    {
+        "context_tokens",
+        "token_rows",
+        "page_table_width",
+        "page_size",
+        "index_heads",
+        "query_heads",
+        "kv_heads",
+        "head_dim",
+        "index_head_dim",
+        "top_k",
+        "compression_ratio",
+        "num_index_layers",
+        "num_req_slots",
+        "ring_capacity",
+        "num_pages",
+        "max_position",
+        "rotary_dim",
+        "batch_size",
+        "capture_max_batch_size",
+        "phase",
+        "topk_backend",
+        "dtype_bytes",
+    }
+)
 
 
 def _integer(value: Any, name: str, *, positive: bool = False) -> int:
@@ -116,17 +158,21 @@ def _geometry(value: Any, name: str, required: tuple[str, ...]) -> Mapping[str, 
     return normalized
 
 
+def _exact_geometry(value: Any, name: str, fields: frozenset[str]) -> Mapping[str, Any]:
+    normalized = _geometry(value, name, ())
+    actual = set(normalized)
+    if actual != fields:
+        raise PlacementInputError(
+            f"{name} fields disagree: missing={sorted(fields - actual)}, "
+            f"unknown={sorted(actual - fields)}"
+        )
+    return normalized
+
+
 def _geometry_integer(value: Mapping[str, Any], key: str, name: str, *, positive: bool) -> int:
     if key not in value:
         raise PlacementInputError(f"{name} missing required field {key!r}")
     return _integer(value[key], f"{name}.{key}", positive=positive)
-
-
-def _optional_geometry_integer(
-    value: Mapping[str, Any], key: str, name: str, *, positive: bool
-) -> None:
-    if key in value:
-        _geometry_integer(value, key, name, positive=positive)
 
 
 def _plain(value: Any) -> Any:
@@ -183,6 +229,26 @@ def canonical_json_bytes(document: Any) -> bytes:
 
 def _digest(document: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(document)).hexdigest()
+
+
+def _qsa_workspace_inputs_type() -> type:
+    """Load the torch-free QSA input class without importing runtime attention registries."""
+    try:
+        from freetoken.attention.qsa_workspace import QSAWorkspaceInputs
+
+        return QSAWorkspaceInputs
+    except ModuleNotFoundError:
+        # ``freetoken.attention.__init__`` imports optional serving dependencies.  The H0
+        # accounting module itself is standalone, so load that source directly when a hosted
+        # minimal environment intentionally omits those optional packages.
+        source = Path(__file__).resolve().parents[1] / "attention" / "qsa_workspace.py"
+        spec = importlib.util.spec_from_file_location("freetoken._h0_qsa_workspace", source)
+        if spec is None or spec.loader is None:
+            raise PlacementInputError("cannot load torch-free QSA workspace schema") from None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module.QSAWorkspaceInputs
 
 
 def _exact_fields(value: Any, expected: frozenset[str], name: str) -> Mapping[str, Any]:
@@ -296,26 +362,42 @@ class PlacementProfileIdentity:
             "cuda_toolchain_identity": _text(
                 self.cuda_toolchain_identity, "cuda_toolchain_identity"
             ),
-            "context_geometry": _geometry(
-                self.context_geometry,
-                "context_geometry",
-                (),
+            "context_geometry": _exact_geometry(
+                self.context_geometry, "context_geometry", _CONTEXT_GEOMETRY_FIELDS
             ),
-            "state_geometry": _geometry(self.state_geometry, "state_geometry", ()),
-            "qsa_geometry": _geometry(self.qsa_geometry, "qsa_geometry", ()),
+            "state_geometry": _exact_geometry(
+                self.state_geometry, "state_geometry", _STATE_GEOMETRY_FIELDS
+            ),
+            "qsa_geometry": _exact_geometry(
+                self.qsa_geometry, "qsa_geometry", _QSA_GEOMETRY_FIELDS
+            ),
         }
-        _optional_geometry_integer(
-            values["context_geometry"], "context_tokens", "context_geometry", positive=True
-        )
-        _optional_geometry_integer(
-            values["context_geometry"], "batch_size", "context_geometry", positive=True
-        )
-        _optional_geometry_integer(
-            values["state_geometry"], "cache_slots", "state_geometry", positive=False
-        )
-        _optional_geometry_integer(
-            values["qsa_geometry"], "context_tokens", "qsa_geometry", positive=True
-        )
+        for key in _CONTEXT_GEOMETRY_FIELDS:
+            _geometry_integer(values["context_geometry"], key, "context_geometry", positive=True)
+        for key in ("num_request_slots", "kv_page_size", "kv_pages"):
+            _geometry_integer(values["state_geometry"], key, "state_geometry", positive=True)
+        for key in ("gdn_state_bytes", "kv_state_bytes", "expert_cache_slots"):
+            _geometry_integer(values["state_geometry"], key, "state_geometry", positive=False)
+        qsa = values["qsa_geometry"]
+        for key in _QSA_GEOMETRY_FIELDS - {"phase", "topk_backend"}:
+            _geometry_integer(qsa, key, "qsa_geometry", positive=True)
+        _text(qsa["phase"], "qsa_geometry.phase")
+        _text(qsa["topk_backend"], "qsa_geometry.topk_backend")
+        try:
+            _qsa_workspace_inputs_type()(**dict(qsa))
+        except PlacementInputError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise PlacementInputError(f"invalid QSA geometry: {exc}") from exc
+        if (
+            values["context_geometry"]["prefill_chunk_tokens"]
+            > values["context_geometry"]["context_tokens"]
+        ):
+            raise PlacementInputError(
+                "context_geometry prefill_chunk_tokens exceeds context_tokens"
+            )
+        if values["context_geometry"]["microbatch_size"] > values["context_geometry"]["batch_size"]:
+            raise PlacementInputError("context_geometry microbatch_size exceeds batch_size")
         try:
             topology = tuple(self.topology)
         except TypeError as exc:
@@ -577,16 +659,25 @@ class PlacementProfile:
         context = self.identity.context_geometry
         state = self.identity.state_geometry
         qsa = self.identity.qsa_geometry
-        for geometry_name, geometry in (("context", context), ("state", state), ("QSA", qsa)):
-            for key, expected in (
-                ("context_tokens", self.backoff_profile.context_tokens),
-                ("batch_size", self.backoff_profile.batch_size),
-                ("cache_slots", self.backoff_profile.cache_slots),
-            ):
-                if key in geometry and geometry[key] != expected:
-                    raise PlacementInputError(
-                        f"profile {geometry_name} geometry does not match backoff {key}"
-                    )
+        if context["context_tokens"] != self.backoff_profile.context_tokens:
+            raise PlacementInputError(
+                "profile context geometry does not match backoff context_tokens"
+            )
+        if context["batch_size"] != self.backoff_profile.batch_size:
+            raise PlacementInputError("profile context geometry does not match backoff batch_size")
+        if qsa["context_tokens"] != self.backoff_profile.context_tokens:
+            raise PlacementInputError("profile QSA geometry does not match backoff context_tokens")
+        if qsa["batch_size"] != self.backoff_profile.batch_size:
+            raise PlacementInputError("profile QSA geometry does not match backoff batch_size")
+        if state["expert_cache_slots"] != self.backoff_profile.cache_slots:
+            raise PlacementInputError("profile state geometry does not match backoff cache_slots")
+        for state_key, qsa_key, label in (
+            ("num_request_slots", "num_req_slots", "request-slot"),
+            ("kv_page_size", "page_size", "page-size"),
+            ("kv_pages", "num_pages", "page-count"),
+        ):
+            if state[state_key] != qsa[qsa_key]:
+                raise PlacementInputError(f"profile state/QSA {label} geometry does not match")
 
     @property
     def profile_name(self) -> str:
