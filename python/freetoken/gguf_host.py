@@ -404,9 +404,7 @@ def _validate_expected_file_sha256(
         if verify_file_sha256:
             actual = _sha256_file(path)
             if actual != expected_file_sha256:
-                raise ValueError(
-                    f"{path}: sha256 {actual} does not match {expected_file_sha256}"
-                )
+                raise ValueError(f"{path}: sha256 {actual} does not match {expected_file_sha256}")
     elif verify_file_sha256:
         raise ValueError("verify_file_sha256 requires expected_file_sha256")
 
@@ -421,8 +419,7 @@ def _open_validated_pread_fd(path: str | Path, *, offset: int, length: int) -> i
         file_size = os.fstat(fd).st_size
         if offset > file_size or length > file_size - offset:
             raise ValueError(
-                f"PLE positional range [{offset}, {offset + length}) exceeds "
-                f"file size {file_size}"
+                f"PLE positional range [{offset}, {offset + length}) exceeds file size {file_size}"
             )
     except BaseException:
         os.close(fd)
