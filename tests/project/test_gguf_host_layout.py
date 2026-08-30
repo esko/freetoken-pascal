@@ -4,8 +4,11 @@ import base64
 import hashlib
 import json
 import mmap
+import os
 import subprocess
 import sys
+import threading
+from concurrent.futures import CancelledError
 from pathlib import Path
 
 import gguf
@@ -305,6 +308,200 @@ def test_dedicated_pread_empty_and_invalid_batches_do_no_io(
         with pytest.raises(IndexError):
             table.lookup_batch(np.array([table.descriptor.rows]))
         assert table.telemetry()["batch_calls"] == 0
+
+
+def test_ple_prefetch_deduplicates_ids_and_only_reports_warming(tmp_path: Path) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(artifact, prefetch_max_rows=4) as table:
+        handle = table.prefetch(np.array([31, 0, 31, 16]))
+
+        assert handle.row_ids == (0, 16, 31)
+        with pytest.raises(TypeError):
+            handle.row_ids[0] = 99  # type: ignore[index]
+        with pytest.raises(AttributeError):
+            handle.row_ids = (99,)  # type: ignore[misc]
+        assert handle.result() is None
+
+        telemetry = table.telemetry()
+        assert telemetry["prefetch_active"] is False
+        assert telemetry["prefetch_submitted"] == 1
+        assert telemetry["prefetch_completed"] == 1
+        assert telemetry["prefetch_cancelled"] == 0
+        assert telemetry["prefetch_failed"] == 0
+        assert telemetry["prefetch_requested_rows"] == 4
+        assert telemetry["prefetch_unique_rows"] == 3
+        assert telemetry["prefetch_warmed_rows"] == 3
+
+
+def test_ple_prefetch_is_bounded_and_rejects_a_second_active_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(
+        artifact, backend="pread", prefetch_max_rows=2
+    ) as table:
+        with pytest.raises(ValueError, match=r"prefetch.*2 rows"):
+            table.prefetch(np.array([0, 1, 2]))
+        assert table.telemetry()["prefetch_submitted"] == 0
+
+        real_pread = os.pread
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_pread(fd: int, size: int, offset: int) -> bytes:
+            started.set()
+            release.wait(timeout=2)
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", blocked_pread)
+        handle = table.prefetch(np.array([0, 1]))
+        assert started.wait(timeout=2)
+        assert table.telemetry()["prefetch_active"] is True
+        with pytest.raises(RuntimeError, match="prefetch already active"):
+            table.prefetch(np.array([2]))
+        release.set()
+        handle.result()
+
+
+def test_ple_prefetch_cancellation_stops_between_mmap_chunks(tmp_path: Path) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(
+        artifact, prefetch_max_rows=4, prefetch_chunk_rows=1
+    ) as table:
+        copied_rows = np.array(table.mapping.rows, copy=True)
+        started = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        class BlockingRows:
+            def __getitem__(self, index):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    started.set()
+                    release.wait(timeout=2)
+                return copied_rows[index]
+
+        table.mapping.rows = BlockingRows()
+        handle = table.prefetch(np.array([0, 1, 2]))
+        assert started.wait(timeout=2)
+        assert handle.cancel() is True
+        release.set()
+        with pytest.raises(CancelledError):
+            handle.wait()
+        assert calls == 1
+        telemetry = table.telemetry()
+        assert telemetry["prefetch_cancelled"] == 1
+        assert telemetry["prefetch_warmed_rows"] == 1
+
+
+def test_ple_prefetch_close_cancels_and_joins_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    table = MappedPLETable.open_from_artifact(artifact, backend="pread")
+    real_pread = os.pread
+    started = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+
+    def blocked_pread(fd: int, size: int, offset: int) -> bytes:
+        started.set()
+        release.wait(timeout=2)
+        return real_pread(fd, size, offset)
+
+    monkeypatch.setattr("freetoken.gguf_host.os.pread", blocked_pread)
+    handle = table.prefetch(np.array([0, 1]))
+    assert started.wait(timeout=2)
+
+    def close_table() -> None:
+        table.close()
+        closed.set()
+
+    closer = threading.Thread(target=close_table)
+    closer.start()
+    assert not closed.wait(timeout=0.05)
+    release.set()
+    closer.join(timeout=2)
+    assert closed.is_set()
+    with pytest.raises(CancelledError):
+        handle.result()
+    with pytest.raises(RuntimeError, match="closed"):
+        table.prefetch(np.array([], dtype=np.int64))
+
+
+def test_ple_prefetch_cancellation_stops_between_pread_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        real_pread = os.pread
+        started = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def blocked_first_pread(fd: int, size: int, offset: int) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                release.wait(timeout=2)
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", blocked_first_pread)
+        handle = table.prefetch(np.array([0, 1, 2]))
+        assert started.wait(timeout=2)
+        assert handle.cancel() is True
+        release.set()
+        with pytest.raises(CancelledError):
+            handle.wait()
+        assert calls == 1
+        telemetry = table.telemetry()
+        assert telemetry["prefetch_cancelled"] == 1
+        assert telemetry["prefetch_warmed_rows"] == 1
+
+
+def test_ple_prefetch_failure_is_visible_and_does_not_poison_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        real_pread = os.pread
+        failed = True
+
+        def fail_once(fd: int, size: int, offset: int) -> bytes:
+            nonlocal failed
+            if failed:
+                failed = False
+                raise OSError("injected PLE prefetch failure")
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", fail_once)
+        handle = table.prefetch(np.array([0, 1]))
+        with pytest.raises(OSError, match="injected PLE prefetch failure"):
+            handle.result()
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", real_pread)
+
+        assert table.lookup(np.array([0])).shape == (1, 160)
+        telemetry = table.telemetry()
+        assert telemetry["prefetch_failed"] == 1
+        assert telemetry["prefetch_active"] is False
+        assert telemetry["lookup_rows"] == 1
+
+
+def test_ple_prefetch_empty_request_is_immediately_complete(tmp_path: Path) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(artifact, prefetch_max_rows=0) as table:
+        handle = table.prefetch(np.array([], dtype=np.int64))
+        assert handle.done() is True
+        assert handle.wait() is None
+        telemetry = table.telemetry()
+        assert telemetry["prefetch_active"] is False
+        assert telemetry["prefetch_submitted"] == 1
+        assert telemetry["prefetch_completed"] == 1
+        assert telemetry["prefetch_requested_rows"] == 0
+        assert telemetry["prefetch_unique_rows"] == 0
+        assert telemetry["prefetch_warmed_rows"] == 0
 
 
 def test_dedicated_loader_ignores_provenance_source_path(tmp_path: Path) -> None:

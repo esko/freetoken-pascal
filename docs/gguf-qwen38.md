@@ -87,6 +87,8 @@ Dedicated artifacts support explicit `mmap` and positional-read backends through
 reads, and restore caller order; positional short reads fail rather than zero-fill.
 The dedicated loader requests random-access advice (`MADV_RANDOM` or
 `POSIX_FADV_RANDOM`) where supported and reports the selected advice, success, and error.
+`MappedPLETable.prefetch` is an explicit, warming-only H0 operation with a configurable hard row bound and one active request per table.
+Its handle must be waited or cancelled, and its telemetry is separate from synchronous lookup counters.
 
 Inspect a complete local artifact without touching its tensor payload pages:
 

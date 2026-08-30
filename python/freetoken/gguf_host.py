@@ -19,6 +19,7 @@ import shutil
 import tempfile
 import threading
 from collections.abc import Collection
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -727,6 +728,60 @@ def dequantize_iq4_nl(packed: np.ndarray) -> np.ndarray:
     return values.reshape(*original, blocks_per_row * 32)
 
 
+class _PrefetchCancelled(CancelledError):
+    def __init__(self, warmed_rows: int) -> None:
+        super().__init__("PLE prefetch cancelled")
+        self.warmed_rows = warmed_rows
+
+
+class _PrefetchReadError(ValueError):
+    def __init__(self, message: str, warmed_rows: int) -> None:
+        super().__init__(message)
+        self.warmed_rows = warmed_rows
+
+
+class PLEPrefetchHandle:
+    """Lifecycle handle for one bounded, warming-only PLE prefetch."""
+
+    def __init__(
+        self,
+        row_ids: tuple[int, ...],
+        requested_rows: int,
+        future: Future[int],
+        cancel_event: threading.Event,
+    ) -> None:
+        self._row_ids = row_ids
+        self.requested_rows = requested_rows
+        self.unique_rows = len(row_ids)
+        self._future = future
+        self._cancel_event = cancel_event
+
+    @property
+    def row_ids(self) -> tuple[int, ...]:
+        return self._row_ids
+
+    def done(self) -> bool:
+        return self._future.done()
+
+    def cancel(self) -> bool:
+        """Request cancellation and report whether the request was still pending."""
+        if self._future.done():
+            return False
+        self._cancel_event.set()
+        self._future.cancel()
+        return True
+
+    def result(self, timeout: float | None = None) -> None:
+        """Wait for completion without exposing any prefetched row data."""
+        self._future.result(timeout=timeout)
+        if self._cancel_event.is_set():
+            raise CancelledError("PLE prefetch cancelled")
+
+    def wait(self, timeout: float | None = None) -> None:
+        """Alias for :meth:`result` for explicit lifecycle-oriented callers."""
+        self.result(timeout=timeout)
+
+
 class MappedPLETable:
     _MODES = frozenset(
         {"cold", "page-cache-warm", "targeted", "full-model-warm", "full-ple-warm"}
@@ -738,11 +793,34 @@ class MappedPLETable:
         mapping: MappedFileRange | None,
         *,
         model_shard_paths: tuple[str, ...],
+        prefetch_max_rows: int = 4096,
+        prefetch_chunk_rows: int = 64,
     ) -> None:
+        if isinstance(prefetch_max_rows, bool) or not isinstance(prefetch_max_rows, int):
+            raise TypeError("prefetch_max_rows must be an integer")
+        if prefetch_max_rows < 0:
+            raise ValueError("prefetch_max_rows must be non-negative")
+        if isinstance(prefetch_chunk_rows, bool) or not isinstance(prefetch_chunk_rows, int):
+            raise TypeError("prefetch_chunk_rows must be an integer")
+        if prefetch_chunk_rows <= 0:
+            raise ValueError("prefetch_chunk_rows must be positive")
         self.descriptor = descriptor
         self.mapping = mapping
         self._closed = False
+        self._closing = False
         self._model_shard_paths = model_shard_paths
+        self._prefetch_max_rows = prefetch_max_rows
+        self._prefetch_chunk_rows = prefetch_chunk_rows
+        self._prefetch_lock = threading.RLock()
+        self._prefetch_executor: ThreadPoolExecutor | None = None
+        self._prefetch_active: PLEPrefetchHandle | None = None
+        self._prefetch_submitted = 0
+        self._prefetch_completed = 0
+        self._prefetch_cancelled = 0
+        self._prefetch_failed = 0
+        self._prefetch_requested_rows = 0
+        self._prefetch_unique_rows = 0
+        self._prefetch_warmed_rows = 0
         self.mode = "cold"
         self._lookup_calls = 0
         self._lookup_rows = 0
@@ -787,6 +865,8 @@ class MappedPLETable:
         expected_file_sha256: str | None = None,
         verify_file_sha256: bool = False,
         warm_mode: str = "cold",
+        prefetch_max_rows: int = 4096,
+        prefetch_chunk_rows: int = 64,
     ) -> MappedPLETable:
         layout = inspect_qwen_host_layout(path)
         descriptor = layout.ple
@@ -803,6 +883,8 @@ class MappedPLETable:
             descriptor,
             mapping,
             model_shard_paths=layout.shard_paths,
+            prefetch_max_rows=prefetch_max_rows,
+            prefetch_chunk_rows=prefetch_chunk_rows,
         )
         try:
             table._apply_random_advice()
@@ -816,7 +898,13 @@ class MappedPLETable:
 
     @classmethod
     def open_from_artifact(
-        cls, path: str | Path, *, warm_mode: str = "cold", backend: str = "mmap"
+        cls,
+        path: str | Path,
+        *,
+        warm_mode: str = "cold",
+        backend: str = "mmap",
+        prefetch_max_rows: int = 4096,
+        prefetch_chunk_rows: int = 64,
     ) -> MappedPLETable:
         if backend not in {"mmap", "pread"}:
             raise ValueError(f"unknown PLE backend {backend!r}")
@@ -873,7 +961,13 @@ class MappedPLETable:
                 str(payload), offset=0, length=tensor_bytes, rows=rows, row_bytes=row_bytes,
                 expected_file_sha256=manifest["sha256"], verify_file_sha256=True,
             )
-        table = cls(descriptor, mapping, model_shard_paths=(str(payload),))
+        table = cls(
+            descriptor,
+            mapping,
+            model_shard_paths=(str(payload),),
+            prefetch_max_rows=prefetch_max_rows,
+            prefetch_chunk_rows=prefetch_chunk_rows,
+        )
         table.source_kind = "dedicated-artifact"
         try:
             table.backend = backend
@@ -887,6 +981,117 @@ class MappedPLETable:
             table.close()
             raise
         return table
+
+    def _prefetch_rows(
+        self,
+        row_ids: tuple[int, ...],
+        cancel_event: threading.Event,
+    ) -> int:
+        warmed = 0
+        if self.mapping is not None:
+            for start in range(0, len(row_ids), self._prefetch_chunk_rows):
+                if cancel_event.is_set():
+                    raise _PrefetchCancelled(warmed)
+                stop = min(start + self._prefetch_chunk_rows, len(row_ids))
+                chunk = np.fromiter(row_ids[start:stop], dtype=np.int64)
+                # Touch the mapped rows to warm the page cache, but never expose
+                # the packed bytes through the prefetch handle.
+                _ = int(self.mapping.rows[chunk, 0].sum(dtype=np.uint64))
+                warmed += stop - start
+        else:
+            fd = self._pread_fd
+            if fd is None:
+                raise RuntimeError("PLE prefetch table is closed")
+            for row in row_ids:
+                if cancel_event.is_set():
+                    raise _PrefetchCancelled(warmed)
+                chunk = os.pread(
+                    fd,
+                    self.descriptor.row_bytes,
+                    self.descriptor.data_offset + row * self.descriptor.row_bytes,
+                )
+                if len(chunk) != self.descriptor.row_bytes:
+                    with self._prefetch_lock:
+                        self._short_reads += 1
+                    raise _PrefetchReadError("short PLE positional prefetch read", warmed)
+                warmed += 1
+        if cancel_event.is_set():
+            raise _PrefetchCancelled(warmed)
+        return warmed
+
+    def _finish_prefetch(self, handle: PLEPrefetchHandle, future: Future[int]) -> None:
+        warmed = 0
+        status = "completed"
+        if future.cancelled():
+            status = "cancelled"
+        else:
+            error = future.exception()
+            if isinstance(error, _PrefetchCancelled):
+                status = "cancelled"
+                warmed = error.warmed_rows
+            elif isinstance(error, _PrefetchReadError):
+                status = "failed"
+                warmed = error.warmed_rows
+            elif error is not None:
+                status = "failed"
+            else:
+                warmed = int(future.result())
+                if handle._cancel_event.is_set():
+                    status = "cancelled"
+        with self._prefetch_lock:
+            if self._prefetch_active is handle:
+                self._prefetch_active = None
+            self._prefetch_warmed_rows += warmed
+            if status == "completed":
+                self._prefetch_completed += 1
+            elif status == "cancelled":
+                self._prefetch_cancelled += 1
+            else:
+                self._prefetch_failed += 1
+
+    def prefetch(self, ids: np.ndarray) -> PLEPrefetchHandle:
+        """Warm a bounded set of PLE rows asynchronously.
+
+        The returned handle owns the request lifecycle and never exposes packed
+        row data.  At most one request may be active for a table.
+        """
+        values = np.asarray(ids)
+        flat = self._validate_ids(values)
+        unique = np.unique(flat)
+        row_ids = tuple(int(row) for row in unique)
+        requested_rows = int(flat.size)
+        with self._prefetch_lock:
+            if self._closed or self._closing:
+                raise RuntimeError("PLE prefetch table is closed")
+            active = self._prefetch_active
+            if active is not None and not active.done():
+                raise RuntimeError("PLE prefetch already active")
+            if len(row_ids) > self._prefetch_max_rows:
+                raise ValueError(
+                    f"PLE prefetch request has {len(row_ids)} unique rows, "
+                    f"exceeds hard bound of {self._prefetch_max_rows} rows"
+                )
+            self._prefetch_submitted += 1
+            self._prefetch_requested_rows += requested_rows
+            self._prefetch_unique_rows += len(row_ids)
+            cancel_event = threading.Event()
+            if row_ids:
+                if self._prefetch_executor is None:
+                    self._prefetch_executor = ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix="ple-prefetch",
+                    )
+                future = self._prefetch_executor.submit(self._prefetch_rows, row_ids, cancel_event)
+            else:
+                future = Future()
+            handle = PLEPrefetchHandle(row_ids, requested_rows, future, cancel_event)
+            self._prefetch_active = handle
+            future.add_done_callback(
+                lambda completed: self._finish_prefetch(handle, completed)
+            )
+            if not row_ids:
+                future.set_result(0)
+            return handle
 
     def set_warm_mode(self, mode: str) -> None:
         if mode not in self._MODES:
@@ -930,10 +1135,13 @@ class MappedPLETable:
         elif unique.size:
             for row in unique:
                 if len(os.pread(self._pread_fd, 1, int(row) * self.descriptor.row_bytes)) != 1:
-                    self._short_reads += 1
+                    with self._prefetch_lock:
+                        self._short_reads += 1
                     raise ValueError("short PLE positional warm read")
-                self._targeted_positional_warm_reads += 1
-        self._targeted_warm_rows += int(unique.size)
+                with self._prefetch_lock:
+                    self._targeted_positional_warm_reads += 1
+        with self._prefetch_lock:
+            self._targeted_warm_rows += int(unique.size)
 
     def lookup(self, ids: np.ndarray) -> np.ndarray:
         return self.lookup_batch(ids)
@@ -957,7 +1165,8 @@ class MappedPLETable:
                     int(row) * self.descriptor.row_bytes,
                 )
                 if len(chunk) != self.descriptor.row_bytes:
-                    self._short_reads += 1
+                    with self._prefetch_lock:
+                        self._short_reads += 1
                     raise ValueError("short PLE positional read")
                 chunks.append(np.frombuffer(chunk, dtype=np.uint8))
             packed_unique = np.asarray(chunks, dtype=np.uint8).reshape(
@@ -974,58 +1183,83 @@ class MappedPLETable:
         )
         after_usage = resource.getrusage(resource.RUSAGE_SELF)
         after_storage = _proc_read_bytes()
-        self._lookup_calls += 1
-        self._lookup_rows += int(flat.size)
-        self._packed_bytes_read += int(flat.size) * self.descriptor.row_bytes
-        self._output_bytes += int(result.nbytes)
-        self._batch_calls += 1
-        self._batch_requested_rows += int(flat.size)
-        self._batch_unique_rows += int(unique.size)
-        if self.backend == "pread":
-            self._batch_positional_reads += int(unique.size)
-        self._batch_duplicate_rows += int(flat.size - unique.size)
-        self._batch_sorted_rows += int(unique.size)
-        self._batch_bytes_read += int(unique.size) * self.descriptor.row_bytes
-        self._minor_faults += max(0, int(after_usage.ru_minflt - before_usage.ru_minflt))
-        self._major_faults += max(0, int(after_usage.ru_majflt - before_usage.ru_majflt))
-        if before_storage is not None and after_storage is not None:
-            self._storage_read_bytes += max(0, after_storage - before_storage)
+        with self._prefetch_lock:
+            self._lookup_calls += 1
+            self._lookup_rows += int(flat.size)
+            self._packed_bytes_read += int(flat.size) * self.descriptor.row_bytes
+            self._output_bytes += int(result.nbytes)
+            self._batch_calls += 1
+            self._batch_requested_rows += int(flat.size)
+            self._batch_unique_rows += int(unique.size)
+            if self.backend == "pread":
+                self._batch_positional_reads += int(unique.size)
+            self._batch_duplicate_rows += int(flat.size - unique.size)
+            self._batch_sorted_rows += int(unique.size)
+            self._batch_bytes_read += int(unique.size) * self.descriptor.row_bytes
+            self._minor_faults += max(0, int(after_usage.ru_minflt - before_usage.ru_minflt))
+            self._major_faults += max(0, int(after_usage.ru_majflt - before_usage.ru_majflt))
+            if before_storage is not None and after_storage is not None:
+                self._storage_read_bytes += max(0, after_storage - before_storage)
         return result
 
-    def telemetry(self) -> dict[str, int | str | None]:
-        resident_pages = None if self.mapping is None else self.mapping.resident_pages()
-        return {
-            "mode": self.mode,
-            "mapped_bytes": 0 if self.mapping is None else self.mapping.length,
-            "resident_pages": resident_pages,
-            "resident_bytes": (None if resident_pages is None else resident_pages * mmap.PAGESIZE),
-            "lookup_calls": self._lookup_calls,
-            "lookup_rows": self._lookup_rows,
-            "packed_bytes_read": self._packed_bytes_read,
-            "output_bytes": self._output_bytes,
-            "minor_faults": self._minor_faults,
-            "major_faults": self._major_faults,
-            "storage_read_bytes": self._storage_read_bytes,
-            "targeted_warm_rows": self._targeted_warm_rows,
-            "full_model_warm_bytes": self._full_model_warm_bytes,
-            "backend": self.backend,
-            "batch_calls": self._batch_calls,
-            "batch_requested_rows": self._batch_requested_rows,
-            "batch_unique_rows": self._batch_unique_rows,
-            "batch_positional_reads": self._batch_positional_reads,
-            "batch_duplicate_rows": self._batch_duplicate_rows,
-            "batch_sorted_rows": self._batch_sorted_rows,
-            "batch_bytes_read": self._batch_bytes_read,
-            "short_reads": self._short_reads,
-            "targeted_positional_warm_reads": self._targeted_positional_warm_reads,
-            "advice": self._advice,
-            "advice_applied": self._advice_applied,
-            "advice_error": self._advice_error,
-        }
+    def telemetry(self) -> dict[str, int | str | bool | None]:
+        with self._prefetch_lock:
+            resident_pages = None if self.mapping is None else self.mapping.resident_pages()
+            active = self._prefetch_active is not None and not self._prefetch_active.done()
+            return {
+                "mode": self.mode,
+                "mapped_bytes": 0 if self.mapping is None else self.mapping.length,
+                "resident_pages": resident_pages,
+                "resident_bytes": (
+                    None if resident_pages is None else resident_pages * mmap.PAGESIZE
+                ),
+                "lookup_calls": self._lookup_calls,
+                "lookup_rows": self._lookup_rows,
+                "packed_bytes_read": self._packed_bytes_read,
+                "output_bytes": self._output_bytes,
+                "minor_faults": self._minor_faults,
+                "major_faults": self._major_faults,
+                "storage_read_bytes": self._storage_read_bytes,
+                "targeted_warm_rows": self._targeted_warm_rows,
+                "full_model_warm_bytes": self._full_model_warm_bytes,
+                "backend": self.backend,
+                "batch_calls": self._batch_calls,
+                "batch_requested_rows": self._batch_requested_rows,
+                "batch_unique_rows": self._batch_unique_rows,
+                "batch_positional_reads": self._batch_positional_reads,
+                "batch_duplicate_rows": self._batch_duplicate_rows,
+                "batch_sorted_rows": self._batch_sorted_rows,
+                "batch_bytes_read": self._batch_bytes_read,
+                "short_reads": self._short_reads,
+                "targeted_positional_warm_reads": self._targeted_positional_warm_reads,
+                "advice": self._advice,
+                "advice_applied": self._advice_applied,
+                "advice_error": self._advice_error,
+                "prefetch_active": active,
+                "prefetch_submitted": self._prefetch_submitted,
+                "prefetch_completed": self._prefetch_completed,
+                "prefetch_cancelled": self._prefetch_cancelled,
+                "prefetch_failed": self._prefetch_failed,
+                "prefetch_requested_rows": self._prefetch_requested_rows,
+                "prefetch_unique_rows": self._prefetch_unique_rows,
+                "prefetch_warmed_rows": self._prefetch_warmed_rows,
+            }
 
     def close(self) -> None:
-        if self._closed:
-            return
+        with self._prefetch_lock:
+            if self._closed:
+                return
+            if self._closing:
+                raise RuntimeError("PLE table close is already in progress")
+            self._closing = True
+            active = self._prefetch_active
+            executor = self._prefetch_executor
+            if active is not None and not active.done():
+                active.cancel()
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+            with self._prefetch_lock:
+                self._prefetch_executor = None
         failure: BaseException | None = None
         if self.mapping is not None:
             try:
@@ -1038,7 +1272,10 @@ class MappedPLETable:
             except BaseException as error:
                 failure = failure or error
             self._pread_fd = None
-        self._closed = True
+        with self._prefetch_lock:
+            if failure is None:
+                self._closed = True
+            self._closing = False
         if failure is not None:
             raise failure
 
@@ -1138,6 +1375,8 @@ def open_qwen_host_weights(
     *,
     supported_expert_types: Collection[int] | None = None,
     ple_warm_mode: str = "cold",
+    ple_prefetch_max_rows: int = 4096,
+    ple_prefetch_chunk_rows: int = 64,
 ) -> QwenGGUFHostWeights:
     layout = inspect_qwen_host_layout(
         path,
@@ -1156,6 +1395,8 @@ def open_qwen_host_weights(
             layout.ple,
             ple_mapping,
             model_shard_paths=layout.shard_paths,
+            prefetch_max_rows=ple_prefetch_max_rows,
+            prefetch_chunk_rows=ple_prefetch_chunk_rows,
         )
         ple._apply_random_advice()
         ple.set_warm_mode(ple_warm_mode)
@@ -1170,6 +1411,7 @@ __all__ = [
     "ExpertSlotPool",
     "GGUFExpertLayout",
     "MappedPLETable",
+    "PLEPrefetchHandle",
     "QwenGGUFHostWeights",
     "QwenHostLayout",
     "dequantize_iq4_nl",
