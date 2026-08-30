@@ -42,9 +42,7 @@ def _write_block_device(
     target = target_base / "block" / name
     target.mkdir(parents=True)
     (target / "dev").write_text(f"{major}:{minor}\n", encoding="ascii")
-    (target / "stat").write_text(
-        f"8 2 {sectors_read} 4 5 6 7 8 9 10 11\n", encoding="ascii"
-    )
+    (target / "stat").write_text(f"8 2 {sectors_read} 4 5 6 7 8 9 10 11\n", encoding="ascii")
     queue = target / "queue"
     queue.mkdir()
     (queue / "logical_block_size").write_text(f"{logical_block_size}\n", encoding="ascii")
@@ -238,6 +236,96 @@ def test_probe_identity_distinguishes_same_named_devices(tmp_path: Path) -> None
     assert first.device_identity == "8:1/sda"
     assert second.device_identity == "8:2/sda"
     assert first.device_identity != second.device_identity
+
+
+def test_probe_rejects_mapping_swap_during_terminal_sample(tmp_path: Path) -> None:
+    payload = tmp_path / "ple.bin"
+    payload.write_bytes(b"payload")
+    sysfs = tmp_path / "sys"
+    target = _write_block_device(sysfs, major=8, minor=1)
+    replacement = sysfs / "devices" / "pci2" / "block" / "sdb"
+    replacement.mkdir(parents=True)
+    (replacement / "dev").write_text("8:1\n", encoding="ascii")
+    (replacement / "stat").write_text("8 2 99 4\n", encoding="ascii")
+    link = sysfs / "dev" / "block" / "8:1"
+
+    swapped = False
+
+    def read_text(path: str | os.PathLike[str]) -> str:
+        nonlocal swapped
+        value = Path(path).read_text(encoding="ascii")
+        if Path(path).name == "stat" and not swapped:
+            replacement_link = link.with_name("8:1.new")
+            replacement_link.symlink_to(replacement)
+            os.replace(replacement_link, link)
+            swapped = True
+        return value
+
+    probe = LinuxPLEBlockCounterProbe(
+        payload,
+        sysfs_root=sysfs,
+        counter_source=lambda: _base(),
+        stat_fn=lambda path: _payload_stat(Path(path), major=8, minor=1),
+        read_text_fn=read_text,
+    )
+    with pytest.raises(PLEBlockProbeError, match="mapping"):
+        probe.sample()
+    assert target.exists()
+
+
+def test_probe_rejects_terminal_dev_swap_during_stat_read(tmp_path: Path) -> None:
+    payload = tmp_path / "ple.bin"
+    payload.write_bytes(b"payload")
+    sysfs = tmp_path / "sys"
+    target = _write_block_device(sysfs, major=8, minor=1)
+    swapped = False
+
+    def read_text(path: str | os.PathLike[str]) -> str:
+        nonlocal swapped
+        value = Path(path).read_text(encoding="ascii")
+        if Path(path).name == "stat" and not swapped:
+            (target / "dev").write_text("8:2\n", encoding="ascii")
+            swapped = True
+        return value
+
+    probe = LinuxPLEBlockCounterProbe(
+        payload,
+        sysfs_root=sysfs,
+        counter_source=lambda: _base(),
+        stat_fn=lambda path: _payload_stat(Path(path), major=8, minor=1),
+        read_text_fn=read_text,
+    )
+    with pytest.raises(PLEBlockProbeError, match="changed"):
+        probe.sample()
+
+
+def test_probe_rejects_terminal_stat_swap_during_read(tmp_path: Path) -> None:
+    payload = tmp_path / "ple.bin"
+    payload.write_bytes(b"payload")
+    sysfs = tmp_path / "sys"
+    target = _write_block_device(sysfs, major=8, minor=1)
+    stat_path = target / "stat"
+    swapped = False
+
+    def read_text(path: str | os.PathLike[str]) -> str:
+        nonlocal swapped
+        value = Path(path).read_text(encoding="ascii")
+        if Path(path).name == "stat" and not swapped:
+            replacement = stat_path.with_name("stat.new")
+            replacement.write_text("8 2 101 4\n", encoding="ascii")
+            os.replace(replacement, stat_path)
+            swapped = True
+        return value
+
+    probe = LinuxPLEBlockCounterProbe(
+        payload,
+        sysfs_root=sysfs,
+        counter_source=lambda: _base(),
+        stat_fn=lambda path: _payload_stat(Path(path), major=8, minor=1),
+        read_text_fn=read_text,
+    )
+    with pytest.raises(PLEBlockProbeError, match="replaced"):
+        probe.sample()
 
 
 def test_probe_rejects_cycle_and_missing_mapping(tmp_path: Path) -> None:
