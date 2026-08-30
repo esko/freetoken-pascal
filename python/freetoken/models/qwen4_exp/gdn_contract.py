@@ -194,11 +194,7 @@ def resolve_gdn_dispatch(
             and candidate != package_candidate
         ):
             raise ValueError("triton_candidate_available conflicts with package_availability")
-        if (
-            pascal is not None
-            and package_pascal is not None
-            and pascal != package_pascal
-        ):
+        if pascal is not None and package_pascal is not None and pascal != package_pascal:
             raise ValueError("pascal_fp32_available conflicts with package_availability")
         fla = package_fla if fla is None else fla
         candidate = package_candidate if candidate is None else candidate

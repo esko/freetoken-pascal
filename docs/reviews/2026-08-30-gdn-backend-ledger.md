@@ -52,6 +52,12 @@ already transformed by sigmoid and does not include donor graph or convolution f
 `gdn_pascal` adapter validates these invariants before JIT loading. The source is in the CUDA
 manifest so standalone nvcc census must inspect its `sm_61` device image.
 
+The arithmetic is intentionally not byte-for-byte donor behavior. FreeToken normalizes Q and K,
+applies the Q head-dimension scale, consumes beta after sigmoid, omits the donor's decay and state
+clamps, preserves `[K,V]` state storage, and uses one FreeToken-owned block per request/value head.
+These divergences match the permanent reference contract and require real-P4 output/state A/B
+evidence before the adapter can be registered with model dispatch.
+
 No donor Triton or graph-fusion code is imported by this slice. The candidate remains disabled from
 `auto`, and forcing it without an affirmative availability probe fails closed. The FLA kernel's
 recurrent state is indexed as [V,K] while the current pool contract is [K,V]; equal head

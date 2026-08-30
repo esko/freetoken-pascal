@@ -102,10 +102,10 @@ def validate_pascal_gdn_inputs(
 
     for name in ("q", "k", "v", "g", "beta", "state_pool"):
         _require_float32(name, tensors[name])
+    if output is not None:
+        _require_float32("output", output)
     if slot_indices.dtype != torch.int32:
-        raise PascalGdnContractError(
-            f"slot_indices must be int32, got {slot_indices.dtype}"
-        )
+        raise PascalGdnContractError(f"slot_indices must be int32, got {slot_indices.dtype}")
     if cu_seqlens.dtype != torch.int32:
         raise PascalGdnContractError(f"cu_seqlens must be int32, got {cu_seqlens.dtype}")
     for name, value in tensors.items():
@@ -121,6 +121,8 @@ def validate_pascal_gdn_inputs(
         raise PascalGdnContractError("slot_indices and cu_seqlens must be rank-1 tensors")
 
     num_tokens, num_k_heads, head_dim = (int(part) for part in q.shape)
+    if num_tokens <= 0:
+        raise PascalGdnContractError("Pascal GDN requires at least one token")
     if head_dim not in PASCAL_GDN_HEAD_DIMS:
         raise PascalGdnContractError(
             f"Pascal GDN head dimension must be one of {PASCAL_GDN_HEAD_DIMS}, got {head_dim}"
@@ -166,8 +168,10 @@ def validate_pascal_gdn_inputs(
     if len(set(slots)) != len(slots):
         raise PascalGdnContractError("slot_indices must be unique per launch")
     offsets = _cpu_int_values("cu_seqlens", cu_seqlens)
-    if offsets[0] != 0 or offsets[-1] != num_tokens or any(
-        left > right for left, right in pairwise(offsets)
+    if (
+        offsets[0] != 0
+        or offsets[-1] != num_tokens
+        or any(left > right for left, right in pairwise(offsets))
     ):
         raise PascalGdnContractError("cu_seqlens must be nondecreasing from 0 to T")
     return PascalGdnLaunch(

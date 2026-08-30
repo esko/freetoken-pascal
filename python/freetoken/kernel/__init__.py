@@ -1,9 +1,5 @@
 from .index import indexing
 from .fast_index_copy import fast_index_copy_jit, update_copy_flag_jit
-from .gdn_pascal import (
-    pascal_gdn_recurrence,
-    validate_pascal_gdn_inputs,
-)
 from .moe_impl import (
     fused_moe_decode_kernel_triton,
     fused_moe_kernel_triton,
@@ -25,8 +21,6 @@ __all__ = [
     "indexing",
     "fast_index_copy_jit",
     "update_copy_flag_jit",
-    "pascal_gdn_recurrence",
-    "validate_pascal_gdn_inputs",
     "fast_compare_key",
     "store_cache",
     "test_tensor",

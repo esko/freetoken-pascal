@@ -49,18 +49,22 @@ def test_adapter_is_a_jit_wrapper_for_the_standalone_source() -> None:
     assert "FREETOKEN_GDN_MODE" not in source
 
 
-def _inputs(*, duplicate_slots: bool = False, bad_offsets: bool = False):
+def _inputs(*, duplicate_slots: bool = False, bad_offsets: bool = False, tokens: int = 3):
     if torch is None:
         pytest.skip("Torch is unavailable")
-    tokens, key_heads, value_heads, dim, slots = 3, 1, 2, 64, 4
+    key_heads, value_heads, dim, slots = 1, 2, 64, 4
     q = torch.randn(tokens, key_heads, dim)
     k = torch.randn_like(q)
     v = torch.randn(tokens, value_heads, dim)
     g = torch.randn(tokens, value_heads)
     beta = torch.sigmoid(torch.randn(tokens, value_heads))
     state = torch.zeros(slots, value_heads, dim, dim)
-    indices = torch.tensor([1, 2 if not duplicate_slots else 1], dtype=torch.int32)
-    offsets = torch.tensor([0, 1, 3] if not bad_offsets else [0, 3, 2], dtype=torch.int32)
+    request_count = 2 if tokens else 1
+    indices = torch.tensor([1, 2 if not duplicate_slots else 1][:request_count], dtype=torch.int32)
+    offsets = torch.tensor(
+        ([0, 1, tokens] if not bad_offsets else [0, tokens, tokens - 1]) if tokens else [0, 0],
+        dtype=torch.int32,
+    )
     return q, k, v, g, beta, state, indices, offsets
 
 
@@ -90,3 +94,22 @@ def test_validator_rejects_state_aliasing_or_malformed_ragged_metadata(kwargs, m
 def test_explicit_adapter_fails_closed_before_jit_on_cpu() -> None:
     with pytest.raises(_require_adapter().PascalGdnContractError, match="requires a CUDA"):
         _require_adapter().pascal_gdn_recurrence(*_inputs())
+
+
+def test_validator_rejects_empty_token_batch_before_jit() -> None:
+    with pytest.raises(_require_adapter().PascalGdnContractError, match="at least one token"):
+        _require_adapter().validate_pascal_gdn_inputs(*_inputs(tokens=0))
+
+
+@pytest.mark.parametrize(("mutation", "message"), [("dtype", "float32"), ("stride", "contiguous")])
+def test_validator_rejects_invalid_output_before_jit(mutation: str, message: str) -> None:
+    inputs = _inputs()
+    output = torch.empty_like(inputs[2])
+    if mutation == "dtype":
+        output = output.double()
+    else:
+        output = torch.empty(output.shape[0], output.shape[2], output.shape[1]).transpose(1, 2)
+        assert not output.is_contiguous()
+
+    with pytest.raises(_require_adapter().PascalGdnContractError, match=message):
+        _require_adapter().validate_pascal_gdn_inputs(*inputs, output=output)

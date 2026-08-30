@@ -177,6 +177,7 @@ def test_gdn_forward_contract_is_observable_before_fla_import() -> None:
     )
     assert source.index("resolve_gdn_dispatch(") < source.index("gdn_decode_fla(")
     assert source.index("resolve_gdn_dispatch(") < source.index("gdn_prefill_chunk_fla(")
+    assert "pascal_fp32_available=self._gdn_pascal_available" in source
 
 
 def test_gdn_observer_receives_the_immutable_decision() -> None:
