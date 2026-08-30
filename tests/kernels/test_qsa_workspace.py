@@ -198,7 +198,7 @@ def test_eager_peak_retains_indices_and_overlaps_current_score_chunk() -> None:
         _inputs(
             batch_size=2,
             token_rows=17,
-            page_table_width=40,
+            page_table_width=128,
             page_size=8,
             context_tokens=128,
             top_k=4,
@@ -234,7 +234,7 @@ def test_capture_resident_accounts_all_graph_buffers_and_active_attention() -> N
             capture_max_batch_size=8,
             num_req_slots=8,
             token_rows=2,
-            page_table_width=40,
+            page_table_width=128,
             page_size=8,
             context_tokens=128,
         )
