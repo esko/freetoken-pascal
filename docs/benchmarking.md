@@ -117,7 +117,8 @@ of the external block-device snapshots and must attach its device identity and r
 counter source to every phase result.
 
 On Linux, `LinuxPLEBlockCounterProbe` is the reference external-counter adapter for
-an explicit dedicated PLE payload file. It calls `os.stat(payload).st_dev`, resolves
+an explicit dedicated PLE payload file. It opens the payload without following symlinks,
+pins its identity with `fstat`, resolves its `st_dev`
 `/sys/dev/block/<major>:<minor>`, treats a partition as terminal, follows a single
 sysfs `slaves` entry for non-partition mappings, and rejects missing, cyclic,
 virtual, or multi-device mappings. It reads field 3 of the terminal `/sys/.../stat`
@@ -134,6 +135,8 @@ probe = LinuxPLEBlockCounterProbe("/srv/freetoken-pascal/ple/table.bin")
 recorder = PLEIOEvidenceRecorder(probe.sample)
 ```
 
+The payload and terminal sysfs attributes remain pinned or identity-checked through each
+sample so a path, device, or counter replacement fails instead of changing provenance.
 The probe is read-only and does not drop caches. An overlay/tmpfs payload, a
 non-regular payload, an unavailable sysfs mapping, malformed stat or partition
 marker, and any ambiguous backing device fail closed before evidence is emitted.

@@ -75,8 +75,9 @@ The release must document:
 
 Operational dashboards report PLE cold/warm phase, major faults, block-device reads, logical versus unique rows, coalesced ranges and prefetch effectiveness separately from expert-bank residency. Startup backing for expert files does not authorize steady-state SSD expert execution unless the experimental mode is explicitly selected and logged.
 
-The sysfs PLE block probe is observational only: it samples the payload file's
-`st_dev` mapping and the terminal block device's cumulative stat, and never drops
+The sysfs PLE block probe is observational only: it opens the payload without following
+symlinks, pins its `st_dev` with `fstat`, identity-checks the terminal sysfs attributes
+through the sample, reads the terminal block device's cumulative stat, and never drops
 Linux caches or writes to sysfs. Linux stat field 3 is always interpreted as
 512-byte sectors, regardless of `queue/logical_block_size`. Keep application
 bytes/read calls and process faults separate from the probe's
