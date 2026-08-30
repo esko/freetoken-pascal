@@ -27,9 +27,12 @@ FIXTURE = ROOT / "tests" / "fixtures" / "qwen4-tiny"
 
 
 class _LastTokenMetadata:
+    def __init__(self, last_index: int):
+        self.last_index = last_index
+
     def get_last_indices(self, batch_size: int) -> torch.Tensor:
         assert batch_size == 1
-        return torch.tensor([0], dtype=torch.long)
+        return torch.tensor([self.last_index], dtype=torch.long)
 
 
 def _fixture_config():
@@ -93,7 +96,7 @@ def _batch(tokens: list[int], *, phase: str, cached_len: int = 0, slot: int = 1)
     batch.input_ids = request.input_ids[cached_len:]
     batch.positions = torch.arange(cached_len, len(tokens), dtype=torch.int64)
     batch.out_loc = None
-    batch.attn_metadata = _LastTokenMetadata()
+    batch.attn_metadata = _LastTokenMetadata(len(batch.input_ids) - 1)
     if phase == "decode":
         batch.linear_table_idx = torch.tensor([slot], dtype=torch.int32)
     return batch
@@ -129,6 +132,8 @@ def test_tiny_qwen_text_composes_prefill_decode_and_is_deterministic():
     decoded = _run(model, context, decode)
     assert decoded.shape == (1, config.vocab_size)
     assert torch.isfinite(decoded).all()
+    assert 0 <= int(first.argmax()) < config.vocab_size
+    assert 0 <= int(decoded.argmax()) < config.vocab_size
 
     context.linear_state_pool.reset(1)
     context.attn_backend = TorchDenseQSAReference(
