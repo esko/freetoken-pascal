@@ -505,13 +505,16 @@ def test_host_bank_accounting_exposes_cross_node_residency():
 
 
 def test_ftw_numa_samples_retain_global_and_per_layer_bank_identity(tmp_path):
+    import json
+
     from freetoken.checkpoint.ftw import FTWWriter, layer_bank_entry_name, load_ftw_banks
     from freetoken.moe.host_banks import HostBankPolicy
 
     checkpoint = tmp_path / "ftw"
     writer = FTWWriter(str(checkpoint))
     writer.add_tensor("gate_up_alpha", torch.ones(4), kind="experts_bank")
-    for bank_name in ("gate_up", "down"):
+    writer.add_tensor("gate_up", torch.ones((4, 8), dtype=torch.uint8), kind="experts_bank")
+    for bank_name in ("down",):
         for layer_id in range(2):
             writer.add_tensor(
                 layer_bank_entry_name(bank_name, layer_id),
@@ -543,14 +546,81 @@ def test_ftw_numa_samples_retain_global_and_per_layer_bank_identity(tmp_path):
     banks = load_ftw_banks(str(checkpoint), num_layers=2, workers=1, host_bank_policy=policy)
     assert banks is not None
     samples = banks.host_bank_accounting["numa_sample_banks"]
-    assert [sample["identity"] for sample in samples] == [
-        {"bank_name": "gate_up_alpha", "layer_id": None},
-        {"bank_name": "gate_up", "layer_id": 0},
-        {"bank_name": "gate_up", "layer_id": 1},
-        {"bank_name": "down", "layer_id": 0},
-        {"bank_name": "down", "layer_id": 1},
-    ]
+    identities = {
+        (sample["identity"]["bank_name"], sample["identity"]["layer_id"]) for sample in samples
+    }
+    assert len(samples) == len(identities)
+    assert identities == {
+        ("gate_up_alpha", None),
+        ("gate_up", 0),
+        ("gate_up", 1),
+        ("down", 0),
+        ("down", 1),
+    }
     banks.close()
+
+    index_path = checkpoint / "freetoken_weight.json"
+    index = json.loads(index_path.read_text())
+    index["tensors"].reverse()
+    index_path.write_text(json.dumps(index))
+    reordered = load_ftw_banks(str(checkpoint), num_layers=2, workers=1, host_bank_policy=policy)
+    assert reordered is not None
+    reordered_identities = {
+        (sample["identity"]["bank_name"], sample["identity"]["layer_id"])
+        for sample in reordered.host_bank_accounting["numa_sample_banks"]
+    }
+    assert reordered_identities == identities
+    reordered.close()
+
+
+def test_ftw_invalid_sample_identity_rolls_back_prior_mappings(tmp_path):
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
+    from freetoken.moe.host_banks import _LIVE_BUFFERS, HostBankPolicy
+
+    checkpoint = tmp_path / "ftw-invalid-name"
+    writer = FTWWriter(str(checkpoint))
+    writer.add_tensor("gate_up_alpha", torch.ones(2), kind="experts_bank")
+    writer.add_tensor(" ", torch.ones((2, 8), dtype=torch.uint8), kind="experts_bank")
+    writer.finalize({"quant_format": "bf16", "expert_bank_num_layers": 1})
+    before = tuple(_LIVE_BUFFERS)
+    policy = HostBankPolicy(strategy="pageable")
+
+    with pytest.raises(ValueError, match="bank_name"):
+        load_ftw_banks(str(checkpoint), num_layers=1, workers=1, host_bank_policy=policy)
+
+    assert tuple(_LIVE_BUFFERS) == before
+
+
+@pytest.mark.parametrize("layout", ["duplicate-flat", "mixed"])
+def test_ftw_ambiguous_sample_identities_fail_before_allocation(tmp_path, layout):
+    from freetoken.checkpoint.ftw import FTWWriter, layer_bank_entry_name, load_ftw_banks
+    from freetoken.moe.host_banks import _LIVE_BUFFERS, HostBankPolicy
+
+    checkpoint = tmp_path / layout
+    writer = FTWWriter(str(checkpoint))
+    writer.add_tensor("gate_up", torch.ones((2, 8), dtype=torch.uint8), kind="experts_bank")
+    if layout == "duplicate-flat":
+        writer.add_tensor("gate_up", torch.zeros((2, 8), dtype=torch.uint8), kind="experts_bank")
+        message = "duplicate NUMA sample identity"
+    else:
+        writer.add_tensor(
+            layer_bank_entry_name("gate_up", 0),
+            torch.zeros((2, 8), dtype=torch.uint8),
+            kind="experts_bank",
+        )
+        message = "mix flat and per-layer"
+    writer.finalize({"quant_format": "bf16", "expert_bank_num_layers": 1})
+    before = tuple(_LIVE_BUFFERS)
+
+    with pytest.raises(ValueError, match=message):
+        load_ftw_banks(
+            str(checkpoint),
+            num_layers=1,
+            workers=1,
+            host_bank_policy=HostBankPolicy(strategy="pageable"),
+        )
+
+    assert tuple(_LIVE_BUFFERS) == before
 
 
 def test_default_policy_does_not_call_numa_backend():

@@ -109,6 +109,8 @@ def prepare_ftw_host_bank_policy(
     swap_probe=None,
 ):
     """Preflight every FTW expert-bank allocation from index metadata only."""
+    from freetoken.moe.numa_memory import NumaSampleIdentity
+
     if policy is None:
         return None
     if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers <= 0:
@@ -150,6 +152,26 @@ def prepare_ftw_host_bank_policy(
     mixed = set(entry["name"] for entry in flat_entries) & per_layer_groups.keys()
     if mixed:
         raise ValueError(f"FTW bank(s) mix flat and per-layer row layouts: {sorted(mixed)}")
+
+    sample_identities: set[NumaSampleIdentity] = set()
+
+    def register_sample_identity(bank_name: str, layer_id: int | None) -> None:
+        identity = NumaSampleIdentity(bank_name, layer_id)
+        if identity in sample_identities:
+            raise ValueError(
+                "FTW expert banks contain duplicate NUMA sample identity "
+                f"{identity.as_dict()}"
+            )
+        sample_identities.add(identity)
+
+    for entry in alpha_entries:
+        register_sample_identity(entry["name"], None)
+    for entry in flat_entries:
+        for layer_id in range(num_layers):
+            register_sample_identity(entry["name"], layer_id)
+    for base, by_layer in per_layer_groups.items():
+        for layer_id in by_layer:
+            register_sample_identity(base, layer_id)
 
     layer_bytes = [0] * num_layers
     for entry in alpha_entries:
@@ -583,6 +605,7 @@ def load_ftw_banks(
 
     def _new_bank(shape, dtype, backing, *, bank_name: str, layer_id: int | None):
         try:
+            identity = NumaSampleIdentity(bank_name, layer_id)
             bank = HostBank(
                 shape,
                 dtype,
@@ -599,7 +622,7 @@ def load_ftw_banks(
             except (NameError, UnboundLocalError):
                 pass
             raise
-        allocated_banks.append((NumaSampleIdentity(bank_name, layer_id), bank))
+        allocated_banks.append((identity, bank))
         return bank
 
     def _rollback_allocations() -> None:
@@ -764,6 +787,7 @@ def load_ftw_banks(
             # residency sample cannot race the loader's writes.
             for identity, bank in allocated_banks:
                 host_bank_policy.sample_numa_bank(bank, identity=identity)
+        completed = True
     finally:
         bar.close()
         reader.close()
