@@ -614,8 +614,7 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
         expand.components["indices"],
         score.components["logits"],
         score.components["visible"],
-        top_k.components["blocks"],
-        top_k.components["candidate_scratch"],
+        top_k.bytes,
         label="eager selection phase",
     )
     eager_attention = _add(

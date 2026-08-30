@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from dataclasses import replace
 
 import pytest
@@ -54,21 +56,7 @@ def _inputs(**overrides: int) -> QSAWorkspaceInputs:
 
 
 def _qsa_categories(workspace) -> dict[str, int]:
-    state = workspace.inventory["state"]
-    persistent_state = workspace.persistent_bytes
-    transient_state = state.bytes - persistent_state
-    return {
-        "qsa_persistent_score": 0,
-        "qsa_persistent_top_k": 0,
-        "qsa_persistent_expand_gather": 0,
-        "qsa_persistent_attention": 0,
-        "qsa_persistent_state": persistent_state,
-        "qsa_transient_score": workspace.inventory["score"].bytes,
-        "qsa_transient_top_k": workspace.inventory["top_k"].bytes,
-        "qsa_transient_expand_gather": workspace.inventory["expand_gather"].bytes,
-        "qsa_transient_attention": workspace.inventory["attention"].bytes,
-        "qsa_transient_state": transient_state,
-    }
+    return dict(derive_qsa_placement_categories(workspace))
 
 
 def _gpu_categories(workspace, **overrides: int) -> dict[str, int]:
@@ -168,18 +156,39 @@ def test_projection_uses_exact_ten_qsa_categories_and_lifetimes() -> None:
     categories = derive_qsa_placement_categories(workspace)
 
     assert tuple(categories) == QSA_PLACEMENT_CATEGORIES
-    assert categories["qsa_persistent_state"] == workspace.persistent_bytes
-    assert categories["qsa_transient_state"] == (
-        workspace.inventory["state"].bytes - workspace.persistent_bytes
-    )
-    assert sum(categories.values()) == (
-        workspace.persistent_bytes
-        + sum(
-            workspace.inventory[name].bytes
-            for name in ("score", "top_k", "expand_gather", "attention")
-        )
-        + categories["qsa_transient_state"]
-    )
+    assert categories == {
+        "qsa_persistent_score": 0,
+        "qsa_persistent_top_k": 0,
+        "qsa_persistent_expand_gather": 0,
+        "qsa_persistent_attention": 0,
+        "qsa_persistent_state": 1056,
+        "qsa_transient_score": 52,
+        "qsa_transient_top_k": 0,
+        "qsa_transient_expand_gather": 56,
+        "qsa_transient_attention": 256,
+        "qsa_transient_state": 16,
+    }
+    assert sum(categories.values()) == workspace.required_bytes == 1436
+
+
+def test_capture_projection_partitions_graph_and_dynamic_buffers() -> None:
+    workspace = calculate_qsa_workspace(_inputs(phase="capture", capture_max_batch_size=3))
+
+    categories = derive_qsa_placement_categories(workspace)
+
+    assert categories == {
+        "qsa_persistent_score": 196,
+        "qsa_persistent_top_k": 12,
+        "qsa_persistent_expand_gather": 84,
+        "qsa_persistent_attention": 0,
+        "qsa_persistent_state": 1116,
+        "qsa_transient_score": 8,
+        "qsa_transient_top_k": 0,
+        "qsa_transient_expand_gather": 0,
+        "qsa_transient_attention": 256,
+        "qsa_transient_state": 16,
+    }
+    assert sum(categories.values()) == workspace.required_bytes == 1688
 
 
 def test_binding_recomputes_workspace_and_preserves_live_peak_semantics() -> None:
@@ -192,6 +201,43 @@ def test_binding_recomputes_workspace_and_preserves_live_peak_semantics() -> Non
     assert binding.live_bytes == workspace.persistent_bytes + workspace.eager_transient_peak_bytes
     assert binding.peak_bytes == workspace.required_bytes
     assert binding.placement_qsa_required_bytes == sum(binding.categories.values())
+    assert (
+        binding.placement_persistent_bytes + binding.placement_transient_high_water_bytes
+        == workspace.required_bytes
+    )
+
+
+def test_binding_accepts_exact_capacity_and_rejects_one_byte_less() -> None:
+    workspace = calculate_qsa_workspace(_inputs())
+    categories = _gpu_categories(workspace)
+    template = plan_placement(
+        (PlacementPlanInput(capacity_bytes=1 << 40, gpu_uuid="gpu-0", categories=categories),),
+        safety_reserve_bytes=50,
+    )
+    exact = plan_placement(
+        (
+            PlacementPlanInput(
+                capacity_bytes=template.gpus[0].required_bytes,
+                gpu_uuid="gpu-0",
+                categories=categories,
+            ),
+        ),
+        safety_reserve_bytes=50,
+    ).gpus[0]
+    assert bind_qsa_workspace(workspace, exact).placement_qsa_required_bytes == 1436
+
+    insufficient = plan_placement(
+        (
+            PlacementPlanInput(
+                capacity_bytes=template.gpus[0].required_bytes - 1,
+                gpu_uuid="gpu-0",
+                categories=categories,
+            ),
+        ),
+        safety_reserve_bytes=50,
+    ).gpus[0]
+    with pytest.raises(PlacementPlannerError, match="capacity-safe"):
+        bind_qsa_workspace(workspace, insufficient)
 
 
 def test_binding_rejects_arbitrary_qsa_bytes_and_plan_category_drift() -> None:
@@ -212,6 +258,60 @@ def test_binding_rejects_arbitrary_qsa_bytes_and_plan_category_drift() -> None:
     ).gpus[0]
     with pytest.raises(PlacementPlannerError, match="qsa_transient_score"):
         bind_qsa_workspace(workspace, drifted)
+
+
+def test_binding_rejects_duplicate_full_qsa_bytes_on_two_gpus() -> None:
+    workspace = calculate_qsa_workspace(_inputs())
+    categories = _gpu_categories(workspace)
+    plan = plan_placement(
+        (
+            PlacementPlanInput(capacity_bytes=1 << 40, gpu_uuid="gpu-0", categories=categories),
+            PlacementPlanInput(capacity_bytes=1 << 40, gpu_uuid="gpu-1", categories=categories),
+        ),
+        safety_reserve_bytes=50,
+    )
+    with pytest.raises(PlacementPlannerError, match="ownership/partition"):
+        bind_qsa_workspace(workspace, plan)
+
+
+def test_direct_binding_rejects_tampering_invalid_digest_and_bad_gpu_set() -> None:
+    workspace = calculate_qsa_workspace(_inputs())
+    gpu = _gpu(workspace)
+    categories = derive_qsa_placement_categories(workspace)
+    binding = QSAPlacementBinding(workspace, categories, (gpu,), "a" * 64)
+
+    tampered = replace(workspace, telemetry=replace(workspace.telemetry, status="ready"))
+    with pytest.raises(PlacementPlannerError, match=r"caller-supplied|inconsistent"):
+        QSAPlacementBinding(tampered, categories, (gpu,))
+    with pytest.raises(PlacementPlannerError, match="SHA-256"):
+        replace(binding, profile_digest="g" * 64)
+    with pytest.raises(PlacementPlannerError, match="exactly one or two"):
+        QSAPlacementBinding(workspace, categories, (gpu, gpu, gpu))
+    with pytest.raises(PlacementPlannerError, match="contiguous"):
+        QSAPlacementBinding(
+            workspace,
+            categories,
+            (replace(gpu, rank=1, gpu_uuid="gpu-1"),),
+        )
+    with pytest.raises(PlacementPlannerError, match="unique"):
+        QSAPlacementBinding(workspace, categories, (gpu, replace(gpu, rank=1)))
+    with pytest.raises(PlacementPlannerError, match="ownership/partition"):
+        QSAPlacementBinding(workspace, categories, (gpu, replace(gpu, rank=1, gpu_uuid="gpu-1")))
+
+
+def test_qsa_placement_module_imports_without_torch() -> None:
+    script = """
+import sys
+import freetoken.engine.qsa_placement
+assert not any(name == 'torch' or name.startswith('torch.') for name in sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_binding_checks_profile_geometry_before_accepting_plan() -> None:
