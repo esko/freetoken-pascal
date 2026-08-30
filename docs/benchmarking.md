@@ -85,6 +85,28 @@ The vectorized planner remains the default, and adaptive threshold selection car
 
 A large unexplained amplification or unrelated model-weight I/O invalidates the serving configuration.
 
+### Injected PLE I/O evidence
+
+The H0 evidence primitive in `freetoken.ple_io_evidence` consumes two cumulative
+counter snapshots for one explicitly labeled `cold`, `warm`, or `steady` phase.
+`PLEIOEvidenceRecorder` accepts an injected counter provider so synthetic tests and
+the eventual NVMe probe share the same delta and validation logic.  Each snapshot
+keeps major faults, logical packed-row bytes, application bytes, and application
+read calls separate from physical block-device bytes.
+
+Physical bytes are valid only when both snapshots include an independently sampled,
+non-decreasing block-device counter, a stable unambiguous device identity, and an
+explicit external source such as block-device statistics.  `/proc/self/io`, rusage,
+or any other process-only read counter is never promoted to physical I/O. Counter
+regressions, identity/source changes, invalid phases, missing physical provenance,
+and a zero logical-byte denominator fail closed. The resulting read-amplification
+ratio is `physical_block_device_bytes / logical_packed_bytes` for that phase.
+
+This H0 primitive does not drop caches, issue privileged mutations, or claim that a
+host process counter measures device traffic. The later NVMe harness owns collection
+of the external block-device snapshots and must attach its device identity and raw
+counter source to every phase result.
+
 ## Placement-cliff benchmark contract
 
 Issue #73 sweeps context/state allocation, batch/ubatch, ordinary tensor placement and cache slots one controlled step at a time.
