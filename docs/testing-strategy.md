@@ -34,6 +34,7 @@ Runs on GitHub-hosted Linux without a GPU:
 - PLE row-codec identity and reconstruction tests;
 - routing simulation, Q4/Q3 profile identity, quant conversion and mixed-precision quality A/B fixtures;
 - placement-plan accounting, missing-category rejection, stale-profile invalidation, automatic-backoff state machine and canary result schemas;
+- QSA workspace category accounting from concrete shapes, 64-bit overflow rejection, incomplete-group boundaries, and controlled pre-launch capacity errors;
 - static-hot trace/profile generation, oracle hit-rate simulation and profile compatibility checks;
 - optional exact n-gram proposal/index/state-machine tests that do not import or require the full model.
 
