@@ -27,5 +27,16 @@ batch size x miss rate.
 python benchmarks/bench_offload_cache_copy.py
 ```
 
+**`bench_ple_io.py`** — H0 dedicated-artifact PLE evidence. It runs identical row
+batches through mmap and positional-read backends and records independent cold, warm
+and steady phases, including physical block-device provenance when `--linux-probe` is
+explicitly supplied. It is not a throughput or P4 benchmark.
+
+```bash
+PYTHONPATH=python python benchmarks/bench_ple_io.py \
+    --artifact /srv/freetoken-pascal/ple/table --linux-probe \
+    --output results/ple-io.json
+```
+
 For host RAM vs PCIe bandwidth and the offload/hybrid backend pick, use `ft bench bw`
 instead — it writes the JSON profile the engine reads.

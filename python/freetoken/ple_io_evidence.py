@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 PLE_IO_PHASES = frozenset({"cold", "warm", "steady"})
+PLE_IO_PHASE_ORDER = ("cold", "warm", "steady")
 # Linux documents /sys/block/<dev>/stat sector counters in 512-byte units,
 # independently of the device's logical block size.
 LINUX_SYSFS_STAT_SECTOR_BYTES = 512
@@ -657,6 +658,22 @@ class PLEIOCounters:
             else:
                 object.__setattr__(self, "device_identity", identity)
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible snapshot, retaining physical provenance."""
+        identity = self.device_identity
+        if isinstance(identity, tuple):
+            identity = list(identity)
+        return {
+            "major_faults": self.major_faults,
+            "logical_packed_bytes": self.logical_packed_bytes,
+            "application_bytes_read": self.application_bytes_read,
+            "application_reads": self.application_reads,
+            "physical_block_device_bytes": self.physical_block_device_bytes,
+            "device_identity": identity,
+            "physical_source": self.physical_source,
+            "physical_source_detail": self.physical_source_detail,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class PLEIOPhaseEvidence:
@@ -917,6 +934,7 @@ class PLEIOEvidenceRecorder:
 __all__ = [
     "LINUX_SYSFS_STAT_SECTOR_BYTES",
     "PLE_IO_PHASES",
+    "PLE_IO_PHASE_ORDER",
     "PLE_IO_PHYSICAL_SOURCE_KINDS",
     "LinuxPLEBlockCounterProbe",
     "PLEBlockDevice",

@@ -142,6 +142,37 @@ The probe is read-only and does not drop caches. An overlay/tmpfs payload, a
 non-regular payload, an unavailable sysfs mapping, malformed stat or partition
 marker, and any ambiguous backing device fail closed before evidence is emitted.
 
+### Integrated phase harness
+
+`freetoken.ple_phase_harness.PLEIOPhaseHarness` is the H0 integration seam for this contract. It opens the
+same dedicated artifact through `MappedPLETable`'s `mmap` and `pread` backends,
+executes the same deterministic row batches in explicit `cold`, `warm`, and
+`steady` phases, and uses `PLEIOEvidenceRecorder` for every phase boundary.
+The report retains the artifact manifest/payload identity, backend/advice/codec,
+ordered result hashes, logical and unique rows, application reads/bytes, major
+faults, physical bytes and amplification, planner/prefetch deltas, and the raw
+before/after counter and table-telemetry samples. A mismatch between backends,
+corrupt phase ordering or deltas, unstable physical provenance, or missing
+physical counters aborts the report. `warm` uses bounded prefetch when enabled;
+`steady` repeats the same batches without treating prefetch as row data.
+
+The CLI requires an explicit physical-source opt-in and is intentionally not a
+performance claim:
+
+```bash
+PYTHONPATH=python python benchmarks/bench_ple_io.py \
+  --artifact /srv/freetoken-pascal/ple/table \
+  --linux-probe \
+  --batch 31,0,31,16 --batch 16,0 \
+  --output results/ple-io.json
+```
+
+The harness accepts only a dedicated artifact directory. It rejects a source
+GGUF path, so source-GGUF `full-model-warm` cannot be reported as PLE evidence.
+Tests inject physical counter snapshots; a process `storage_read_bytes` field is
+never promoted to physical block-device bytes. The report is marked
+`H0/no-P4` and `observation_only`, even when the opt-in Linux probe is used.
+
 ## Placement-cliff benchmark contract
 
 Issue #73 sweeps context/state allocation, batch/ubatch, ordinary tensor placement and cache slots one controlled step at a time.
