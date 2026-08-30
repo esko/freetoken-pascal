@@ -382,9 +382,11 @@ def test_source_ple_pread_lookup_matches_mmap_for_first_middle_last_and_duplicat
     with MappedPLETable.open_from_gguf(FIXTURE, backend="pread") as pread_table:
         actual = pread_table.lookup_batch(ids)
         telemetry = pread_table.telemetry()
+        source_kind = pread_table.source_kind
 
     np.testing.assert_array_equal(actual, expected)
     assert telemetry["backend"] == "pread"
+    assert source_kind == "gguf-pread"
     assert telemetry["mapped_bytes"] == 0
     assert telemetry["batch_unique_rows"] == 3
     assert telemetry["batch_duplicate_rows"] == 2

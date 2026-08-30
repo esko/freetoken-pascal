@@ -1364,6 +1364,7 @@ class MappedPLETable:
                 planner_config=resolved_planner,
             )
             table.backend = backend
+            table.source_kind = f"gguf-{backend}"
             table._pread_fd = pread_fd
             table._apply_random_advice()
             table.set_warm_mode(warm_mode)
@@ -2043,6 +2044,7 @@ def open_qwen_host_weights(
             prefetch_chunk_rows=ple_prefetch_chunk_rows,
             planner_config=resolved_planner,
         )
+        ple.source_kind = "gguf-mmap"
         ple._apply_random_advice()
         ple.set_warm_mode(ple_warm_mode)
     except BaseException:
