@@ -128,6 +128,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         gdn_observer: GdnObserver | None = None,
         gdn_fla_available: bool | None = None,
         gdn_candidate_available: bool | None = None,
+        gdn_pascal_available: bool = False,
     ):
         if num_k_heads <= 0 or num_v_heads <= 0 or num_v_heads % num_k_heads:
             raise ValueError(
@@ -149,6 +150,11 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             if gdn_candidate_available is None
             else gdn_candidate_available
         )
+        if type(gdn_pascal_available) is not bool:
+            raise TypeError("gdn_pascal_available must be a bool")
+        # This is an injected qualification gate, not a package-presence probe. The model
+        # factory leaves it false until H2 P4 parity explicitly registers the backend.
+        self._gdn_pascal_available = gdn_pascal_available
         # The FLA chunk/decode kernels read+write recurrent state and per-chunk h as [V, K],
         # while LinearStatePool declares it [K, V]. Equal dimensions make the tensors shape
         # compatible, not semantically equivalent: canonical axis-order parity remains an H2
@@ -383,6 +389,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             dtype=str(dtype),
             fla_available=fla_available,
             triton_candidate_available=candidate_available,
+            pascal_fp32_available=self._gdn_pascal_available,
         )
         if self._gdn_observer is not None:
             self._gdn_observer(decision)
@@ -402,6 +409,13 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             # contract, but it must never silently run the in-tree FLA implementation.
             raise GdnDispatchError(
                 "triton-candidate selected but no Qwen4 GDN candidate implementation is registered"
+            )
+        if decision.selected_implementation == "pascal-fp32":
+            # The standalone adapter is an explicit H1/H2 bring-up seam, not a production
+            # model path yet.  Keeping this fail-closed prevents an environment override from
+            # accidentally routing a full model through a kernel before P4 parity evidence.
+            raise GdnDispatchError(
+                "pascal-fp32 selected but Qwen4 GDN runtime integration is not H2-qualified"
             )
 
         # Per-forward GDN metadata (cu_seqlens / cache_indices / continuation flags),

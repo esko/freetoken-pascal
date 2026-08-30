@@ -115,6 +115,54 @@ def test_forced_candidate_fails_closed_when_unavailable() -> None:
         )
 
 
+def test_auto_never_selects_pascal_even_when_the_explicit_gate_is_positive() -> None:
+    decision = resolve_gdn_dispatch(
+        requested_mode="auto",
+        capability=(6, 1),
+        dtype="float32",
+        fla_available=True,
+        triton_candidate_available=True,
+        pascal_fp32_available=True,
+    )
+
+    assert decision.selected_implementation == "torch-reference"
+    assert decision.fallback_reason == "unsupported-capability"
+    assert decision.pascal_fp32_available is True
+
+
+def test_pascal_backend_is_explicit_and_requires_positive_qualification_gate() -> None:
+    with pytest.raises(GdnDispatchError, match="pascal-fp32-unqualified"):
+        resolve_gdn_dispatch(
+            requested_mode="pascal-fp32",
+            capability=(6, 1),
+            dtype="float32",
+            pascal_fp32_available=False,
+        )
+
+    decision = resolve_gdn_dispatch(
+        requested_mode="pascal-fp32",
+        capability=(6, 1),
+        dtype="float32",
+        pascal_fp32_available=True,
+    )
+    assert decision.selected_implementation == "pascal-fp32"
+    assert decision.fallback_reason is None
+
+
+@pytest.mark.parametrize(
+    ("capability", "dtype", "message"),
+    [((7, 0), "float32", "requires sm_61"), ((6, 1), "bfloat16", "requires float32")],
+)
+def test_pascal_backend_rejects_unqualified_inputs(capability, dtype, message) -> None:
+    with pytest.raises(GdnDispatchError, match=message):
+        resolve_gdn_dispatch(
+            requested_mode="pascal-fp32",
+            capability=capability,
+            dtype=dtype,
+            pascal_fp32_available=True,
+        )
+
+
 @pytest.mark.parametrize("mode", ["", "bogus", " Auto "])
 def test_invalid_gdn_mode_is_rejected(mode: str) -> None:
     with pytest.raises(ValueError, match="unsupported GDN mode"):
@@ -129,6 +177,7 @@ def test_gdn_forward_contract_is_observable_before_fla_import() -> None:
     )
     assert source.index("resolve_gdn_dispatch(") < source.index("gdn_decode_fla(")
     assert source.index("resolve_gdn_dispatch(") < source.index("gdn_prefill_chunk_fla(")
+    assert "pascal_fp32_available=self._gdn_pascal_available" in source
 
 
 def test_gdn_observer_receives_the_immutable_decision() -> None:

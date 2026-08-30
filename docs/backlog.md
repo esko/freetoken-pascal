@@ -17,6 +17,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 | P1 | [#12](https://github.com/esko/freetoken-pascal/issues/12) | Safe GGUF K/I loader and tensor census | H0-H2 |
 | P1 | [#13](https://github.com/esko/freetoken-pascal/issues/13) | Dedicated NVMe PLE format, random-I/O backends, adaptive batching/prefetch and heterogeneous expert pools | H0-H2 |
 | P1 | [#14](https://github.com/esko/freetoken-pascal/issues/14) | Independent short/long-context reference | H0/H2 |
+| P2 | [#93](https://github.com/esko/freetoken-pascal/issues/93) | Standalone Pascal FP32 GDN recurrence and backend qualification seam | H0/H1/H2 |
 | P2 | [#15](https://github.com/esko/freetoken-pascal/issues/15) | Model-agnostic CPU expert ABI | H0 |
 | P2 | [#16](https://github.com/esko/freetoken-pascal/issues/16) | AVX2 Q4_K expert kernels | H0/target CPU |
 | P2 | [#17](https://github.com/esko/freetoken-pascal/issues/17) | Named Q3 profile and census-required Q2/Q3/IQ CPU formats | H0/target CPU |
@@ -65,7 +66,7 @@ GitHub issues are the execution source of truth. [Epic #4](https://github.com/es
 
 ## Work possible before P4 arrival
 
-The orchestrator should execute #77 first, then prioritize H0/H1 portions of #13–#19, #38, #73 and #76, plus the pure logic/tests in #20–#25 and #74. This includes upstream Qwen delta reconciliation, the PLE file format, random-access advice, mmap/`pread`, adaptive batching, read-amplification telemetry, CPU expert execution, Q4/Q3 census and quality fixtures, routing simulation, placement planning/canary logic, QSA workspace accounting and host-synchronization profiling, quant conversion, metrics and correctness A/B tests. Issues #9 and #29 are explicitly blocked. DP4A tuning, placement-cliff measurement, context-scaling measurements, dual-P4 policy selection and final quant/profile selection remain H2/H3 work, and other issues remain open until their required hardware evidence is attached.
+The orchestrator should execute #77 first, then prioritize H0/H1 portions of #13–#19, #38, #73, #76 and #93, plus the pure logic/tests in #20–#25 and #74. This includes upstream Qwen delta reconciliation, the PLE file format, random-access advice, mmap/`pread`, adaptive batching, read-amplification telemetry, CPU expert execution, Q4/Q3 census and quality fixtures, routing simulation, placement planning/canary logic, QSA workspace accounting and host-synchronization profiling, quant conversion, metrics and correctness A/B tests. Issues #9 and #29 are explicitly blocked. DP4A tuning, placement-cliff measurement, context-scaling measurements, dual-P4 policy selection, GDN P4 parity and final quant/profile selection remain H2/H3 work, and other issues remain open until their required hardware evidence is attached.
 
 ## Completeness audit
 
