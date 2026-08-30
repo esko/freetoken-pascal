@@ -20,6 +20,15 @@ from .placement_plan import (
     evaluate_canary,
     plan_placement,
 )
+from .placement_profile import (
+    PLACEMENT_PROFILE_IDENTITY_SCHEMA_NAME,
+    PLACEMENT_PROFILE_SCHEMA_NAME,
+    PLACEMENT_PROFILE_SCHEMA_VERSION,
+    GPUProfileTopology,
+    PlacementProfile,
+    PlacementProfileIdentity,
+    canonical_json_bytes,
+)
 
 if TYPE_CHECKING:
     from .config import EngineConfig
@@ -28,6 +37,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "PLACEMENT_CATEGORIES",
+    "PLACEMENT_PROFILE_IDENTITY_SCHEMA_NAME",
+    "PLACEMENT_PROFILE_SCHEMA_NAME",
+    "PLACEMENT_PROFILE_SCHEMA_VERSION",
     "BackoffDecision",
     "BackoffProfile",
     "BackoffStateMachine",
@@ -36,10 +48,14 @@ __all__ = [
     "Engine",
     "EngineConfig",
     "ForwardOutput",
+    "GPUProfileTopology",
     "PlacementObservation",
     "PlacementPlan",
     "PlacementPlanInput",
     "PlacementPlannerError",
+    "PlacementProfile",
+    "PlacementProfileIdentity",
+    "canonical_json_bytes",
     "evaluate_canary",
     "plan_placement",
 ]
