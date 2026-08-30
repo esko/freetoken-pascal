@@ -215,6 +215,36 @@ def test_complete_on_target_sample_reports_verified_match():
     assert sample["placement_match"] is True
 
 
+def test_unknown_pages_are_excluded_from_fraction_and_prevent_positive_match():
+    backend = FakeBackend(statuses=(0, -14))
+    controller = NumaPlacementController(
+        resolve_numa_placement(
+            "preferred", 0, enforce=True, allowed=AllowedNumaNodes((0,), "available", "fixture")
+        ),
+        backend,
+    )
+    controller.apply(0x2000, 8192, private_anonymous=True, before_touch=True)
+    controller.sample(0x2000, 8192, max_pages=2)
+    sample = controller.telemetry()["sample"]
+    assert sample["known_pages"] == 1
+    assert sample["unknown"] == 1
+    assert sample["target_fraction"] == 1.0
+    assert sample["placement_match"] is None
+
+
+def test_fallback_plan_never_claims_a_sample_match():
+    controller = NumaPlacementController(
+        resolve_numa_placement(
+            "preferred", None, enforce=True, allowed=AllowedNumaNodes((0,), "available", "fixture")
+        ),
+        FakeBackend(),
+    )
+    sample = controller.telemetry()["sample"]
+    assert sample["sampled_pages"] == 0
+    assert sample["target_nodes"] == ()
+    assert sample["placement_match"] is None
+
+
 def test_sampling_aggregates_counts_unknown_and_errors_across_banks():
     class BanksBackend:
         def __init__(self):
