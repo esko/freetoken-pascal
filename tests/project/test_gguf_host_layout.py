@@ -504,6 +504,30 @@ def test_ple_prefetch_empty_request_is_immediately_complete(tmp_path: Path) -> N
         assert telemetry["prefetch_warmed_rows"] == 0
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"prefetch_max_rows": True}, TypeError, "prefetch_max_rows"),
+        ({"prefetch_max_rows": -1}, ValueError, "non-negative"),
+        ({"prefetch_chunk_rows": 0}, ValueError, "positive"),
+    ],
+)
+def test_ple_prefetch_configuration_fails_before_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+    error: type[Exception],
+    message: str,
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    monkeypatch.setattr(
+        "freetoken.gguf_host.MappedFileRange",
+        lambda *_args, **_kwargs: pytest.fail("invalid prefetch config opened a mapping"),
+    )
+    with pytest.raises(error, match=message):
+        MappedPLETable.open_from_artifact(artifact, **kwargs)
+
+
 def test_dedicated_loader_ignores_provenance_source_path(tmp_path: Path) -> None:
     artifact = tmp_path / "ple"
     convert_gguf_ple_to_artifact(FIXTURE, artifact)

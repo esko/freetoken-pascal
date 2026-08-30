@@ -782,6 +782,17 @@ class PLEPrefetchHandle:
         self.result(timeout=timeout)
 
 
+def _validate_prefetch_config(max_rows: int, chunk_rows: int) -> None:
+    if isinstance(max_rows, bool) or not isinstance(max_rows, int):
+        raise TypeError("prefetch_max_rows must be an integer")
+    if max_rows < 0:
+        raise ValueError("prefetch_max_rows must be non-negative")
+    if isinstance(chunk_rows, bool) or not isinstance(chunk_rows, int):
+        raise TypeError("prefetch_chunk_rows must be an integer")
+    if chunk_rows <= 0:
+        raise ValueError("prefetch_chunk_rows must be positive")
+
+
 class MappedPLETable:
     _MODES = frozenset(
         {"cold", "page-cache-warm", "targeted", "full-model-warm", "full-ple-warm"}
@@ -796,14 +807,7 @@ class MappedPLETable:
         prefetch_max_rows: int = 4096,
         prefetch_chunk_rows: int = 64,
     ) -> None:
-        if isinstance(prefetch_max_rows, bool) or not isinstance(prefetch_max_rows, int):
-            raise TypeError("prefetch_max_rows must be an integer")
-        if prefetch_max_rows < 0:
-            raise ValueError("prefetch_max_rows must be non-negative")
-        if isinstance(prefetch_chunk_rows, bool) or not isinstance(prefetch_chunk_rows, int):
-            raise TypeError("prefetch_chunk_rows must be an integer")
-        if prefetch_chunk_rows <= 0:
-            raise ValueError("prefetch_chunk_rows must be positive")
+        _validate_prefetch_config(prefetch_max_rows, prefetch_chunk_rows)
         self.descriptor = descriptor
         self.mapping = mapping
         self._closed = False
@@ -868,6 +872,7 @@ class MappedPLETable:
         prefetch_max_rows: int = 4096,
         prefetch_chunk_rows: int = 64,
     ) -> MappedPLETable:
+        _validate_prefetch_config(prefetch_max_rows, prefetch_chunk_rows)
         layout = inspect_qwen_host_layout(path)
         descriptor = layout.ple
         mapping = MappedFileRange(
@@ -906,6 +911,7 @@ class MappedPLETable:
         prefetch_max_rows: int = 4096,
         prefetch_chunk_rows: int = 64,
     ) -> MappedPLETable:
+        _validate_prefetch_config(prefetch_max_rows, prefetch_chunk_rows)
         if backend not in {"mmap", "pread"}:
             raise ValueError(f"unknown PLE backend {backend!r}")
         root = Path(path)
@@ -1273,8 +1279,9 @@ class MappedPLETable:
                 failure = failure or error
             self._pread_fd = None
         with self._prefetch_lock:
-            if failure is None:
-                self._closed = True
+            # Match the pre-prefetch close contract: resource cleanup is a
+            # one-shot operation even when one close reports an error.
+            self._closed = True
             self._closing = False
         if failure is not None:
             raise failure
@@ -1378,6 +1385,7 @@ def open_qwen_host_weights(
     ple_prefetch_max_rows: int = 4096,
     ple_prefetch_chunk_rows: int = 64,
 ) -> QwenGGUFHostWeights:
+    _validate_prefetch_config(ple_prefetch_max_rows, ple_prefetch_chunk_rows)
     layout = inspect_qwen_host_layout(
         path,
         supported_expert_types=supported_expert_types,
