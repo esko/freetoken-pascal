@@ -47,10 +47,17 @@ def _categories(**overrides: int) -> dict[str, int]:
     return values
 
 
-def _gpu(*, capacity: int = 500, available: int | None = None, **overrides: int):
+def _gpu(
+    *,
+    capacity: int = 500,
+    available: int | None = None,
+    gpu_uuid: str = "gpu-0",
+    **overrides: int,
+):
     return PlacementPlanInput(
         capacity_bytes=capacity,
         available_bytes=available,
+        gpu_uuid=gpu_uuid,
         categories=_categories(**overrides),
     )
 
@@ -83,7 +90,7 @@ def _observation(plan, *, rank: int = 0, **overrides):
 
 
 def test_plan_has_exact_release_categories_per_rank_and_structured_telemetry() -> None:
-    plan = plan_placement((_gpu(), _gpu(capacity=600)), safety_reserve_bytes=50)
+    plan = plan_placement((_gpu(), _gpu(capacity=600, gpu_uuid="gpu-1")), safety_reserve_bytes=50)
 
     assert plan.gpu_count == 2
     assert tuple(plan.gpus[0].categories) == PLACEMENT_CATEGORIES
@@ -93,8 +100,8 @@ def test_plan_has_exact_release_categories_per_rank_and_structured_telemetry() -
     assert plan.telemetry[0].as_dict() == {
         "schema_version": 1,
         "rank": 0,
-        "gpu_uuid": "unknown",
-        "key": "unknown:0",
+        "gpu_uuid": "gpu-0",
+        "key": "gpu-0:0",
         "status": "ready",
         "required_bytes": plan.gpus[0].required_bytes,
         "non_qsa_required_bytes": plan.gpus[0].non_qsa_required_bytes,
@@ -117,7 +124,12 @@ def test_cache_zero_and_asymmetric_capacity_remain_usable() -> None:
     plan = plan_placement(
         (
             _gpu(static_expert_cache_slots=0, dynamic_expert_cache_slots=0),
-            _gpu(capacity=600, static_expert_cache_slots=0, dynamic_expert_cache_slots=0),
+            _gpu(
+                capacity=600,
+                gpu_uuid="gpu-1",
+                static_expert_cache_slots=0,
+                dynamic_expert_cache_slots=0,
+            ),
         ),
         safety_reserve_bytes=50,
     )
@@ -159,21 +171,42 @@ def test_input_categories_and_integer_values_fail_closed() -> None:
         PlacementPlanInput(
             capacity_bytes=500,
             categories={key: value for key, value in complete.items() if key != "cuda_context"},
+            gpu_uuid="gpu-0",
         )
     with pytest.raises(PlacementPlannerError, match="unknown"):
-        PlacementPlanInput(capacity_bytes=500, categories={**complete, "other": 1})
+        PlacementPlanInput(
+            capacity_bytes=500,
+            categories={**complete, "other": 1},
+            gpu_uuid="gpu-0",
+        )
     legacy = {key: value for key, value in complete.items() if key != "gdn_kv_recurrent_state"}
     legacy["gdn_qsa_kv_state"] = 30
     with pytest.raises(PlacementPlannerError, match=r"missing|unknown"):
-        PlacementPlanInput(capacity_bytes=500, categories=legacy)
+        PlacementPlanInput(capacity_bytes=500, categories=legacy, gpu_uuid="gpu-0")
+
+    with pytest.raises(PlacementPlannerError, match="placeholder"):
+        PlacementPlanInput(capacity_bytes=500, categories=complete, gpu_uuid="unknown")
+    with pytest.raises(TypeError):
+        PlacementPlanInput(capacity_bytes=500, categories=complete)
 
     for field, value in (("capacity_bytes", True), ("capacity_bytes", -1)):
         with pytest.raises(PlacementPlannerError, match=field):
-            PlacementPlanInput(**{field: value, "categories": complete})
+            PlacementPlanInput(**{field: value, "categories": complete, "gpu_uuid": "gpu-0"})
+    with pytest.raises(PlacementPlannerError, match="positive"):
+        PlacementPlanInput(capacity_bytes=0, categories=complete, gpu_uuid="gpu-0")
+    zero_free = PlacementPlanInput(
+        capacity_bytes=1,
+        available_bytes=0,
+        categories=complete,
+        gpu_uuid="gpu-0",
+    )
+    assert zero_free.available_bytes == 0
     with pytest.raises(PlacementPlannerError, match="1 or 2"):
         plan_placement(())
     with pytest.raises(PlacementPlannerError, match="1 or 2"):
         plan_placement((_gpu(), _gpu(), _gpu()))
+    with pytest.raises(PlacementPlannerError, match="duplicate"):
+        plan_placement((_gpu(), _gpu(capacity=600)), safety_reserve_bytes=50)
 
 
 def test_overcommit_is_reported_with_deficit_and_does_not_look_ready() -> None:
@@ -203,6 +236,19 @@ def test_canary_accepts_bounded_category_drift_and_reports_checkpoint() -> None:
     assert result.gpus[0].allocator_allocated_bytes == plan.gpus[0].live_required_bytes
     assert result.gpus[0].allocator_high_water_bytes == observed.allocator_high_water_bytes
     assert result.as_dict()["checkpoint"] == "post-first-large-prefill"
+
+
+def test_two_gpu_canary_allows_mixed_child_statuses_on_aggregate_failure() -> None:
+    plan = plan_placement((_gpu(), _gpu(capacity=600, gpu_uuid="gpu-1")), safety_reserve_bytes=50)
+    result = evaluate_canary(
+        plan,
+        checkpoint="post-first-large-prefill",
+        observations=(_observation(plan), _observation(plan, rank=1, fallback=True)),
+    )
+
+    assert result.status == "fail"
+    assert tuple(item.status for item in result.gpus) == ("pass", "fail")
+    assert any(reason.startswith("gpu1:") for reason in result.reasons)
 
 
 @pytest.mark.parametrize(
@@ -243,7 +289,7 @@ def test_canary_rejects_allocator_inconsistency_missing_categories_and_low_reser
     with pytest.raises(PlacementPlannerError, match="missing"):
         PlacementObservation(
             rank=0,
-            gpu_uuid="unknown",
+            gpu_uuid="gpu-0",
             driver_total_bytes=500,
             driver_free_bytes=499,
             allocator_allocated_bytes=1,
@@ -313,7 +359,7 @@ def test_canary_requires_exact_checkpoint_and_rejects_unavailable_high_water() -
     with pytest.raises(PlacementPlannerError, match="driver_total_bytes"):
         PlacementObservation(
             rank=0,
-            gpu_uuid="unknown",
+            gpu_uuid="gpu-0",
             driver_total_bytes=None,
             driver_free_bytes=100,
             allocator_allocated_bytes=1,

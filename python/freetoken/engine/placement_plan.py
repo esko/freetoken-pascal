@@ -17,6 +17,7 @@ from typing import Any
 
 MAX_PLACEMENT_BYTES = (1 << 63) - 1
 PLACEMENT_SCHEMA_VERSION = 1
+_PLACEHOLDER_GPU_UUIDS = frozenset({"", "na", "n/a", "none", "null", "placeholder", "unknown"})
 
 # Keep every release-visible bucket explicit.  In particular, the GDN/KV recurrent state is
 # distinct from QSA state, and QSA phase/workspace names are not collapsed into generic_workspaces:
@@ -123,6 +124,15 @@ def _strict_bool(value: Any, name: str) -> bool:
     return value
 
 
+def _gpu_uuid(value: Any, name: str = "gpu_uuid") -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise PlacementInputError(f"{name} must be a non-empty string")
+    normalized = value.strip()
+    if normalized.casefold() in _PLACEHOLDER_GPU_UUIDS:
+        raise PlacementInputError(f"{name} must be an explicit non-placeholder GPU UUID")
+    return normalized
+
+
 def _signed_int(value: Any, name: str) -> int:
     if isinstance(value, bool):
         raise PlacementInputError(f"{name} must be an integer")
@@ -197,14 +207,13 @@ class PlacementPlanInput:
 
     capacity_bytes: int
     categories: Mapping[str, int]
+    gpu_uuid: str
     available_bytes: int | None = None
-    gpu_uuid: str = "unknown"
 
     def __post_init__(self) -> None:
-        capacity = _int(self.capacity_bytes, "capacity_bytes")
+        capacity = _positive(self.capacity_bytes, "capacity_bytes")
         categories = _categories(self.categories)
-        if not isinstance(self.gpu_uuid, str) or not self.gpu_uuid.strip():
-            raise PlacementInputError("gpu_uuid must be a non-empty string")
+        gpu_uuid = _gpu_uuid(self.gpu_uuid)
         available = (
             capacity
             if self.available_bytes is None
@@ -218,7 +227,7 @@ class PlacementPlanInput:
         object.__setattr__(self, "capacity_bytes", capacity)
         object.__setattr__(self, "available_bytes", available)
         object.__setattr__(self, "categories", categories)
-        object.__setattr__(self, "gpu_uuid", self.gpu_uuid.strip())
+        object.__setattr__(self, "gpu_uuid", gpu_uuid)
 
 
 # The shorter spelling is useful to callers that use the GPU term explicitly.
@@ -244,9 +253,8 @@ class GPUPlacementPlan:
     def __post_init__(self) -> None:
         if isinstance(self.rank, bool) or not isinstance(self.rank, int) or self.rank < 0:
             raise PlacementInputError("rank must be a non-negative integer")
-        if not isinstance(self.gpu_uuid, str) or not self.gpu_uuid:
-            raise PlacementInputError("gpu_uuid must be a non-empty string")
-        capacity = _int(self.capacity_bytes, "capacity_bytes")
+        gpu_uuid = _gpu_uuid(self.gpu_uuid)
+        capacity = _positive(self.capacity_bytes, "capacity_bytes")
         available = _int(self.available_bytes, "available_bytes")
         required_input = _int(self.required_bytes, "required_bytes")
         if available > capacity:
@@ -270,6 +278,7 @@ class GPUPlacementPlan:
         object.__setattr__(self, "headroom_bytes", headroom)
         object.__setattr__(self, "deficit_bytes", deficit)
         object.__setattr__(self, "categories", categories)
+        object.__setattr__(self, "gpu_uuid", gpu_uuid)
         object.__setattr__(self, "reasons", tuple(self.reasons))
 
     def as_dict(self) -> dict[str, Any]:
@@ -364,6 +373,8 @@ class PlacementPlan:
             raise PlacementInputError("placement plan entries must be GPUPlacementPlan values")
         if tuple(item.rank for item in gpus) != tuple(range(len(gpus))):
             raise PlacementInputError("GPU ranks must be contiguous and start at zero")
+        if len({item.gpu_uuid for item in gpus}) != len(gpus):
+            raise PlacementInputError("duplicate GPU UUIDs are not allowed")
         reserve = _int(self.safety_reserve_bytes, "safety_reserve_bytes")
         for item in gpus:
             if item.categories["safety_reserve"] != reserve:
@@ -500,8 +511,7 @@ class PlacementObservation:
     def __post_init__(self) -> None:
         if isinstance(self.rank, bool) or not isinstance(self.rank, int) or self.rank < 0:
             raise PlacementInputError("rank must be a non-negative integer")
-        if not isinstance(self.gpu_uuid, str) or not self.gpu_uuid.strip():
-            raise PlacementInputError("gpu_uuid must be a non-empty string")
+        gpu_uuid = _gpu_uuid(self.gpu_uuid)
         driver_total = _int(self.driver_total_bytes, "driver_total_bytes")
         driver_free = _int(self.driver_free_bytes, "driver_free_bytes")
         allocated = _int(self.allocator_allocated_bytes, "allocator_allocated_bytes")
@@ -519,7 +529,7 @@ class PlacementObservation:
         retries = _int(self.allocation_retries, "allocation_retries")
         failures = _int(self.allocation_failures, "allocation_failures")
         growth = _int(self.retained_workspace_growth_bytes, "retained_workspace_growth_bytes")
-        object.__setattr__(self, "gpu_uuid", self.gpu_uuid.strip())
+        object.__setattr__(self, "gpu_uuid", gpu_uuid)
         object.__setattr__(self, "driver_total_bytes", driver_total)
         object.__setattr__(self, "driver_free_bytes", driver_free)
         object.__setattr__(self, "allocator_allocated_bytes", allocated)
@@ -617,8 +627,7 @@ class GPUCanaryTelemetry:
             raise PlacementInputError("rank must be a non-negative integer")
         if not isinstance(self.status, str) or self.status not in {"pass", "fail"}:
             raise PlacementInputError(f"unknown canary status {self.status!r}")
-        if not isinstance(self.gpu_uuid, str) or not self.gpu_uuid.strip():
-            raise PlacementInputError("gpu_uuid must be a non-empty string")
+        gpu_uuid = _gpu_uuid(self.gpu_uuid)
         planned = _categories(self.planned_categories, name="planned categories")
         observed = _categories(self.observed_categories, name="observed categories")
         non_qsa, persistent, transient, qsa_required, required = _required_totals(
@@ -669,7 +678,7 @@ class GPUCanaryTelemetry:
             raise PlacementInputError("canary status must agree with reasons")
 
         object.__setattr__(self, "rank", self.rank)
-        object.__setattr__(self, "gpu_uuid", self.gpu_uuid.strip())
+        object.__setattr__(self, "gpu_uuid", gpu_uuid)
         for name, value in normalized.items():
             object.__setattr__(self, name, value)
         object.__setattr__(self, "headroom_bytes", headroom)
@@ -757,8 +766,9 @@ class CanaryResult:
             raise PlacementInputError("canary telemetry ranks must be contiguous and start at zero")
         if len({item.key for item in gpus}) != len(gpus):
             raise PlacementInputError("canary telemetry GPU identities must be unique")
-        if any(item.status != self.status for item in gpus):
-            raise PlacementInputError("canary telemetry status must match result status")
+        expected_status = "pass" if all(item.status == "pass" for item in gpus) else "fail"
+        if self.status != expected_status:
+            raise PlacementInputError("canary aggregate status does not match child statuses")
         try:
             reasons = tuple(self.reasons)
         except TypeError as exc:

@@ -96,6 +96,7 @@ This H0 contract makes no kernel, throughput, or Tesla P4 claim and does not cha
 
 The Torch-free `freetoken.engine.placement_plan` module is the H0 owner for the per-GPU placement schema and startup-canary decision contract.
 It keys each rank by stable GPU UUID plus rank and keeps dense/resident weights, shared experts, GDN/KV recurrent state, every persistent and transient QSA phase category, CUDA context, generic workspaces, transfer buffers, static and dynamic cache slots, and safety reserve explicit.
+Placement inputs require explicit non-placeholder UUIDs, reject duplicate cards, and permit zero observed free bytes while requiring positive physical capacity.
 QSA state is represented only by the explicit `qsa_persistent_state` and `qsa_transient_state` categories; it is not folded into the GDN/KV recurrent-state bucket.
 Its required high-water is non-QSA demand plus QSA persistent bytes plus QSA transient high-water bytes plus reserve, so lifetime phases are not double-counted.
 The planner and canary evaluator are immutable, versioned, allocation-free accounting only; they do not claim runtime placement or hardware qualification.
