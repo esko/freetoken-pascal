@@ -7,6 +7,7 @@ backend contract selects ``torch-reference``.  The oracle is the pure-torch
 
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,31 @@ except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover - environm
 F = torch.nn.functional
 
 
+def _constructed_op(**kwargs):
+    """Construct a tiny CPU op for constructor-only contract checks."""
+    from freetoken.distributed import set_tp_info, try_get_tp_info
+
+    tp_info = try_get_tp_info()
+    if tp_info is None:
+        set_tp_info(0, 1)
+    elif tp_info.size != 1:
+        pytest.skip("constructor contract test requires a single-process TP context")
+    defaults = {
+        "hidden_size": 4,
+        "num_k_heads": 1,
+        "num_v_heads": 2,
+        "head_k_dim": 2,
+        "head_v_dim": 2,
+        "conv_kernel_size": 3,
+        "rms_norm_eps": 1e-6,
+        "layer_id": 0,
+        "expert_quant": "none",
+        "attn_quant": "none",
+    }
+    defaults.update(kwargs)
+    return Qwen4ExpGatedDeltaNet(**defaults)
+
+
 class _Pool:
     def __init__(self, slots: int, conv_dim: int, state_len: int, heads: int, dim: int):
         self.conv_states = torch.zeros(1, slots, conv_dim, state_len)
@@ -30,6 +56,27 @@ class _Pool:
     def local_index(self, layer_id: int) -> int:
         assert layer_id == 0
         return 0
+
+
+def test_gdn_constructor_freezes_env_mode_and_package_probes(monkeypatch):
+    gdn_module = importlib.import_module("freetoken.models.qwen4_exp.gdn")
+    monkeypatch.setenv("FREETOKEN_GDN_MODE", "reference")
+    monkeypatch.delenv("FREETOKEN_GDN_BACKEND", raising=False)
+    monkeypatch.setattr(gdn_module, "_probe_fla_available", lambda: True)
+    monkeypatch.setattr(gdn_module, "_probe_triton_candidate_available", lambda: True)
+    op = _constructed_op()
+
+    monkeypatch.setenv("FREETOKEN_GDN_MODE", "auto")
+    monkeypatch.setattr(gdn_module, "_probe_fla_available", lambda: False)
+    monkeypatch.setattr(gdn_module, "_probe_triton_candidate_available", lambda: False)
+    assert op._gdn_mode == "torch-reference"
+    assert op._gdn_fla_available is True
+    assert op._gdn_candidate_available is True
+
+
+def test_gdn_rejects_non_divisible_gqa_head_counts():
+    with pytest.raises(ValueError, match="positive multiple"):
+        _constructed_op(num_k_heads=2, num_v_heads=3)
 
 
 def _op(*, num_k_heads: int, num_v_heads: int, head_dim: int, conv_dim: int, kernel: int):

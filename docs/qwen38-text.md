@@ -19,11 +19,15 @@ when a slot is reused. The model forces the naive cache and disables CUDA graphs
 reference path performs host work. Issue #13 owns the release PLE mmap/offload representation.
 
 The Qwen4 GDN boundary resolves `FREETOKEN_GDN_MODE` (`auto`, `reference`, or
-`triton-candidate`) before importing a fused kernel. `auto` selects the qualified in-tree FLA
-implementation only on supported modern-GPU inputs; `sm_61`, unsupported dtypes, or unavailable
-packages select the stateful `torch-reference` fallback and expose the reason through the debug
-observer. `triton-candidate` is explicit-only and fails closed until its donor and H1/H2 parity
-gates are complete. The immutable decision contract is Torch-free so this policy is testable in H0.
+`triton-candidate`) at construction, before importing a fused kernel. The mode and package
+availability probes are frozen for the lifetime of the GDN object. `auto` selects the eligible
+in-tree FLA implementation only on supported modern-GPU inputs; `sm_61`, unsupported dtypes, or
+unavailable packages select the stateful `torch-reference` fallback and expose the reason through
+the debug observer. `triton-candidate` is explicit-only and fails closed until its donor and H1/H2
+parity gates are complete. The immutable decision contract is Torch-free so this policy is
+testable in H0. The FLA recurrent-state view is [V,K] while the pool view is [K,V]; equal
+dimensions only make these views shape-compatible, so axis-order and nonzero-state parity remain
+H2 work. Backend switching and checkpoint parity are not claimed by H0.
 
 QSA retains full-resolution K/V and stores one compressed index key per configured token group.
 Before the token budget is reached, selection is dense-equivalent. Beyond it, the indexer selects

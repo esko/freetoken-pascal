@@ -28,7 +28,7 @@ _warned_reference_decisions: set[GdnDispatchDecision] = set()
 
 
 def _probe_fla_available() -> bool:
-    """Check the currently qualified in-tree FLA dependency without importing it."""
+    """Check the eligible in-tree FLA dependency without importing it; H2 parity is pending."""
 
     try:
         return (
@@ -64,8 +64,8 @@ class _DepthwiseConv1d(BaseOP):
 class _GatedRMSNorm(BaseOP):
     """RMSNorm of x followed by an ``activation(z)`` gate (HF Qwen4ExpTextRMSNormGated).
 
-    Uses the fused fla ``rms_norm_gated`` triton kernel (norm(x) * act(z) in one
-    kernel) instead of the unfused pow/mean/rsqrt/mul/act chain, matching sglang's
+    Uses the fused FLA ``rms_norm_gated`` Triton kernel (norm(x) * act(z) in one
+    kernel) instead of the unfused pow/mean/rsqrt/mul/act chain, matching the
     ``RMSNormGated`` -- collapses ~8 elementwise kernels per GDN layer into one.
     Qwen3.8-Flash-Next gates with sigmoid where Qwen3.5 gates with silu."""
 
@@ -129,17 +129,30 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         gdn_fla_available: bool | None = None,
         gdn_candidate_available: bool | None = None,
     ):
+        if num_k_heads <= 0 or num_v_heads <= 0 or num_v_heads % num_k_heads:
+            raise ValueError(
+                "GatedDeltaNet requires num_v_heads to be a positive multiple of "
+                f"num_k_heads, got {num_v_heads} and {num_k_heads}"
+            )
         self.layer_id = layer_id
-        self._gdn_mode = None if gdn_mode is None else parse_gdn_mode(gdn_mode)
+        # Resolve process-wide settings exactly once. A model instance must not switch backend
+        # if a caller mutates its environment or package installation between forwards.
+        self._gdn_mode = parse_gdn_mode(gdn_mode) if gdn_mode is not None else gdn_mode_from_env()
         if gdn_observer is not None and not callable(gdn_observer):
             raise TypeError("gdn_observer must be callable")
         self._gdn_observer = gdn_observer
-        self._gdn_fla_available = gdn_fla_available
-        self._gdn_candidate_available = gdn_candidate_available
-        # The fla chunk/decode kernels read+write the recurrent state and the per-chunk h as
-        # [V, K] while the LinearStatePool declares it [K, V]; these coincide (and the
-        # hybrid-radix snapshot scatter h[h_row]->slot is a plain copy) only when the two head
-        # dims are equal. Qwen3.5/3.6/3.8 satisfy this (128/128); guard any future config.
+        self._gdn_fla_available = (
+            _probe_fla_available() if gdn_fla_available is None else gdn_fla_available
+        )
+        self._gdn_candidate_available = (
+            _probe_triton_candidate_available()
+            if gdn_candidate_available is None
+            else gdn_candidate_available
+        )
+        # The FLA chunk/decode kernels read+write recurrent state and per-chunk h as [V, K],
+        # while LinearStatePool declares it [K, V]. Equal dimensions make the tensors shape
+        # compatible, not semantically equivalent: canonical axis-order parity remains an H2
+        # item, and backend switching/checkpoint parity is not claimed by this H0 slice.
         assert head_k_dim == head_v_dim, (
             f"GatedDeltaNet requires head_k_dim == head_v_dim, got {head_k_dim} != {head_v_dim}"
         )
@@ -153,7 +166,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         self.conv_kernel_size = conv_kernel_size
         # qkv|z carry a weight scale (block-fp8 weight_scale_inv, or per-tensor FP8
         # weight_scale); b|a stay bf16. Both quant modes therefore split the four-way
-        # fusion into an fp8 qkvz GEMM + a bf16 ba GEMM (matches sglang/vLLM).
+        # fusion into an fp8 qkvz GEMM + a bf16 ba GEMM (matches the upstream split).
         self._block_fp8 = expert_quant == "fp8_block"
         self._pertensor_fp8 = attn_quant == "fp8_pertensor"
         self._fp8 = self._block_fp8 or self._pertensor_fp8
@@ -172,7 +185,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             self.in_proj = LinearColParallelMerged(hidden_size, self._in_proj_split, has_bias=False)
         self.conv1d = _DepthwiseConv1d(self.conv_dim, conv_kernel_size)
         # Recurrence-gating params kept in fp32 (exp/softplus is precision-sensitive,
-        # and the fla kernel reads them as fp32) -- matches HF/sglang, and avoids a
+        # and the FLA kernel reads them as fp32) -- matches HF/in-tree FLA, and avoids a
         # per-call .float() upcast in the decode wrapper. The weight loader exempts
         # *.A_log / *.dt_bias from the model-dtype downcast.
         self.dt_bias = torch.empty(num_v_heads, dtype=torch.float32)
@@ -340,8 +353,8 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
     ) -> None:
         """Snapshot this layer's recurrent + conv state at the chunk-aligned track boundary
         into a donatable pool slot, on the forward stream (hybrid-radix extra_buffer path).
-        SSM: ``recurrent_states[li, dst] = h[0, h_row]`` -- a DIRECT copy (h is [V,K], the
-        state pool is [K,V]; they coincide because GDN requires head_k_dim == head_v_dim).
+        SSM: ``recurrent_states[li, dst] = h[0, h_row]`` -- a direct shape-compatible copy
+        (h is [V,K], the state pool is [K,V]); canonical axis-order parity remains H2 work.
         Conv: the last (kernel-1) raw conv-input timesteps ending at the boundary."""
         rec = pool.recurrent_states[li]
         rec.index_copy_(0, fla.track_dst, h[0, fla.track_h_row].to(rec.dtype))
@@ -361,15 +374,9 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         total = hidden_states.shape[0]
         dtype = hidden_states.dtype
 
-        requested_mode = self._gdn_mode or gdn_mode_from_env()
-        fla_available = (
-            _probe_fla_available() if self._gdn_fla_available is None else self._gdn_fla_available
-        )
-        candidate_available = (
-            _probe_triton_candidate_available()
-            if self._gdn_candidate_available is None
-            else self._gdn_candidate_available
-        )
+        requested_mode = self._gdn_mode
+        fla_available = self._gdn_fla_available
+        candidate_available = self._gdn_candidate_available
         decision = resolve_gdn_dispatch(
             requested_mode=requested_mode,
             capability=_device_capability(hidden_states.device),
@@ -392,7 +399,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         if decision.selected_implementation == "triton-candidate":
             # The issue-93 donor candidate is deliberately not wired until H1/H2 audit and
             # parity evidence are complete.  An affirmative injected probe may exercise the
-            # contract, but it must never silently run the qualified FLA implementation.
+            # contract, but it must never silently run the in-tree FLA implementation.
             raise GdnDispatchError(
                 "triton-candidate selected but no Qwen4 GDN candidate implementation is registered"
             )
