@@ -140,9 +140,12 @@ def fused_topk_softmax(
             raise ValueError("num_token_non_padded must be a scalar tensor")
         if num_token_non_padded.dtype not in integer_dtypes:
             raise TypeError("num_token_non_padded must have an integer dtype")
-        token_limit = int(num_token_non_padded.item())
-        if token_limit < 0 or token_limit > M:
-            raise ValueError("num_token_non_padded must be within the token range")
+        if num_token_non_padded.device != gating_output.device:
+            raise ValueError("num_token_non_padded must be on the logits device")
+        if num_token_non_padded.device.type == "cpu":
+            token_limit = int(num_token_non_padded.item())
+            if token_limit < 0 or token_limit > M:
+                raise ValueError("num_token_non_padded must be within the token range")
     if not bool(torch.isfinite(gating_output.float()).all().item()):
         raise ValueError("triton router candidate accepts finite logits only")
     weights = torch.empty((M, topk), dtype=torch.float32, device=gating_output.device)

@@ -30,7 +30,7 @@ def _validate_router_arguments(
     topk: int,
     renormalize: bool,
     num_token_non_padded: torch.Tensor | None,
-) -> tuple[int, int, int | None]:
+) -> tuple[int, int, int | torch.Tensor | None]:
     """Validate shared router arguments and return ``(tokens, experts, limit)``."""
     if not isinstance(gating_output, torch.Tensor):
         raise TypeError("gating_output must be a torch.Tensor")
@@ -52,10 +52,24 @@ def _validate_router_arguments(
         raise ValueError("num_token_non_padded must be a scalar tensor")
     if num_token_non_padded.dtype not in _INTEGER_TOKEN_DTYPES:
         raise TypeError("num_token_non_padded must have an integer dtype")
+    if num_token_non_padded.device != gating_output.device:
+        raise ValueError("num_token_non_padded must be on the logits device")
+    if num_token_non_padded.device.type == "cpu":
+        limit = _cpu_token_limit(num_token_non_padded, num_tokens)
+        return num_tokens, num_experts, limit
+    # A CUDA scalar is deliberately retained on-device. Calling item() here would
+    # synchronize the stream and make the reference/external paths graph-unsafe.
+    return num_tokens, num_experts, num_token_non_padded
+
+
+def _cpu_token_limit(num_token_non_padded: object, num_tokens: int) -> int | None:
+    """Extract and range-check a token limit only when its scalar is CPU-resident."""
+    if getattr(getattr(num_token_non_padded, "device", None), "type", None) != "cpu":
+        return None
     limit = int(num_token_non_padded.item())
     if limit < 0 or limit > num_tokens:
         raise ValueError("num_token_non_padded must be within the token range")
-    return num_tokens, num_experts, limit
+    return limit
 
 
 def _probe_triton_candidate() -> bool:

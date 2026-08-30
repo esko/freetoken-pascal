@@ -152,6 +152,11 @@ CPU expert microbenchmarks retain every raw repeat and separately report the sup
 
 Adapt merged FreeToken PR #257's arbitrary-`K` fused router first, then compare it with the permanent FP32 Torch reference using the same 512 logits. Expert IDs are exact on no-tie inputs. Selected probabilities use the softmax denominator across all experts, with separate tests for renormalized weights, padded rows, ties and NaN/Inf behavior. H1 proves CUDA 12.6/`sm_61` build viability; H2 determines whether upstream Triton is usable and faster on P4. A bespoke CUDA implementation is required only if that evidence rejects Triton. Performance evidence records router-only time separately from complete layer and token time.
 
+The H0 contract tests resolve `auto`, `torch-reference` and explicit `triton-candidate`
+without global decision state, assert fallback reasons and observer fields, and verify
+that CUDA-resident token-limit scalars are compared on-device rather than extracted with
+`item()`. The candidate remains default-off until the H1/H2 gates pass.
+
 ### Placement operation
 
 Test the #73 planner and canary with synthetic and real categories:

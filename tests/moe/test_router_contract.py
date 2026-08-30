@@ -1,14 +1,32 @@
 import dataclasses
+from types import SimpleNamespace
 
 import pytest
 import torch
 from freetoken.moe.fused import (
     RouterDispatchError,
+    _cpu_token_limit,
     _torch_fused_topk,
     fused_topk,
     resolve_router_dispatch,
 )
 from freetoken.moe.router_contract import RouterDispatchDecision
+
+
+def test_cuda_token_limit_helper_never_extracts_device_scalar():
+    class GuardedCudaScalar:
+        device = SimpleNamespace(type="cuda")
+
+        def item(self):
+            pytest.fail("CUDA token scalar must not be copied to the host")
+
+    assert _cpu_token_limit(GuardedCudaScalar(), 4) is None
+
+
+def test_cpu_token_limit_helper_extracts_and_checks_range():
+    assert _cpu_token_limit(torch.tensor(3, dtype=torch.int32), 4) == 3
+    with pytest.raises(ValueError, match="range"):
+        _cpu_token_limit(torch.tensor(5, dtype=torch.int32), 4)
 
 
 def test_router_dispatch_decision_is_immutable_and_complete():
