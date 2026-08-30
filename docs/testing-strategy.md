@@ -205,6 +205,25 @@ The comparison artifact is a deterministic ZIP containing a strict JSON identity
 
 The H0 fixture suite validates this evidence protocol and the prompt materializer. It does not claim Qwen3.8 model parity. Issue #14 remains open until real-P4 H2 runs attach independent router, GDN, QSA, PLE, continuation-token, and selected-logit evidence for short, incremental, chunked, reset, checkpoint/restore, 32K, 128K, and 262K qualification cases.
 
+The long-horizon H0 contract at `tests/fixtures/qwen38-long-horizon-contract.json` makes
+the deferred gate executable without model weights. It requires multi-turn coding, repeated
+tool calls/results, state-dependent reasoning, structured transformation, and long-generation
+probe families, validates every declared turn across the full 16-step minimum horizon, and
+requires at least 16 aligned steps of
+continuation-token, router-ID, semantic-output-token, sensitive-control-input, and
+GDN-state evidence. The sensitive-control-input rows are bound to the linked fixture:
+subject rows must carry its candidate values and independent-reference rows its
+reference values for every step. This intentionally different input is excluded from
+the ordinary observation comparator, while the declared `gdn_state` numeric comparison
+still gates the positive control. The
+`compare_long_horizon_bundles` requires subject and independent-reference outputs, validates
+every declared turn, compares the semantic trajectories exactly, and then reuses the independent
+identity and tensor A/B checks above. Contract loading resolves the linked sensitive fixture and
+checks its tensor identity/class plus declared candidate perturbation field. The `gdn_state`
+numeric comparison is deliberately retained even when semantic token outputs remain identical,
+so the linked perturbed GDN control cannot be hidden by fluent short or retrieval output. This
+is synthetic H0 contract evidence only, not model-quality or P4 qualification.
+
 Every mixed-precision candidate preserves exact routed expert IDs on the fixed routing corpus and meets recorded output tolerances for long-context retrieval, tool-call selection/arguments, structured JSON and coding. These gates compare against the declared reference profile and are reported separately from token-level numerical tolerances.
 
 Converter fixtures independently check centered hyperconnection `1 + weight`, GDN fused-projection segmentation and value-head ordering, QSA/indexer projection splitting, PLE row scale interpretation, first/middle/last expert addressing, and tokenizer/chat-template identity. A community artifact that exposes a converter defect may serve as an oracle, but cannot become a release profile without immutable provenance and the complete artifact gates.
