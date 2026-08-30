@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import sys
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -20,16 +21,28 @@ def _nvtx_range(name: str):
     import torch
 
     if torch.cuda.is_available():
+        annotation = None
         try:
             import torch.cuda.nvtx as nvtx
 
-            with nvtx.range(name):
-                yield
-            return
+            annotation = nvtx.range(name)
+            annotation.__enter__()
         except (ImportError, RuntimeError):
             # NVTX is optional instrumentation; the operation itself remains
-            # valid when a wheel omits the NVTX runtime library.
-            pass
+            # valid when a wheel omits the NVTX runtime library.  Entering the
+            # context is kept outside the body ``try`` so model exceptions are
+            # never mistaken for missing instrumentation.
+            annotation = None
+        if annotation is not None:
+            try:
+                yield
+            except BaseException:
+                error = sys.exc_info()
+                if not annotation.__exit__(*error):
+                    raise
+            else:
+                annotation.__exit__(None, None, None)
+            return
     yield
 
 
