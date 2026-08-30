@@ -15,6 +15,7 @@ Each result record contains:
 - CPU, memory population, NUMA topology;
 - GPU names, bus IDs, clocks, power limits and temperatures;
 - model profile, filename, SHA-256, GGUF metadata and tensor-type census;
+- canonical placement-profile identity and digest, including the bound plan/backoff schema version;
 - dedicated PLE artifact checksum, row codec, geometry and shard identity;
 - context, batch, ubatch, concurrency and sampling;
 - planned and observed placement, safety reserve, PLE backend/advice, page-cache state, cache size/policy, pinned-memory policy and q-star mode;

@@ -105,6 +105,11 @@ They reject unavailable or inconsistent samples before readiness.
 Each child telemetry record carries the aggregate tolerance and a passing record independently enforces category, live-allocation, and peak high-water agreement within that bound.
 The bounded backoff remains pending until both profile-bound post-load and post-first-large-prefill results pass in order; a failure resets checkpoint evidence before advancing, stale-profile results are rejected, and readiness is never inferred from a boolean.
 
+The torch-free `freetoken.engine.placement_profile` boundary serializes one plan and one backoff candidate with a versioned canonical identity envelope.
+Its SHA-256 covers the model and quant-census checksums, runtime binary/toolchain checksums, runtime commit/version, driver and CUDA identities, raw context/state/QSA geometry, and ordered per-rank GPU topology (UUID, capacity, compute capability, PCI, NUMA and peer ownership).
+Profile deserialization rejects missing or unknown fields, tampered digests, and topology/geometry mismatches before any future runtime owner may consider the profile.
+Canonical profile identity is H0 evidence only; CUDA discovery, stale-profile loading and runtime selection remain a follow-up integration slice.
+
 The exact ordinary-tensor placement is measured. The architecture requires the routed expert bank to remain complete in DDR4 even when a subset is cached in VRAM.
 The PLE file or shard set has a separate ownership and accounting boundary so model-weight mappings cannot be accidentally paged, prefetched, or pinned with it.
 
