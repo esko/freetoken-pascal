@@ -30,7 +30,7 @@ Runs on GitHub-hosted Linux without a GPU:
 - deterministic state serialization without CUDA;
 - dedicated PLE shard format and separation from unrelated model tensors;
 - mmap/positional-read parity, random-advice dispatch, direct/vectorized planner parity, adaptive planner selection, asynchronous prefetch and cancellation;
-- deterministic page-cache, major-fault, block-I/O and read-amplification metric parsing with synthetic counters;
+- deterministic page-cache, major-fault, block-I/O and read-amplification metric parsing with synthetic counters; `freetoken.ple_io_evidence` must reject process-only physical-I/O claims, counter regressions, device ambiguity/change, invalid phases and zero denominators;
 - PLE row-codec identity and reconstruction tests;
 - routing simulation, Q4/Q3 profile identity, quant conversion and mixed-precision quality A/B fixtures;
 - placement-plan accounting, missing-category rejection, stale-profile invalidation, automatic-backoff state machine and canary result schemas;
