@@ -21,9 +21,10 @@ import threading
 import time
 from collections.abc import Collection
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping, Protocol
 
 import numpy as np
 
@@ -33,6 +34,240 @@ from freetoken.gguf_validation import inspect_gguf
 _EXPERT_RE = re.compile(r"^blk\.(?P<layer>[0-9]+)\.ffn_(?P<projection>gate|up|down)_exps\.weight$")
 _PLE_TENSOR = "per_layer_token_embd.weight"
 _PROJECTIONS = ("gate", "up", "down")
+
+
+@dataclass(frozen=True)
+class PLECodecDescriptor:
+    """Immutable identity and geometry contract for one packed PLE row codec.
+
+    ``parameters`` intentionally remains an open, JSON-compatible mapping.  This
+    lets future row codecs describe group sizes, scale encodings, or codebook
+    revisions without adding branches to the storage and lookup APIs.
+    """
+
+    codec_id: str
+    version: int
+    packed_dtype: str
+    decoded_dtype: str
+    elements_per_block: int
+    bytes_per_block: int
+    parameters: Mapping[str, str | int | float | bool] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.codec_id, str) or not re.fullmatch(
+            r"[a-z0-9][a-z0-9_.-]*", self.codec_id
+        ):
+            raise ValueError(f"invalid PLE codec identity {self.codec_id!r}")
+        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version <= 0:
+            raise ValueError(f"invalid PLE codec version {self.version!r}")
+        for name, value in (
+            ("packed_dtype", self.packed_dtype),
+            ("decoded_dtype", self.decoded_dtype),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"invalid PLE codec {name} {value!r}")
+            try:
+                np.dtype(value)
+            except TypeError as error:
+                raise ValueError(f"invalid PLE codec {name} {value!r}") from error
+        for name, value in (
+            ("elements_per_block", self.elements_per_block),
+            ("bytes_per_block", self.bytes_per_block),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"invalid PLE codec {name} {value!r}")
+        if not isinstance(self.parameters, Mapping):
+            raise TypeError("PLE codec parameters must be a mapping")
+        parameters = dict(self.parameters)
+        for name, value in parameters.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"invalid PLE codec parameter name {name!r}")
+            if not isinstance(value, (str, int, float, bool)):
+                raise ValueError(f"invalid PLE codec parameter {name!r}")
+        object.__setattr__(self, "parameters", MappingProxyType(parameters))
+
+    @property
+    def identity(self) -> str:
+        return f"{self.codec_id}@{self.version}"
+
+    def to_manifest(self) -> dict[str, Any]:
+        return {
+            "id": self.codec_id,
+            "version": self.version,
+            "packed_dtype": self.packed_dtype,
+            "decoded_dtype": self.decoded_dtype,
+            "elements_per_block": self.elements_per_block,
+            "bytes_per_block": self.bytes_per_block,
+            "parameters": dict(self.parameters),
+        }
+
+    @classmethod
+    def from_manifest(cls, value: Mapping[str, Any]) -> PLECodecDescriptor:
+        if not isinstance(value, Mapping):
+            raise ValueError("PLE artifact codec descriptor must be an object")
+        required = (
+            "id",
+            "version",
+            "packed_dtype",
+            "decoded_dtype",
+            "elements_per_block",
+            "bytes_per_block",
+            "parameters",
+        )
+        if any(key not in value for key in required):
+            raise ValueError("PLE artifact codec descriptor is incomplete")
+        parameters = value["parameters"]
+        if not isinstance(parameters, Mapping):
+            raise ValueError("PLE artifact codec parameters must be an object")
+        return cls(
+            codec_id=value["id"],
+            version=value["version"],
+            packed_dtype=value["packed_dtype"],
+            decoded_dtype=value["decoded_dtype"],
+            elements_per_block=value["elements_per_block"],
+            bytes_per_block=value["bytes_per_block"],
+            parameters=parameters,
+        )
+
+    def validate_row_geometry(self, elements_per_row: int, row_bytes: int) -> None:
+        if (
+            isinstance(elements_per_row, bool)
+            or not isinstance(elements_per_row, int)
+            or elements_per_row <= 0
+            or isinstance(row_bytes, bool)
+            or not isinstance(row_bytes, int)
+            or row_bytes <= 0
+            or elements_per_row % self.elements_per_block
+            or row_bytes % self.bytes_per_block
+            or elements_per_row // self.elements_per_block
+            != row_bytes // self.bytes_per_block
+        ):
+            raise ValueError(
+                f"invalid PLE codec row geometry for {self.identity}: "
+                f"{elements_per_row} elements, {row_bytes} bytes"
+            )
+
+
+class PLECodec(Protocol):
+    """Decoder contract consumed by :class:`MappedPLETable`."""
+
+    descriptor: PLECodecDescriptor
+
+    def decode(
+        self,
+        packed: np.ndarray,
+        *,
+        rows: int,
+        elements_per_row: int,
+    ) -> np.ndarray: ...
+
+
+class PLECodecRegistry:
+    """Immutable registry resolving a manifest descriptor to one decoder."""
+
+    def __init__(self, codecs: Mapping[tuple[str, int], PLECodec]) -> None:
+        resolved: dict[tuple[str, int], PLECodec] = {}
+        for key, codec in codecs.items():
+            if key != (codec.descriptor.codec_id, codec.descriptor.version):
+                raise ValueError("PLE codec registry key disagrees with descriptor")
+            resolved[key] = codec
+        self._codecs = MappingProxyType(resolved)
+
+    @property
+    def codecs(self) -> Mapping[tuple[str, int], PLECodec]:
+        return self._codecs
+
+    def resolve(
+        self,
+        descriptor_or_id: PLECodecDescriptor | str,
+        version: int | None = None,
+    ) -> PLECodec:
+        if isinstance(descriptor_or_id, PLECodecDescriptor):
+            descriptor = descriptor_or_id
+        elif isinstance(descriptor_or_id, str) and version is not None:
+            key = (descriptor_or_id, version)
+            versions = {item[1] for item in self._codecs if item[0] == descriptor_or_id}
+            if not versions:
+                raise ValueError(f"unknown PLE codec {descriptor_or_id!r}")
+            try:
+                return self._codecs[key]
+            except KeyError as error:
+                raise ValueError(
+                    f"unsupported PLE codec version {descriptor_or_id!r}/{version}"
+                ) from error
+        else:
+            raise TypeError("resolve requires a PLECodecDescriptor or codec id and version")
+        versions = {key[1] for key in self._codecs if key[0] == descriptor.codec_id}
+        if not versions:
+            raise ValueError(f"unknown PLE codec {descriptor.codec_id!r}")
+        key = (descriptor.codec_id, descriptor.version)
+        try:
+            codec = self._codecs[key]
+        except KeyError as error:
+            raise ValueError(
+                f"unsupported PLE codec version {descriptor.codec_id!r}/{descriptor.version}"
+            ) from error
+        if codec.descriptor != descriptor:
+            raise ValueError(f"PLE codec descriptor mismatch for {descriptor.identity}")
+        return codec
+
+
+IQ4_NL_CODEC_DESCRIPTOR = PLECodecDescriptor(
+    codec_id="iq4_nl",
+    version=1,
+    packed_dtype="uint8",
+    decoded_dtype="float32",
+    elements_per_block=32,
+    bytes_per_block=18,
+    parameters={
+        "codebook": "ggml-iq4-nl",
+        "codebook_version": 1,
+        "scale_dtype": "float16",
+    },
+)
+
+
+class _IQ4NLCodec:
+    descriptor = IQ4_NL_CODEC_DESCRIPTOR
+
+    def decode(
+        self,
+        packed: np.ndarray,
+        *,
+        rows: int,
+        elements_per_row: int,
+    ) -> np.ndarray:
+        raw = np.asarray(packed)
+        if raw.dtype != np.dtype(self.descriptor.packed_dtype):
+            raise ValueError(
+                f"PLE codec {self.descriptor.identity} expects packed dtype "
+                f"{self.descriptor.packed_dtype}, got {raw.dtype}"
+            )
+        if raw.ndim != 2 or raw.shape[0] != rows:
+            raise ValueError(
+                f"PLE codec {self.descriptor.identity} expects {rows} packed rows, "
+                f"got shape {raw.shape}"
+            )
+        self.descriptor.validate_row_geometry(elements_per_row, int(raw.shape[1]))
+        decoded = dequantize_iq4_nl(raw)
+        expected_shape = (rows, elements_per_row)
+        if decoded.shape != expected_shape:
+            raise ValueError(
+                f"PLE codec decoder output shape {decoded.shape} disagrees with "
+                f"{expected_shape}"
+            )
+        if decoded.dtype != np.dtype(self.descriptor.decoded_dtype):
+            raise ValueError(
+                f"PLE codec decoder output dtype {decoded.dtype} disagrees with "
+                f"{self.descriptor.decoded_dtype}"
+            )
+        return decoded
+
+
+IQ4_NL_CODEC: PLECodec = _IQ4NLCodec()
+PLE_CODEC_REGISTRY = PLECodecRegistry(
+    {(IQ4_NL_CODEC_DESCRIPTOR.codec_id, IQ4_NL_CODEC_DESCRIPTOR.version): IQ4_NL_CODEC}
+)
 
 
 @dataclass(frozen=True)
@@ -200,6 +435,7 @@ def convert_gguf_ple_to_artifact(source: str | Path, output: str | Path) -> Path
             "tensor_name": descriptor.tensor_name,
             "quant_type": descriptor.quant_type,
             "quant_name": descriptor.quant_name,
+            "codec": descriptor.codec.to_manifest(),
             "rows": descriptor.rows,
             "elements_per_row": descriptor.elements_per_row,
             "row_bytes": descriptor.row_bytes,
@@ -293,6 +529,7 @@ class PLEDescriptor:
     shard_index: int
     shard_path: str
     data_offset: int
+    codec: PLECodecDescriptor = IQ4_NL_CODEC_DESCRIPTOR
 
 
 @dataclass(frozen=True)
@@ -492,6 +729,10 @@ def _layout_from_inspection(
         raise ValueError(f"{_PLE_TENSOR}: expected [rows, width], got {shape}")
     if int(record["quant_type"]) != GGML_IQ4_NL:
         raise ValueError(f"{_PLE_TENSOR}: expected IQ4_NL, got {record['quant_name']}")
+    IQ4_NL_CODEC_DESCRIPTOR.validate_row_geometry(
+        int(shape[1]),
+        int(record["row_bytes"]),
+    )
     shard_index = int(record["shard_index"])
     ple = PLEDescriptor(
         tensor_name=_PLE_TENSOR,
@@ -504,6 +745,7 @@ def _layout_from_inspection(
         shard_index=shard_index,
         shard_path=shard_paths[shard_index],
         data_offset=int(record["offset"]),
+        codec=IQ4_NL_CODEC_DESCRIPTOR,
     )
     return QwenHostLayout(
         experts=experts,
@@ -559,6 +801,7 @@ def host_layout_document(layout: QwenHostLayout) -> dict[str, Any]:
         "ple": {
             "tensor": layout.ple.tensor_name,
             "quant_type": layout.ple.quant_name,
+            "codec": layout.ple.codec.to_manifest(),
             "rows": layout.ple.rows,
             "elements_per_row": layout.ple.elements_per_row,
             "packed_row_bytes": layout.ple.row_bytes,
@@ -926,6 +1169,8 @@ class MappedPLETable:
         self._advice = "not-requested"
         self._advice_applied = False
         self._advice_error: str | None = None
+        self.codec = PLE_CODEC_REGISTRY.resolve(descriptor.codec)
+        descriptor.codec.validate_row_geometry(descriptor.elements_per_row, descriptor.row_bytes)
 
     def _apply_random_advice(self) -> None:
         try:
@@ -1024,6 +1269,11 @@ class MappedPLETable:
             raise ValueError("PLE artifact manifest missing geometry or checksum")
         if manifest.get("payload") != "ple.bin":
             raise ValueError("invalid PLE artifact payload name")
+        try:
+            codec_descriptor = PLECodecDescriptor.from_manifest(manifest.get("codec"))
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"invalid PLE artifact codec descriptor: {error}") from error
+        PLE_CODEC_REGISTRY.resolve(codec_descriptor)
         if (
             manifest.get("tensor_name") != _PLE_TENSOR
             or manifest.get("quant_type") != GGML_IQ4_NL
@@ -1036,8 +1286,10 @@ class MappedPLETable:
         rows, elements, row_bytes, tensor_bytes = values
         if min(rows, elements, row_bytes, tensor_bytes) <= 0 or tensor_bytes != rows * row_bytes:
             raise ValueError("invalid PLE artifact geometry")
-        if row_bytes % 18 or elements != row_bytes // 18 * 32:
-            raise ValueError("invalid PLE artifact geometry")
+        try:
+            codec_descriptor.validate_row_geometry(elements, row_bytes)
+        except ValueError as error:
+            raise ValueError(f"invalid PLE artifact geometry: {error}") from error
         payload = root / str(manifest.get("payload", "ple.bin"))
         if not payload.is_file() or payload.stat().st_size != tensor_bytes:
             raise ValueError("PLE artifact payload is truncated or has a gap")
@@ -1058,6 +1310,7 @@ class MappedPLETable:
             shard_index=0,
             shard_path=str(payload),
             data_offset=0,
+            codec=codec_descriptor,
         )
         mapping = None
         if backend == "mmap":
@@ -1348,10 +1601,25 @@ class MappedPLETable:
             packed = self.mapping.rows[read_rows].copy()
             if selected_planner == "vectorized":
                 packed = packed[inverse]
-        result = dequantize_iq4_nl(packed).reshape(
-            *original,
-            self.descriptor.elements_per_row,
+        decoded = self.codec.decode(
+            packed,
+            rows=int(packed.shape[0]),
+            elements_per_row=self.descriptor.elements_per_row,
         )
+        expected_shape = (int(packed.shape[0]), self.descriptor.elements_per_row)
+        if not isinstance(decoded, np.ndarray) or decoded.shape != expected_shape:
+            actual_shape = getattr(decoded, "shape", None)
+            raise ValueError(
+                f"PLE codec decoder output shape {actual_shape} disagrees with "
+                f"{expected_shape}"
+            )
+        expected_dtype = np.dtype(self.codec.descriptor.decoded_dtype)
+        if decoded.dtype != expected_dtype:
+            raise ValueError(
+                f"PLE codec decoder output dtype {decoded.dtype} disagrees with "
+                f"{expected_dtype}"
+            )
+        result = decoded.reshape(*original, self.descriptor.elements_per_row)
         unique_rows = int(unique.size) if unique is not None else len(set(flat.tolist()))
         after_usage = resource.getrusage(resource.RUSAGE_SELF)
         after_storage = _proc_read_bytes()
@@ -1399,6 +1667,9 @@ class MappedPLETable:
                 "targeted_warm_rows": self._targeted_warm_rows,
                 "full_model_warm_bytes": self._full_model_warm_bytes,
                 "backend": self.backend,
+                "codec_id": self.codec.descriptor.codec_id,
+                "codec_version": self.codec.descriptor.version,
+                "codec_identity": self.codec.descriptor.identity,
                 "planner_mode": self._planner_config.mode,
                 "planner_direct_threshold": self._planner_config.direct_threshold,
                 "planner_selected_mode": self._planner_selected_mode,
@@ -1609,7 +1880,13 @@ __all__ = [
     "ExpertBankDescriptor",
     "ExpertSlotPool",
     "GGUFExpertLayout",
+    "IQ4_NL_CODEC",
+    "IQ4_NL_CODEC_DESCRIPTOR",
     "MappedPLETable",
+    "PLECodec",
+    "PLECodecDescriptor",
+    "PLECodecRegistry",
+    "PLE_CODEC_REGISTRY",
     "PLELookupPlannerConfig",
     "PLEPrefetchHandle",
     "QwenGGUFHostWeights",
