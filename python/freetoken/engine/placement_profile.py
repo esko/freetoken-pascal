@@ -14,7 +14,7 @@ import operator
 import re
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -87,6 +87,11 @@ def _integer(value: Any, name: str, *, positive: bool = False) -> int:
     if positive and result == 0:
         raise PlacementInputError(f"{name} must be positive")
     return result
+
+
+def _serialized_integer(value: Any, name: str) -> int:
+    """Validate an integer that came from a serialized profile document."""
+    return _integer(value, name)
 
 
 def _text(value: Any, name: str) -> str:
@@ -532,6 +537,22 @@ def _gpu_plan_from_dict(value: Any) -> GPUPlacementPlan:
         }
     )
     fields = _exact_fields(value, expected, "placement GPU")
+    for field in (
+        "schema_version",
+        "rank",
+        "capacity_bytes",
+        "required_bytes",
+        "non_qsa_required_bytes",
+        "qsa_persistent_bytes",
+        "qsa_transient_high_water_bytes",
+        "qsa_required_bytes",
+        "live_required_bytes",
+        "peak_required_bytes",
+        "available_bytes",
+        "headroom_bytes",
+        "deficit_bytes",
+    ):
+        _serialized_integer(fields[field], f"placement GPU.{field}")
     if fields["schema_version"] != PLACEMENT_SCHEMA_VERSION:
         raise PlacementInputError("unsupported placement GPU schema version")
     try:
@@ -553,7 +574,7 @@ def _gpu_plan_from_dict(value: Any) -> GPUPlacementPlan:
         raise PlacementInputError(f"invalid placement GPU: {exc}") from exc
     planner_fields = dict(fields)
     planner_fields.pop("capacity_bytes")
-    if plan.as_dict() != planner_fields:
+    if canonical_json_bytes(plan.as_dict()) != canonical_json_bytes(planner_fields):
         raise PlacementInputError("placement GPU contains inconsistent derived fields")
     return plan
 
@@ -564,6 +585,8 @@ def _plan_from_dict(value: Any) -> PlacementPlan:
         frozenset({"schema_version", "gpu_count", "safety_reserve_bytes", "gpus", "gpus_by_key"}),
         "placement plan",
     )
+    for field in ("schema_version", "gpu_count", "safety_reserve_bytes"):
+        _serialized_integer(fields[field], f"placement plan.{field}")
     if fields["schema_version"] != PLACEMENT_SCHEMA_VERSION:
         raise PlacementInputError("unsupported placement plan schema version")
     try:
@@ -573,7 +596,7 @@ def _plan_from_dict(value: Any) -> PlacementPlan:
         raise
     except (TypeError, ValueError) as exc:
         raise PlacementInputError(f"invalid placement plan: {exc}") from exc
-    if _plan_payload(plan) != dict(fields):
+    if canonical_json_bytes(_plan_payload(plan)) != canonical_json_bytes(dict(fields)):
         raise PlacementInputError("placement plan contains inconsistent derived fields")
     if fields["gpu_count"] != plan.gpu_count:
         raise PlacementInputError("placement plan GPU count is inconsistent")
@@ -609,6 +632,8 @@ def _backoff_from_dict(value: Any) -> BackoffProfile:
         ),
         "backoff profile",
     )
+    for field in ("schema_version", "cache_slots", "context_tokens", "batch_size"):
+        _serialized_integer(fields[field], f"backoff profile.{field}")
     if fields["schema_version"] != PLACEMENT_SCHEMA_VERSION:
         raise PlacementInputError("unsupported backoff profile schema version")
     try:
@@ -623,7 +648,7 @@ def _backoff_from_dict(value: Any) -> BackoffProfile:
         raise
     except (TypeError, ValueError) as exc:
         raise PlacementInputError(f"invalid backoff profile: {exc}") from exc
-    if profile.as_dict() != dict(fields):
+    if canonical_json_bytes(profile.as_dict()) != canonical_json_bytes(dict(fields)):
         raise PlacementInputError("backoff profile contains inconsistent fields")
     return profile
 
@@ -643,6 +668,13 @@ class PlacementProfile:
             raise PlacementInputError("profile plan must be a PlacementPlan")
         if not isinstance(self.backoff_profile, BackoffProfile):
             raise PlacementInputError("profile backoff_profile must be a BackoffProfile")
+        normalized_name = _text(self.backoff_profile.name, "backoff_profile.name")
+        if normalized_name != self.backoff_profile.name:
+            object.__setattr__(
+                self,
+                "backoff_profile",
+                replace(self.backoff_profile, name=normalized_name),
+            )
         topology = self.identity.topology
         if len(topology) != self.plan.gpu_count:
             raise PlacementInputError("profile topology count must match placement plan")
@@ -704,6 +736,9 @@ class PlacementProfile:
 
     @classmethod
     def from_dict(cls, value: Any) -> PlacementProfile:
+        # Validate the complete tree before parsing individual fields. This prevents a
+        # float hidden in an ignored or derived field from entering the digest path.
+        canonical_json_bytes(value)
         fields = _exact_fields(
             value,
             frozenset(
@@ -720,6 +755,7 @@ class PlacementProfile:
         )
         if fields["schema_name"] != PLACEMENT_PROFILE_SCHEMA_NAME:
             raise PlacementInputError("unsupported placement profile schema name")
+        _serialized_integer(fields["schema_version"], "placement profile.schema_version")
         if fields["schema_version"] != PLACEMENT_PROFILE_SCHEMA_VERSION:
             raise PlacementInputError("unsupported placement profile schema version")
         digest = fields["digest"]

@@ -343,6 +343,46 @@ def test_profile_from_dict_rejects_missing_unknown_wrong_version_or_tamper(mutat
 @pytest.mark.parametrize(
     "mutation",
     [
+        lambda d: d.__setitem__("schema_version", True),
+        lambda d: d.__setitem__("schema_version", 1.0),
+        lambda d: d["placement_plan"].__setitem__("gpu_count", True),
+        lambda d: d["placement_plan"].__setitem__("gpu_count", 1.0),
+        lambda d: d["placement_plan"]["gpus"][0].__setitem__("headroom_bytes", 0.0),
+        lambda d: d["placement_plan"]["gpus"][0].__setitem__("deficit_bytes", False),
+        lambda d: d["placement_plan"]["gpus_by_key"]["gpu-0:0"].__setitem__("required_bytes", True),
+    ],
+)
+def test_profile_parser_rejects_numeric_aliases_without_mutating_original(mutation) -> None:
+    profile = _profile()
+    original_digest = profile.digest
+    document = copy.deepcopy(profile.as_dict())
+    mutation(document)
+    with pytest.raises(PlacementPlannerError):
+        PlacementProfile.from_dict(document)
+    assert profile.digest == original_digest
+
+
+def test_profile_normalizes_backoff_name_and_rejects_placeholders() -> None:
+    profile = _profile()
+    normalized = replace(
+        profile,
+        backoff_profile=replace(profile.backoff_profile, name="  cache-zero  "),
+    )
+    assert normalized.profile_name == "cache-zero"
+    assert normalized.as_dict()["backoff_profile"]["name"] == "cache-zero"
+    roundtrip = profile.as_dict()
+    roundtrip["backoff_profile"]["name"] = " cache-zero "
+    assert PlacementProfile.from_dict(roundtrip) == profile
+    document = profile.as_dict()
+    document["backoff_profile"]["name"] = " unknown "
+    document["digest"] = profile.digest
+    with pytest.raises(PlacementPlannerError, match="placeholder"):
+        PlacementProfile.from_dict(document)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
         lambda d: d.pop("model_sha256"),
         lambda d: d.__setitem__("unknown", 1),
         lambda d: d.__setitem__("model_sha256", "A" * 64),
