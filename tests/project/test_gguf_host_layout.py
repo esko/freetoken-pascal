@@ -264,6 +264,7 @@ def test_source_ple_pread_targeted_warm_uses_descriptor_offset_and_deduplicates(
         telemetry = table.telemetry()
 
     descriptor = inspect_qwen_host_layout(FIXTURE).ple
+    assert descriptor.data_offset > 0
     assert calls == [
         (1, descriptor.data_offset + row * descriptor.row_bytes) for row in (0, 16, 31)
     ]
@@ -763,6 +764,66 @@ def test_dedicated_pread_batch_fails_closed_on_short_read(
         assert telemetry["application_reads"] == 1
         assert telemetry["batch_bytes_read"] == 0
         assert telemetry["application_bytes_read"] == 0
+
+
+def test_dedicated_pread_batch_retains_partial_io_after_later_short_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        row_bytes = table.descriptor.row_bytes
+        real_pread = os.pread
+        calls = 0
+
+        def short_second_read(fd: int, size: int, offset: int) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                return b"partial"
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", short_second_read)
+        with pytest.raises(ValueError, match="short PLE positional read"):
+            table.lookup_batch(np.array([0, 16, 31]))
+        telemetry = table.telemetry()
+
+    assert telemetry["short_reads"] == 1
+    assert telemetry["batch_positional_reads"] == 2
+    assert telemetry["application_reads"] == 2
+    assert telemetry["batch_bytes_read"] == row_bytes + len(b"partial")
+    assert telemetry["application_bytes_read"] == row_bytes + len(b"partial")
+    assert telemetry["batch_calls"] == 0
+    assert telemetry["lookup_calls"] == 0
+
+
+def test_dedicated_pread_batch_retains_partial_io_after_later_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        row_bytes = table.descriptor.row_bytes
+        real_pread = os.pread
+        calls = 0
+
+        def failing_second_read(fd: int, size: int, offset: int) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected second-row failure")
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", failing_second_read)
+        with pytest.raises(OSError, match="second-row"):
+            table.lookup_batch(np.array([0, 16, 31]))
+        telemetry = table.telemetry()
+
+    assert telemetry["short_reads"] == 0
+    assert telemetry["batch_positional_reads"] == 2
+    assert telemetry["application_reads"] == 2
+    assert telemetry["batch_bytes_read"] == row_bytes
+    assert telemetry["application_bytes_read"] == row_bytes
+    assert telemetry["batch_calls"] == 0
+    assert telemetry["lookup_calls"] == 0
 
 
 def test_dedicated_pread_empty_and_invalid_batches_do_no_io(
