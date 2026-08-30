@@ -47,7 +47,7 @@ class Qwen4ExpMoE(Qwen3_5MoE):
             from .reference import routed_shared_expert_reference
 
             shared = self.shared_expert.forward(hidden_states)
-            shared_gate = self.shared_expert_gate.forward(hidden_states).view(-1)
+            shared_gate = self.shared_expert_gate.forward(hidden_states)
             gate_up = self.experts.gate_up_proj
             down = self.experts.down_proj
 
