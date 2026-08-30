@@ -24,6 +24,9 @@ compressed groups, expands them to original logical rows, includes the visible i
 and runs exact sparse GQA over the original K/V values.
 The Torch-free `freetoken.attention.qsa_workspace` planner is an H0 accounting primitive for the
 concrete score, top-k, expand-gather, attention, and state allocations.
+It derives compressed score geometry from the raw page-table token-slot width, keeps eager ragged
+batch metadata separate from graph maximum-batch buffers, and accounts for the runtime's bounded
+128 MiB score tile.
 It does not allocate CUDA memory or alter QSA dispatch, and a later placement owner may consume its
 capacity telemetry as a preflight input.
 

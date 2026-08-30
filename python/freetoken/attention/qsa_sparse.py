@@ -32,14 +32,17 @@ static buffers (``prepare_for_replay``) so the whole path is CUDA-graph capturab
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, List
+from typing import TYPE_CHECKING
 
 import torch
+
 from freetoken.core import Batch, get_global_ctx
 from freetoken.utils import init_logger
 
 from .base import AttentionSpec, BaseAttnBackend, BaseAttnMetadata
+from .qsa_workspace import QSA_LOGITS_WORKSPACE_BYTES, qsa_score_chunk_rows
 
 logger = init_logger(__name__)
 
@@ -49,7 +52,7 @@ if TYPE_CHECKING:
 _CPU_PINNED = {"device": "cpu", "dtype": torch.int32, "pin_memory": True}
 # Block-score transient budget (vLLM's number): the fp32 [rows, n_blocks] logits tile is
 # 256 KB per row at a 1M-token context, so a long prefill must be scored in row chunks.
-_LOGITS_WORKSPACE_BYTES = 128 << 20
+_LOGITS_WORKSPACE_BYTES = QSA_LOGITS_WORKSPACE_BYTES
 
 
 TORCH_TOPK_ENV = "FREETOKEN_QSA_TORCH_TOPK"
@@ -133,7 +136,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
         self._block_topk_kernel = _resolve_block_topk()
         # decode staging (static buffers under CUDA graphs; eager decode snapshots per step)
         self._graph: dict[str, torch.Tensor] = {}
-        self.capture_bs: List[int] = []
+        self.capture_bs: list[int] = []
 
     @staticmethod
     def _qsa_group(config: ModelConfig):
@@ -181,7 +184,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
         seqlens_q = [r.extend_len for r in reqs]
         seqlens_k = [r.device_len for r in reqs]
         is_decode = getattr(batch, "phase", None) == "decode"
-        qo_indptr = torch.tensor([0] + seqlens_q, **_CPU_PINNED).cumsum_(0).to(torch.int32)
+        qo_indptr = torch.tensor([0, *seqlens_q], **_CPU_PINNED).cumsum_(0).to(torch.int32)
         kv_len = torch.tensor(seqlens_k, **_CPU_PINNED)
         last = (qo_indptr[1:].to(torch.int32) - 1).to(self.device, non_blocking=True)
         md = QSASparseMetadata(
@@ -311,9 +314,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
         ends = md.cu_seqlens.to(torch.int64).index_select(0, req + 1)
         keep = rows >= ends - self.ring_capacity
         ring_row = slots * self.ring_capacity + positions % self.ring_capacity
-        md.ring_rows = torch.where(keep, ring_row, torch.full_like(ring_row, -1)).to(
-            torch.int32
-        )
+        md.ring_rows = torch.where(keep, ring_row, torch.full_like(ring_row, -1)).to(torch.int32)
 
     def _update_index_cache(self, index, md: QSASparseMetadata, slot: int) -> None:
         """Compress each closing group into the slab, then refresh the pending ring."""
@@ -376,7 +377,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
         cmp_pages = self._cmp_pages(slot)
         columns = md.block_table.shape[1] * self.cmp_page_size
         indices = self._scratch("indices", rows, self.select_width, dtype=torch.int32)
-        rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
+        rows_per_chunk = qsa_score_chunk_rows(rows, columns)
         for start in range(0, rows, rows_per_chunk):
             end = min(start + rows_per_chunk, rows)
             chunk = slice(start, end)
@@ -454,13 +455,13 @@ class QSASparseAttnBackend(BaseAttnBackend):
         return torch.empty((rows, *shape), dtype=dtype, device=self.device)
 
     # ----- CUDA graph (decode) --------------------------------------------------------------
-    def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
+    def init_capture_graph(self, max_seq_len: int, bs_list: list[int]) -> None:
         self.capture_bs = sorted(bs_list)
         max_bs = max(bs_list)
         width = get_global_ctx().page_table.shape[1]
         pages = -(-width // self.page_size)
         columns = pages * self.cmp_page_size
-        chunk = max(1, min(max_bs, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1)))
+        chunk = qsa_score_chunk_rows(max_bs, columns)
         topk_scratch = self._topk_scratch_width(columns)
 
         def empty(*shape: int, dtype: torch.dtype) -> torch.Tensor:

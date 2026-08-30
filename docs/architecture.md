@@ -63,13 +63,24 @@ Pascal DP4A integer kernels and format-specific tuning are prioritized over FP16
 ### QSA workspace contract
 
 `freetoken.attention.qsa_workspace` is the Torch-free H0 accounting boundary for the merged QSA implementation from FreeToken commit `bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40` and its current tip `58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6`.
-`QSAWorkspaceInputs` accepts the concrete context, ragged token-row, compressed-block, head, dtype, attention-split, page, ring, and layer dimensions.
+`QSAWorkspaceInputs` accepts the concrete context, ragged token-row, request `batch_size`, raw
+page-table token-slot width, page, ring, head, dtype, and layer dimensions.
+The planner derives the page count and compressed score columns from the raw page-table width and
+uses the runtime's 128 MiB FP32 score-tile cap; it never treats token slots as already-compressed
+columns.
+Capture plans separately accept `capture_max_batch_size` because every graph buffer is allocated
+for that maximum, while eager metadata uses the active request batch.
 `calculate_qsa_workspace()` inventories the score, top-k, expand-gather, attention, and state categories from those dimensions and returns component shapes, byte totals, and a checked aggregate without importing CUDA or allocating memory.
 The score category includes the index query, FP32 logits, and visible-block vectors.
 The top-k category includes block IDs and the candidate scratch required by the upstream split path.
 The expand-gather category includes the selected logical-index rows, including the incomplete causal-group tail.
 The attention category includes the output and, when split attention is selected, FP32 partial output and log-sum-exp buffers.
-The state category includes the compressed slab, pending ring, pooled rows, and first-position rows used by `QSAKVCache` and index compression.
+The state category includes the persistent compressed slab, pending ring, and index RoPE table plus
+the per-forward pooled rows and first-position rows used by `QSAKVCache` and index compression.
+Eager high-water accounting overlaps actual batch metadata with each live phase: pooled/index rows,
+selection (`q_index`, retained indices, and one score/top-k chunk), and selected-row attention.
+Capture high-water accounting includes every `_graph` buffer simultaneously and the active capture
+attention allocations.
 `QSAWorkspacePlan.validate_capacity()` is a pure preflight accounting primitive for a future placement/launch owner and reports structured `ready` or `insufficient-capacity` telemetry.
 Negative, zero-invalid, incomplete-category, shape-inconsistent, and checked 64-bit arithmetic inputs fail closed with a controlled `ValueError` subtype.
 This H0 contract makes no kernel, throughput, or Tesla P4 claim and does not change QSA selection, token budget, or dispatch defaults.

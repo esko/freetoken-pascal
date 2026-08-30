@@ -24,6 +24,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+from freetoken.attention.qsa_workspace import qsa_topk_scratch_width
 
 # 5-bit digits beat 8-bit ones here: tl.histogram cost grows faster with the bin count than the
 # extra passes cost. 35 bits of digit cover the 32-bit key, the top pass just sees zero bits.
@@ -344,8 +345,7 @@ def _split_plan(columns: int, top_k: int) -> tuple[int, int] | None:
 
 def qsa_block_topk_scratch_width(columns: int, top_k: int) -> int:
     """int32 columns of scratch ``qsa_block_topk`` wants per row; 0 when it needs none."""
-    plan = _split_plan(columns, top_k)
-    return 0 if plan is None else 2 * plan[1] * top_k
+    return qsa_topk_scratch_width(columns, top_k)
 
 
 def qsa_block_topk(
