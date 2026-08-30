@@ -13,14 +13,16 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
-GdnMode = Literal["auto", "torch-reference", "triton-candidate"]
-GdnImplementation = Literal["torch-reference", "fla", "triton-candidate"]
+GdnMode = Literal["auto", "torch-reference", "triton-candidate", "pascal-fp32"]
+GdnImplementation = Literal["torch-reference", "fla", "triton-candidate", "pascal-fp32"]
 
 GDN_MIN_FLA_CAPABILITY = (7, 0)
 GDN_FLA_DTYPES = frozenset({"bfloat16", "float16"})
-_MODES = frozenset({"auto", "torch-reference", "triton-candidate"})
+GDN_PASCAL_CAPABILITY = (6, 1)
+GDN_PASCAL_DTYPE = "float32"
+_MODES = frozenset({"auto", "torch-reference", "triton-candidate", "pascal-fp32"})
 _MODE_ALIASES = {"reference": "torch-reference"}
-_IMPLEMENTATIONS = frozenset({"torch-reference", "fla", "triton-candidate"})
+_IMPLEMENTATIONS = frozenset({"torch-reference", "fla", "triton-candidate", "pascal-fp32"})
 _DTYPE_ALIASES = {
     "bf16": "bfloat16",
     "half": "float16",
@@ -45,6 +47,7 @@ class GdnDispatchDecision:
     fla_available: bool
     triton_candidate_available: bool
     fallback_reason: str | None = None
+    pascal_fp32_available: bool = False
 
     def __post_init__(self) -> None:
         if type(self.requested_mode) is not str or self.requested_mode not in _MODES:
@@ -61,6 +64,8 @@ class GdnDispatchDecision:
             raise TypeError("fla_available must be a bool")
         if type(self.triton_candidate_available) is not bool:
             raise TypeError("triton_candidate_available must be a bool")
+        if type(self.pascal_fp32_available) is not bool:
+            raise TypeError("pascal_fp32_available must be a bool")
         if self.fallback_reason is not None:
             if type(self.fallback_reason) is not str or not self.fallback_reason:
                 raise ValueError("GDN fallback_reason must be a non-empty string")
@@ -126,7 +131,8 @@ def parse_gdn_mode(mode: str) -> GdnMode:
     canonical = _MODE_ALIASES.get(mode, mode)
     if canonical not in _MODES:
         raise ValueError(
-            f"unsupported GDN mode: {mode!r}; expected auto, reference, or triton-candidate"
+            "unsupported GDN mode: "
+            f"{mode!r}; expected auto, reference, triton-candidate, or pascal-fp32"
         )
     return canonical  # type: ignore[return-value]
 
@@ -149,6 +155,7 @@ def resolve_gdn_dispatch(
     dtype: str,
     fla_available: bool | None = None,
     triton_candidate_available: bool | None = None,
+    pascal_fp32_available: bool | None = None,
     package_availability: Mapping[str, bool] | None = None,
     candidate_inputs_supported: bool = True,
     observer: Callable[[GdnDispatchDecision], None] | None = None,
@@ -157,8 +164,10 @@ def resolve_gdn_dispatch(
 
     ``auto`` preserves the current FLA path only for the qualified modern-GPU capability and
     supported model dtype.  Pascal and every unavailable/unsupported case select the pure-Torch
-    reference implementation with a reason.  The candidate path is never selected by ``auto``;
-    it must be explicitly requested and have an affirmative availability probe.
+    reference implementation with a reason.  The candidate paths are never selected by ``auto``;
+    they must be explicitly requested and have an affirmative availability probe.  The
+    ``pascal-fp32`` path is restricted to ``sm_61`` + FP32 and remains unavailable until the
+    caller supplies a positive qualification gate (H2 evidence is not inferred here).
     """
 
     mode = parse_gdn_mode(requested_mode)
@@ -166,12 +175,16 @@ def resolve_gdn_dispatch(
     dtype_name = _normalize_dtype(dtype)
     fla = _validate_availability("fla_available", fla_available)
     candidate = _validate_availability("triton_candidate_available", triton_candidate_available)
+    pascal = _validate_availability("pascal_fp32_available", pascal_fp32_available)
     if package_availability is not None:
         if not isinstance(package_availability, Mapping):
             raise TypeError("package_availability must be a mapping of package names to bools")
         package_fla = _package_value(package_availability, ("fla", "freetoken_fla", "triton"))
         package_candidate = _package_value(
             package_availability, ("triton-candidate", "triton_candidate", "candidate")
+        )
+        package_pascal = _package_value(
+            package_availability, ("pascal-fp32", "pascal_fp32", "pascal")
         )
         if fla is not None and package_fla is not None and fla != package_fla:
             raise ValueError("fla_available conflicts with package_availability")
@@ -181,8 +194,15 @@ def resolve_gdn_dispatch(
             and candidate != package_candidate
         ):
             raise ValueError("triton_candidate_available conflicts with package_availability")
+        if (
+            pascal is not None
+            and package_pascal is not None
+            and pascal != package_pascal
+        ):
+            raise ValueError("pascal_fp32_available conflicts with package_availability")
         fla = package_fla if fla is None else fla
         candidate = package_candidate if candidate is None else candidate
+        pascal = package_pascal if pascal is None else pascal
     if type(candidate_inputs_supported) is not bool:
         raise TypeError("candidate_inputs_supported must be a bool")
     if observer is not None and not callable(observer):
@@ -194,6 +214,7 @@ def resolve_gdn_dispatch(
         "dtype": dtype_name,
         "fla_available": fla is True,
         "triton_candidate_available": candidate is True,
+        "pascal_fp32_available": pascal is True,
     }
 
     if mode == "torch-reference":
@@ -204,6 +225,14 @@ def resolve_gdn_dispatch(
         if not candidate_inputs_supported:
             raise GdnDispatchError("triton-candidate rejected input: candidate-unsupported-input")
         decision = GdnDispatchDecision(selected_implementation="triton-candidate", **common)
+    elif mode == "pascal-fp32":
+        if capability != GDN_PASCAL_CAPABILITY:
+            raise GdnDispatchError("pascal-fp32 requires sm_61 capability")
+        if dtype_name != GDN_PASCAL_DTYPE:
+            raise GdnDispatchError("pascal-fp32 requires float32 inputs")
+        if pascal is not True:
+            raise GdnDispatchError("pascal-fp32 unavailable: pascal-fp32-unqualified")
+        decision = GdnDispatchDecision(selected_implementation="pascal-fp32", **common)
     else:
         reason: str | None = None
         if capability < GDN_MIN_FLA_CAPABILITY:
@@ -234,6 +263,8 @@ GDNDispatchError = GdnDispatchError
 __all__ = [
     "GDN_FLA_DTYPES",
     "GDN_MIN_FLA_CAPABILITY",
+    "GDN_PASCAL_CAPABILITY",
+    "GDN_PASCAL_DTYPE",
     "GDNDispatchDecision",
     "GDNDispatchError",
     "GdnDispatchDecision",

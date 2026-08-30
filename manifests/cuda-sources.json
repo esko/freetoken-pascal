@@ -20,6 +20,12 @@
       "note": "Template kernels must retain an sm_61 cubin even before runtime-generated wrappers specialize them."
     },
     {
+      "path": "python/freetoken/kernel/csrc/jit/gdn_pascal.cu",
+      "include_profile": "tvm-ffi",
+      "expects_device_code": true,
+      "note": "Standalone D64/D128 FP32 GDN kernels are explicitly instantiated so the sm_61 census covers both variants."
+    },
+    {
       "path": "python/freetoken/kernel/csrc/src/pynccl.cu",
       "include_profile": "tvm-ffi",
       "expects_device_code": true,

@@ -19,16 +19,21 @@ when a slot is reused. Linear-attention models default to the hybrid-radix cache
 disabled while the PLE reference path performs host work. Issue #13 owns the release PLE
 mmap/offload representation.
 
-The Qwen4 GDN boundary resolves `FREETOKEN_GDN_MODE` (`auto`, `reference`, or
-`triton-candidate`) at construction, before importing a fused kernel. The mode and package
+The Qwen4 GDN boundary resolves `FREETOKEN_GDN_MODE` (`auto`, `reference`, `triton-candidate`, or
+`pascal-fp32`) at construction, before importing a fused kernel. The mode and package
 availability probes are frozen for the lifetime of the GDN object. `auto` selects the eligible
 in-tree FLA implementation only on supported modern-GPU inputs; `sm_61`, unsupported dtypes, or
 unavailable packages select the stateful `torch-reference` fallback and expose the reason through
 the debug observer. `triton-candidate` is explicit-only and fails closed until its donor and H1/H2
-parity gates are complete. The immutable decision contract is Torch-free so this policy is
-testable in H0. The FLA recurrent-state view is [V,K] while the pool view is [K,V]; equal
-dimensions only make these views shape-compatible, so axis-order and nonzero-state parity remain
-H2 work. Backend switching and checkpoint parity are not claimed by H0.
+parity gates are complete. `pascal-fp32` is a standalone explicit-only H1 bring-up seam for
+`sm_61` and FP32 tensors; it is never selected by `auto`, requires a positive qualification gate,
+and the model forward rejects it until H2 runtime integration is qualified. The immutable decision
+contract is Torch-free so this policy is testable in H0. The standalone adapter preserves the
+pool's `[slots, value_heads, K, V]` layout, consumes pre-sigmoided beta, and addresses ragged
+requests with unique slot IDs and `cu_seqlens`. The FLA recurrent-state view is [V,K] while the
+pool view is [K,V]; equal dimensions only make these views shape-compatible, so axis-order and
+nonzero-state parity remain H2 work. Backend switching and checkpoint parity are not claimed by
+H0.
 
 QSA retains full-resolution K/V and stores one compressed index key per configured token group.
 Before the token budget is reached, selection is dense-equivalent. Beyond it, the indexer selects

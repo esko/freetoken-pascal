@@ -381,10 +381,10 @@ sources:
     upstream_ref: refs/heads/main
     ref: d34d74e93b95761e67a17a649cf2faf039e7888e
     license: MIT
-    role: Pascal GDN/ssm_scan fusion donor audit and AVX2 low-bit kernel reference
-    usage: planned
-    responsible_issue: 19
-    notice_required: false
+    role: Pascal GDN recurrence donor audit and AVX2 low-bit kernel reference
+    usage: imported
+    responsible_issue: 93
+    notice_required: true
     audit_blobs:
       - path: ggml/src/ggml-cuda/delta-net.cu
         sha: 4f8e131c754a54423ab3c349f6bc072ac9973364
@@ -402,7 +402,20 @@ sources:
         sha: dbb2d2383192577b297fd73b1c1093dadab499e0
       - path: src/llama-delta-net.h
         sha: b6de906074302d72a2dd8944da52fc655f370470
-    imports: []
+    imports:
+      - source_path: ggml/src/ggml-cuda/delta-net.cu
+        destination_path: python/freetoken/kernel/csrc/jit/gdn_pascal.cu
+        source_ref: d34d74e93b95761e67a17a649cf2faf039e7888e
+        method: adapted
+        local_modifications:
+          - retain only the standalone FP32 recurrence arithmetic and D64/D128 dispatch shape
+          - translate ggml tensor assumptions into FreeToken TVM-FFI tensor validation and JIT wrappers
+          - preserve FreeToken [slots, value_heads, K, V] pool addressing rather than the donor layout
+          - consume explicitly pre-sigmoided beta and exclude donor graph/convolution fusion
+          - gate runtime use to explicit sm_61 FP32 selection pending H2 parity and performance evidence
+        license: MIT
+        header_policy: SPDX added
+        responsible_issue: 93
   - id: vllm-qwen38-pr53896
     repository: https://github.com/vllm-project/vllm
     pull_request: 53896

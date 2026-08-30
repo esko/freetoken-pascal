@@ -1,9 +1,9 @@
 # Qwen4 GDN backend and donor-audit ledger
 
 - Downstream issue: #93
-- Branch: `issue-93-gdn-backend-contract`
-- Base: `018296a7b75f15b3db66a1e4ff40d32b3d47fc41`
-- Validation class: H0 only; no CUDA, sm_61 compile, or P4 evidence
+- Branch: `issue-93-pascal-gdn-h1`
+- Base: `71b6b46ebe` (merged PR #95)
+- Validation class: H0 plus H1 source/compile census; no P4 evidence
 
 Issue #93 establishes the backend decision boundary for Qwen3.8-Flash-Next GatedDeltaNet.
 The immutable, Torch-free contract lives in
@@ -11,14 +11,17 @@ The immutable, Torch-free contract lives in
 activation dtype, and explicit package probes. `auto` selects the eligible in-tree FLA path only
 for supported modern-GPU inputs; `sm_61`, unsupported dtypes, and unavailable FLA select the
 observable `torch-reference` fallback. The `triton-candidate` path is explicit-only and remains
-gated until its donor audit and H1/H2 parity evidence are complete. The mode and package
+gated until its donor audit and H1/H2 parity evidence are complete. The standalone `pascal-fp32`
+path is explicit-only, restricted to `sm_61` + FP32, and requires a positive qualification gate;
+it is never selected by `auto`, and the model forward remains fail-closed pending H2 integration.
+The mode and package
 availability probes are frozen when the GDN object is constructed; a process-environment mutation
 cannot switch a live request between backends.
 
 | Area | Exact source/pin | Use in this issue | Status |
 |---|---|---|---|
 | In-tree FLA GDN kernels | FreeToken-Pascal history, initial vendoring commit `3af9d90ee5` | Existing eligible modern-GPU implementation | Preserved; imported only after the decision; nonzero-state H2 parity pending |
-| Pascal/GDN fusion candidate | `poisonxa16/pxq_llama.cpp`, release commit `d34d74e93b95761e67a17a649cf2faf039e7888e` | Audit `ssm_scan`/DeltaNet/GDN fusion and Pascal constraints | Planned donor; no source copied |
+| Pascal/GDN recurrence donor | `poisonxa16/pxq_llama.cpp`, release commit `d34d74e93b95761e67a17a649cf2faf039e7888e` | Audit DeltaNet recurrence and Pascal constraints | Adapted standalone recurrence; graph/convolution fusion excluded |
 | Qwen4 model/GDN oracle | `ggml-org/llama.cpp`, PR #27742 head `eaf93765572e794b8e3754fe45adbe12d381e997` | Compare Qwen4 GGUF/model semantics | Reference only; no source copied |
 
 The audited PXA blobs at `d34d74e93b95761e67a17a649cf2faf039e7888e` are recorded in
@@ -41,12 +44,20 @@ The audited PXA blobs at `d34d74e93b95761e67a17a649cf2faf039e7888e` are recorded
 - `src/llama-delta-net.h` —
   `b6de906074302d72a2dd8944da52fc655f370470`
 
-No donor CUDA or Triton code is imported by this slice. The candidate remains disabled from
+The standalone source `python/freetoken/kernel/csrc/jit/gdn_pascal.cu` adapts only the FP32
+recurrence arithmetic from the audited `delta-net.cu` blob. It uses explicit D64/D128 device
+instantiations, FreeToken TVM-FFI tensor validation, ragged `cu_seqlens` request addressing,
+unique pool slots, and the current `[slots, value_heads, K, V]` state layout. It consumes beta
+already transformed by sigmoid and does not include donor graph or convolution fusion. The
+`gdn_pascal` adapter validates these invariants before JIT loading. The source is in the CUDA
+manifest so standalone nvcc census must inspect its `sm_61` device image.
+
+No donor Triton or graph-fusion code is imported by this slice. The candidate remains disabled from
 `auto`, and forcing it without an affirmative availability probe fails closed. The FLA kernel's
 recurrent state is indexed as [V,K] while the current pool contract is [K,V]; equal head
 dimensions make the tensors shape-compatible but do not establish axis-order equivalence. The
 direct snapshot path therefore remains an explicit H0 limitation pending canonical nonzero-state
 H2 parity. Backend switching and checkpoint parity are not claimed. Hosted tests cover decision
 immutability, visible fallback reasons, invalid/forced modes, observer delivery, constructor
-snapshotting, reference state behavior, and the static guarantee that the Qwen4 GDN boundary
-resolves before any FLA call.
+snapshotting, reference state behavior, the standalone Pascal source/adapter contract, and the
+static guarantee that the Qwen4 GDN boundary resolves before any FLA call.

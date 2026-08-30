@@ -120,6 +120,22 @@ Canonical profile identity is H0 evidence only; CUDA discovery, stale-profile lo
 The exact ordinary-tensor placement is measured. The architecture requires the routed expert bank to remain complete in DDR4 even when a subset is cached in VRAM.
 The PLE file or shard set has a separate ownership and accounting boundary so model-weight mappings cannot be accidentally paged, prefetched, or pinned with it.
 
+### Pascal GDN bring-up boundary
+
+Issue #93 adds a standalone FP32 CUDA recurrence at
+`python/freetoken/kernel/csrc/jit/gdn_pascal.cu` for the H1 `sm_61` compile gate.
+The JIT adapter accepts contiguous `q/k=[T,HK,D]`, `v=[T,HV,D]`, `g/beta=[T,HV]`,
+`state_pool=[S,HV,K,V]`, unique `slot_indices=[B]`, and ragged `cu_seqlens=[B+1]`.
+Only D64 and D128 are emitted, GQA requires `HV % HK == 0`, and each request owns a distinct
+pool slot for the duration of the launch.
+The recurrent matrix remains in the pool's semantic `[K,V]` order.
+`beta` must already be sigmoid-transformed and is never transformed again by the kernel;
+`g` is the caller-provided log-decay.
+The source deliberately excludes donor graph fusion and SSM convolution assumptions.
+`pascal-fp32` is explicit-only and never an `auto` choice, requires a positive qualification gate,
+and remains fail-closed in the model forward until H2 one-P4 parity and end-to-end evidence exist.
+H1 compilation and source census are not hardware evidence.
+
 ## GGUF ingestion
 
 The GGUF reader resolves a complete immutable shard set before exposing a tensor. It

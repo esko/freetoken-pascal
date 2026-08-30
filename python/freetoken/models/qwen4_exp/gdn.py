@@ -403,6 +403,13 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             raise GdnDispatchError(
                 "triton-candidate selected but no Qwen4 GDN candidate implementation is registered"
             )
+        if decision.selected_implementation == "pascal-fp32":
+            # The standalone adapter is an explicit H1/H2 bring-up seam, not a production
+            # model path yet.  Keeping this fail-closed prevents an environment override from
+            # accidentally routing a full model through a kernel before P4 parity evidence.
+            raise GdnDispatchError(
+                "pascal-fp32 selected but Qwen4 GDN runtime integration is not H2-qualified"
+            )
 
         # Per-forward GDN metadata (cu_seqlens / cache_indices / continuation flags),
         # built once and shared by all GDN layers. The scheduler/graph set it; build it
