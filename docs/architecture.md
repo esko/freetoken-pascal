@@ -323,8 +323,11 @@ The H0 dispatch contract exposes `auto`, `torch-reference` and explicit
 `triton-candidate` modes through an immutable `RouterDispatchDecision` observer. Auto
 keeps Qwen's non-power-of-two `topk=10` route on the Torch reference with a
 `candidate-not-qualified` reason; the candidate is default-off pending H1 `sm_61`
-compilation and H2 P4 parity/performance evidence. Device-resident token-limit scalars
-remain on their CUDA stream so routing and CUDA-graph capture do not incur host sync.
+compilation and H2 P4 parity/performance evidence. Set `FREETOKEN_ROUTER_MODE` to one
+of those exact lowercase values to force a mode; when unset, the mode is `auto`, and
+invalid values fail during layer/backend construction. Debug observers receive the
+immutable `router_dispatch` decision before the route payload. Device-resident token-limit
+scalars remain on their CUDA stream so routing and CUDA-graph capture do not incur host sync.
 
 For `m` misses and `q` current GPU fetches, the autotuner minimizes the measured critical path:
 

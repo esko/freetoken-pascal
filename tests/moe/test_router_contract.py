@@ -286,3 +286,113 @@ def test_explicit_candidate_dispatches_exceptional_logits_without_host_probe(mon
         triton_candidate_available=True,
     )
     assert len(called) == 1
+
+
+def test_router_mode_from_env_defaults_to_auto_and_rejects_invalid_values(monkeypatch):
+    from freetoken.moe.router_contract import router_mode_from_env
+
+    monkeypatch.delenv("FREETOKEN_ROUTER_MODE", raising=False)
+    assert router_mode_from_env() == "auto"
+
+    for value in ("bogus", " Auto ", ""):
+        monkeypatch.setenv("FREETOKEN_ROUTER_MODE", value)
+        with pytest.raises(ValueError, match="unsupported router mode"):
+            router_mode_from_env()
+
+
+def test_invalid_router_mode_fails_at_backend_and_layer_construction(monkeypatch):
+    monkeypatch.setenv("FREETOKEN_ROUTER_MODE", "bogus")
+
+    from freetoken.moe.fused import FusedMoe
+
+    with pytest.raises(ValueError, match="unsupported router mode"):
+        FusedMoe()
+
+    from freetoken.distributed import set_tp_info, try_get_tp_info
+
+    if try_get_tp_info() is None:
+        set_tp_info(rank=0, size=1)
+    from freetoken.layers.moe import MoELayer
+
+    with pytest.raises(ValueError, match="unsupported router mode"):
+        MoELayer(
+            num_experts=4,
+            top_k=2,
+            hidden_size=8,
+            intermediate_size=16,
+            allocate_experts=False,
+        )
+
+
+def test_fused_moe_forced_candidate_emits_dispatch_before_route(monkeypatch):
+    import freetoken.moe.fused as fused_module
+
+    monkeypatch.setenv("FREETOKEN_ROUTER_MODE", "triton-candidate")
+    monkeypatch.setattr(fused_module, "_probe_triton_candidate", lambda: True)
+    candidate_calls = []
+
+    def fake_candidate(gating_output, topk, renormalize, num_token_non_padded):
+        candidate_calls.append((gating_output, topk, renormalize, num_token_non_padded))
+        return torch.full((2, topk), 0.5), torch.zeros((2, topk), dtype=torch.int32)
+
+    monkeypatch.setattr(fused_module, "_run_triton_candidate", fake_candidate)
+    monkeypatch.setattr(
+        fused_module,
+        "fused_experts_impl",
+        lambda hidden_states, *args, **kwargs: hidden_states,
+    )
+    from freetoken.moe.fused import FusedMoe
+
+    events = []
+    output = FusedMoe().forward(
+        torch.zeros((2, 8)),
+        torch.zeros((4, 16, 8)),
+        torch.zeros((4, 8, 8)),
+        torch.zeros((2, 4)),
+        topk=2,
+        renormalize=True,
+        debug_observer=lambda name, payload: events.append((name, payload)),
+    )
+
+    assert output.shape == (2, 8)
+    assert len(candidate_calls) == 1
+    assert [name for name, _payload in events] == ["router_dispatch", "router"]
+    dispatch = events[0][1]
+    assert dispatch == {
+        "requested_mode": "triton-candidate",
+        "selected_implementation": "triton-candidate",
+        "topk": 2,
+        "num_experts": 4,
+        "renormalize": True,
+        "has_token_limit": False,
+        "fallback_reason": None,
+    }
+
+
+def test_moe_layer_threads_router_mode_and_dispatch_event(monkeypatch):
+    from freetoken.distributed import set_tp_info, try_get_tp_info
+
+    if try_get_tp_info() is None:
+        set_tp_info(rank=0, size=1)
+    from freetoken.layers.moe import MoELayer
+
+    layer = MoELayer(
+        num_experts=4,
+        top_k=2,
+        hidden_size=8,
+        intermediate_size=16,
+        allocate_experts=False,
+        router_mode="torch-reference",
+    )
+    events = []
+    weights, ids = layer._route_and_observe(
+        torch.zeros((1, 8)),
+        torch.zeros((1, 4)),
+        lambda name, payload: events.append((name, payload)),
+    )
+
+    assert weights.shape == (1, 2)
+    assert ids.shape == (1, 2)
+    assert [name for name, _payload in events] == ["router_dispatch", "router"]
+    assert events[0][1]["requested_mode"] == "torch-reference"
+    assert events[0][1]["selected_implementation"] == "torch-reference"

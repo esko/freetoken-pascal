@@ -155,7 +155,10 @@ Adapt merged FreeToken PR #257's arbitrary-`K` fused router first, then compare 
 The H0 contract tests resolve `auto`, `torch-reference` and explicit `triton-candidate`
 without global decision state, assert fallback reasons and observer fields, and verify
 that CUDA-resident token-limit scalars are compared on-device rather than extracted with
-`item()`. The candidate remains default-off until the H1/H2 gates pass.
+`item()`. The `FREETOKEN_ROUTER_MODE` override is exact and lowercase, defaults to
+`auto` when unset, and rejects invalid values at layer/backend construction; the
+`router_dispatch` observer event records the selected implementation. The candidate
+remains default-off until the H1/H2 gates pass.
 
 ### Placement operation
 

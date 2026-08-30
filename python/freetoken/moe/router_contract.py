@@ -8,6 +8,7 @@ the same time.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
@@ -78,6 +79,23 @@ def _validate_mode(mode: str) -> RouterMode:
     if type(mode) is not str or mode not in _MODES:
         raise ValueError(f"unsupported router mode: {mode!r}")
     return mode  # type: ignore[return-value]
+
+
+def parse_router_mode(mode: str) -> RouterMode:
+    """Validate an explicit router mode without normalizing or falling back."""
+    return _validate_mode(mode)
+
+
+def router_mode_from_env() -> RouterMode:
+    """Read the process router mode once at a configuration seam.
+
+    The variable is intentionally exact and lowercase. An invalid value raises during
+    backend/layer construction rather than silently changing the selected kernel.
+    """
+    value = os.environ.get("FREETOKEN_ROUTER_MODE")
+    if value is None:
+        return "auto"
+    return parse_router_mode(value)
 
 
 def resolve_router_dispatch(
@@ -160,5 +178,7 @@ __all__ = [
     "RouterDispatchError",
     "RouterImplementation",
     "RouterMode",
+    "parse_router_mode",
     "resolve_router_dispatch",
+    "router_mode_from_env",
 ]

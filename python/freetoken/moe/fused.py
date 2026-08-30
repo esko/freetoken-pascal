@@ -12,7 +12,9 @@ from freetoken.moe import BaseMoeBackend
 from freetoken.moe.router_contract import (
     RouterDispatchDecision,
     RouterDispatchError,
+    parse_router_mode,
     resolve_router_dispatch,
+    router_mode_from_env,
 )
 from freetoken.utils import div_ceil, init_logger
 
@@ -174,7 +176,7 @@ def fused_topk(
     renormalize: bool,
     num_token_non_padded: torch.Tensor | None = None,
     *,
-    router_mode: str = "auto",
+    router_mode: str | None = None,
     router_observer: RouterObserver | None = None,
     triton_candidate_available: bool | None = None,
     triton_kernels_available: bool | None = None,
@@ -191,14 +193,17 @@ def fused_topk(
     if router_observer is not None and not callable(router_observer):
         raise TypeError("router_observer must be callable")
 
-    if triton_candidate_available is None and router_mode == "triton-candidate":
+    requested_mode = (
+        router_mode_from_env() if router_mode is None else parse_router_mode(router_mode)
+    )
+    if triton_candidate_available is None and requested_mode == "triton-candidate":
         triton_candidate_available = _probe_triton_candidate()
-    if triton_kernels_available is None and router_mode == "auto":
+    if triton_kernels_available is None and requested_mode == "auto":
         from freetoken.kernel.backend import is_triton_kernels_usable
 
         triton_kernels_available = is_triton_kernels_usable()
     decision = resolve_router_dispatch(
-        requested_mode=router_mode,
+        requested_mode=requested_mode,
         topk=topk,
         num_experts=num_experts,
         renormalize=renormalize,
@@ -578,6 +583,11 @@ def fused_experts_decode_impl(
 
 
 class FusedMoe(BaseMoeBackend):
+    def __init__(self, router_mode: str | None = None):
+        self.router_mode = (
+            router_mode_from_env() if router_mode is None else parse_router_mode(router_mode)
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -589,12 +599,24 @@ class FusedMoe(BaseMoeBackend):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         debug_observer: DebugObserver | None = None,
+        router_mode: str | None = None,
     ) -> torch.Tensor:
+        selected_mode = self.router_mode if router_mode is None else parse_router_mode(router_mode)
+
+        router_observer = None
+        if debug_observer is not None:
+
+            def observe_router_dispatch(decision: RouterDispatchDecision) -> None:
+                debug_observer("router_dispatch", decision.as_dict())
+
+            router_observer = observe_router_dispatch
         topk_weights, topk_ids = fused_topk(
             hidden_states=hidden_states,
             gating_output=gating_output,
             topk=topk,
             renormalize=renormalize,
+            router_mode=selected_mode,
+            router_observer=router_observer,
         )
         if debug_observer is not None:
             debug_observer(
