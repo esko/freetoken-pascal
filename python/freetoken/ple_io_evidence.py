@@ -16,6 +16,15 @@ from math import isfinite
 from typing import Any
 
 PLE_IO_PHASES = frozenset({"cold", "warm", "steady"})
+PLE_IO_PHYSICAL_SOURCE_KINDS = frozenset(
+    {
+        "blktrace",
+        "block-device-stat",
+        "iostat",
+        "nvme-cli",
+        "sysfs-block-stat",
+    }
+)
 _PROCESS_ONLY_SOURCES = frozenset(
     {
         "application",
@@ -24,9 +33,6 @@ _PROCESS_ONLY_SOURCES = frozenset(
         "process-io",
         "rusage",
     }
-)
-_PHYSICAL_SOURCE_MARKERS = frozenset(
-    {"block", "device", "disk", "iostat", "blktrace", "nvme", "sysfs"}
 )
 _COUNTER_FIELDS = frozenset(
     {
@@ -37,6 +43,7 @@ _COUNTER_FIELDS = frozenset(
         "physical_block_device_bytes",
         "device_identity",
         "physical_source",
+        "physical_source_detail",
     }
 )
 
@@ -55,7 +62,10 @@ class PLEIOCounters:
     identified block-device source before physical bytes can be reported.
     ``device_identity`` may be a scalar device name or a sequence supplied by a
     multi-device probe.  A sequence is valid only when it contains exactly one
-    non-empty identity, and is otherwise rejected as ambiguous.
+    non-empty identity, and is otherwise rejected as ambiguous.  ``physical_source``
+    is a machine-readable source kind and is checked against
+    :data:`PLE_IO_PHYSICAL_SOURCE_KINDS`; free-form command or path information
+    belongs in ``physical_source_detail``.
     """
 
     major_faults: int
@@ -65,6 +75,7 @@ class PLEIOCounters:
     physical_block_device_bytes: int | None = None
     device_identity: str | tuple[str, ...] | Sequence[str] | None = None
     physical_source: str | None = None
+    physical_source_detail: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -105,6 +116,32 @@ class PLEIOPhaseEvidence:
     device_identity: str
     physical_source: str
     physical_evidence: bool = True
+    physical_source_detail: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject evidence that cannot be serialized or proven physical."""
+        _validate_phase(self.phase)
+        for name in (
+            "major_faults",
+            "logical_packed_bytes",
+            "application_bytes_read",
+            "application_reads",
+            "physical_block_device_bytes",
+        ):
+            _validate_counter(name, getattr(self, name))
+        amplification = self.read_amplification
+        if isinstance(amplification, bool) or not isinstance(amplification, (int, float)):
+            raise PLEIOEvidenceError("read_amplification must be a finite non-negative number")
+        amplification = float(amplification)
+        if not isfinite(amplification) or amplification < 0:
+            raise PLEIOEvidenceError("read_amplification must be a finite non-negative number")
+        object.__setattr__(self, "read_amplification", amplification)
+        if self.physical_evidence is not True:
+            raise PLEIOEvidenceError("physical_evidence must be true")
+        _validate_nonempty_string("device_identity", self.device_identity)
+        _validate_source_kind(self.physical_source)
+        if self.physical_source_detail is not None:
+            _validate_nonempty_string("physical_source_detail", self.physical_source_detail)
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-compatible evidence fields without hiding provenance."""
@@ -118,6 +155,7 @@ class PLEIOPhaseEvidence:
             "read_amplification": self.read_amplification,
             "device_identity": self.device_identity,
             "physical_source": self.physical_source,
+            "physical_source_detail": self.physical_source_detail,
             "physical_evidence": self.physical_evidence,
         }
 
@@ -131,6 +169,22 @@ def _validate_phase(phase: object) -> str:
     if not isinstance(phase, str) or phase not in PLE_IO_PHASES:
         raise PLEIOEvidenceError(f"invalid PLE I/O phase {phase!r}; expected cold, warm, or steady")
     return phase
+
+
+def _validate_nonempty_string(name: str, value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise PLEIOEvidenceError(f"{name} must be a non-empty string")
+    return value
+
+
+def _validate_source_kind(value: object) -> str:
+    if isinstance(value, str) and value in _PROCESS_ONLY_SOURCES:
+        raise PLEIOEvidenceError("process I/O alone cannot establish physical block-device bytes")
+    if not isinstance(value, str) or value not in PLE_IO_PHYSICAL_SOURCE_KINDS:
+        raise PLEIOEvidenceError(
+            "physical counter source is not an identified block-device source kind"
+        )
+    return value
 
 
 def _coerce_counters(value: PLEIOCounters | Mapping[str, Any]) -> PLEIOCounters:
@@ -170,21 +224,21 @@ def _physical_provenance(before: PLEIOCounters, after: PLEIOCounters) -> tuple[s
         )
     before_source = before.physical_source
     after_source = after.physical_source
-    if not isinstance(before_source, str) or not before_source.strip():
+    if before_source is None or after_source is None:
         raise PLEIOEvidenceError("physical block-device counter source is undefined")
-    if not isinstance(after_source, str) or not after_source.strip():
-        raise PLEIOEvidenceError("physical block-device counter source is undefined")
-    if (
-        before_source.casefold() in _PROCESS_ONLY_SOURCES
-        or after_source.casefold() in _PROCESS_ONLY_SOURCES
-    ):
-        raise PLEIOEvidenceError("process I/O alone cannot establish physical block-device bytes")
-    if not any(marker in before_source.casefold() for marker in _PHYSICAL_SOURCE_MARKERS):
-        raise PLEIOEvidenceError("physical counter source is not an identified block-device source")
-    if not any(marker in after_source.casefold() for marker in _PHYSICAL_SOURCE_MARKERS):
-        raise PLEIOEvidenceError("physical counter source is not an identified block-device source")
+    _validate_source_kind(before_source)
+    _validate_source_kind(after_source)
     if before_source != after_source:
         raise PLEIOEvidenceError("physical block-device counter source changed")
+    before_detail = before.physical_source_detail
+    after_detail = after.physical_source_detail
+    if (before_detail is None) != (after_detail is None):
+        raise PLEIOEvidenceError("physical counter source detail changed")
+    if before_detail is not None:
+        _validate_nonempty_string("physical_source_detail", before_detail)
+        _validate_nonempty_string("physical_source_detail", after_detail)
+        if before_detail != after_detail:
+            raise PLEIOEvidenceError("physical counter source detail changed")
     before_identity = _identity(before.device_identity)
     after_identity = _identity(after.device_identity)
     if before_identity != after_identity:
@@ -238,6 +292,7 @@ def measure_ple_io_phase(
         read_amplification=amplification,
         device_identity=device_identity,
         physical_source=physical_source,
+        physical_source_detail=start.physical_source_detail,
     )
 
 
@@ -264,8 +319,9 @@ class PLEIOEvidenceRecorder:
         phase = _validate_phase(phase)
         if self._active_phase is not None:
             raise PLEIOEvidenceError(f"a phase is already active: {self._active_phase}")
+        start = _coerce_counters(self._sample(counters))
         self._active_phase = phase
-        self._start = self._sample(counters)
+        self._start = start
 
     def end_phase(
         self,
@@ -280,10 +336,12 @@ class PLEIOEvidenceRecorder:
                 f"phase {phase!r} does not match active phase {self._active_phase!r}"
             )
         start = self._start
-        end = self._sample(counters)
+        end = _coerce_counters(self._sample(counters))
+        evidence = measure_ple_io_phase(phase, start, end)
+        # Keep a failed end retry-safe: lifecycle state is consumed only after
+        # sampling, validation, and delta measurement have all succeeded.
         self._active_phase = None
         self._start = None
-        evidence = measure_ple_io_phase(phase, start, end)
         self._completed.append(evidence)
         return evidence
 
@@ -302,6 +360,7 @@ class PLEIOEvidenceRecorder:
 
 __all__ = [
     "PLE_IO_PHASES",
+    "PLE_IO_PHYSICAL_SOURCE_KINDS",
     "PLEIOCounters",
     "PLEIOEvidenceError",
     "PLEIOEvidenceRecorder",

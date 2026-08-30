@@ -96,11 +96,20 @@ read calls separate from physical block-device bytes.
 
 Physical bytes are valid only when both snapshots include an independently sampled,
 non-decreasing block-device counter, a stable unambiguous device identity, and an
-explicit external source such as block-device statistics.  `/proc/self/io`, rusage,
-or any other process-only read counter is never promoted to physical I/O. Counter
-regressions, identity/source changes, invalid phases, missing physical provenance,
-and a zero logical-byte denominator fail closed. The resulting read-amplification
-ratio is `physical_block_device_bytes / logical_packed_bytes` for that phase.
+exact allowlisted source kind: `block-device-stat`, `sysfs-block-stat`, `iostat`,
+`blktrace`, or `nvme-cli`. Any command/path detail is carried separately and must
+remain stable across the phase. `/proc/self/io`, rusage, or any other process-only
+read counter is never promoted to physical I/O. Counter regressions,
+identity/source changes, invalid phases, missing physical provenance, and a zero
+logical-byte denominator fail closed. The resulting read-amplification ratio is
+`physical_block_device_bytes / logical_packed_bytes` for that phase.
+
+`PLEIOEvidenceRecorder` is transactional at both phase boundaries: it samples and
+validates the begin snapshot before activating a phase, and consumes the active
+phase only after end sampling and delta measurement succeed. A provider or
+validation failure therefore leaves the phase active (or inactive for a failed
+begin) so the caller can retry with a fresh snapshot; a successful phase is
+recorded exactly once.
 
 This H0 primitive does not drop caches, issue privileged mutations, or claim that a
 host process counter measures device traffic. The later NVMe harness owns collection

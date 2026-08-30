@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from freetoken.ple_io_evidence import (
     PLEIOCounters,
     PLEIOEvidenceError,
     PLEIOEvidenceRecorder,
+    PLEIOPhaseEvidence,
     measure_ple_io_phase,
 )
 
 
-def counters(**changes: int | str | None) -> PLEIOCounters:
-    values: dict[str, int | str | None] = {
+def counters(**changes: object) -> PLEIOCounters:
+    values: dict[str, object] = {
         "major_faults": 10,
         "logical_packed_bytes": 1_000,
         "application_bytes_read": 1_200,
@@ -45,6 +48,7 @@ def test_measure_phase_reports_counter_deltas_and_read_amplification() -> None:
     assert evidence.read_amplification == pytest.approx(3.0)
     assert evidence.physical_evidence is True
     assert evidence.to_dict()["phase"] == "cold"
+    json.dumps(evidence.to_dict(), allow_nan=False)
 
 
 @pytest.mark.parametrize("phase", ["warm", "steady"])
@@ -86,6 +90,21 @@ def test_injected_counter_recorder_captures_phase_lifecycle() -> None:
         (
             counters(physical_source="opaque-counter"),
             counters(physical_source="opaque-counter"),
+            "identified",
+        ),
+        (
+            counters(physical_source="not-a-block-device-stat"),
+            counters(physical_source="not-a-block-device-stat"),
+            "identified",
+        ),
+        (
+            counters(physical_source="block-device-stat "),
+            counters(physical_source="block-device-stat "),
+            "identified",
+        ),
+        (
+            counters(physical_source="BLOCK-DEVICE-STAT"),
+            counters(physical_source="BLOCK-DEVICE-STAT"),
             "identified",
         ),
     ],
@@ -139,3 +158,118 @@ def test_recorder_requires_matching_active_phase() -> None:
         recorder.begin_phase("warm")
     with pytest.raises(PLEIOEvidenceError, match="does not match"):
         recorder.end_phase("warm")
+
+
+def _evidence(**changes: object) -> PLEIOPhaseEvidence:
+    values: dict[str, object] = {
+        "phase": "cold",
+        "major_faults": 1,
+        "logical_packed_bytes": 100,
+        "application_bytes_read": 200,
+        "application_reads": 2,
+        "physical_block_device_bytes": 300,
+        "read_amplification": 3.0,
+        "device_identity": "nvme0n1",
+        "physical_source": "block-device-stat",
+        "physical_source_detail": "/sys/block/nvme0n1/stat",
+        "physical_evidence": True,
+    }
+    values.update(changes)
+    return PLEIOPhaseEvidence(**values)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "major_faults",
+        "logical_packed_bytes",
+        "application_bytes_read",
+        "application_reads",
+        "physical_block_device_bytes",
+    ],
+)
+@pytest.mark.parametrize("value", [-1, True, 1.5, "1"])
+def test_phase_evidence_rejects_non_negative_integer_contract_violations(
+    field: str, value: object
+) -> None:
+    with pytest.raises(PLEIOEvidenceError, match=field):
+        _evidence(**{field: value})
+
+
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf"), float("-inf"), True, "3"])
+def test_phase_evidence_rejects_invalid_amplification(value: object) -> None:
+    with pytest.raises(PLEIOEvidenceError, match="read_amplification"):
+        _evidence(read_amplification=value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("phase", "hot"),
+        ("device_identity", ""),
+        ("device_identity", None),
+        ("physical_source", ""),
+        ("physical_source", "trace-block-device-stat"),
+        ("physical_source_detail", ""),
+        ("physical_evidence", False),
+        ("physical_evidence", 1),
+    ],
+)
+def test_phase_evidence_rejects_invalid_phase_and_provenance(field: str, value: object) -> None:
+    with pytest.raises(PLEIOEvidenceError):
+        _evidence(**{field: value})
+
+
+def test_recorder_begin_provider_failure_does_not_activate_phase() -> None:
+    attempts = 0
+
+    def flaky_source() -> PLEIOCounters:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("probe unavailable")
+        return counters()
+
+    recorder = PLEIOEvidenceRecorder(flaky_source)
+    with pytest.raises(RuntimeError, match="probe unavailable"):
+        recorder.begin_phase("cold")
+
+    recorder.begin_phase("cold")
+    assert recorder.completed == ()
+
+
+def test_recorder_end_failure_keeps_phase_for_retry() -> None:
+    recorder = PLEIOEvidenceRecorder(lambda: counters())
+    recorder.begin_phase("cold")
+
+    with pytest.raises(PLEIOEvidenceError, match="counter regression"):
+        recorder.end_phase("cold", counters(logical_packed_bytes=900))
+
+    evidence = recorder.end_phase(
+        "cold",
+        counters(logical_packed_bytes=1_100, physical_block_device_bytes=2_100),
+    )
+    assert evidence.logical_packed_bytes == 100
+    assert recorder.completed == (evidence,)
+
+
+def test_recorder_end_provider_failure_keeps_phase_for_retry() -> None:
+    attempts = 0
+
+    def flaky_source() -> PLEIOCounters:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise RuntimeError("probe unavailable")
+        return counters()
+
+    recorder = PLEIOEvidenceRecorder(flaky_source)
+    recorder.begin_phase("cold")
+    with pytest.raises(RuntimeError, match="probe unavailable"):
+        recorder.end_phase("cold")
+
+    evidence = recorder.end_phase(
+        "cold",
+        counters(logical_packed_bytes=1_100, physical_block_device_bytes=2_100),
+    )
+    assert evidence.logical_packed_bytes == 100
