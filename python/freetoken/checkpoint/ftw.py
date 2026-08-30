@@ -109,6 +109,8 @@ def prepare_ftw_host_bank_policy(
     swap_probe=None,
 ):
     """Preflight every FTW expert-bank allocation from index metadata only."""
+    from freetoken.moe.numa_memory import NumaSampleIdentity
+
     if policy is None:
         return None
     if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers <= 0:
@@ -150,6 +152,26 @@ def prepare_ftw_host_bank_policy(
     mixed = set(entry["name"] for entry in flat_entries) & per_layer_groups.keys()
     if mixed:
         raise ValueError(f"FTW bank(s) mix flat and per-layer row layouts: {sorted(mixed)}")
+
+    sample_identities: set[NumaSampleIdentity] = set()
+
+    def register_sample_identity(bank_name: str, layer_id: int | None) -> None:
+        identity = NumaSampleIdentity(bank_name, layer_id)
+        if identity in sample_identities:
+            raise ValueError(
+                "FTW expert banks contain duplicate NUMA sample identity "
+                f"{identity.as_dict()}"
+            )
+        sample_identities.add(identity)
+
+    for entry in alpha_entries:
+        register_sample_identity(entry["name"], None)
+    for entry in flat_entries:
+        for layer_id in range(num_layers):
+            register_sample_identity(entry["name"], layer_id)
+    for base, by_layer in per_layer_groups.items():
+        for layer_id in by_layer:
+            register_sample_identity(base, layer_id)
 
     layer_bytes = [0] * num_layers
     for entry in alpha_entries:
@@ -548,6 +570,7 @@ def load_ftw_banks(
     ``cache_budget.expert_bytes_per_slot``).
     """
     from freetoken.moe.host_banks import HostBank, HostResidency, PinPipeline, born_pinned_default
+    from freetoken.moe.numa_memory import NumaSampleIdentity
     from freetoken.utils.progress import byte_bar
 
     if host_bank_policy is not None and layer_residency is not None:
@@ -575,13 +598,14 @@ def load_ftw_banks(
     ):
         staging_ring = host_bank_policy.staging_ring()
 
-    allocated_banks: list[HostBank] = []
+    allocated_banks: list[tuple[NumaSampleIdentity, HostBank]] = []
     numa_placement = (
         host_bank_policy.numa_placement if host_bank_policy is not None else None
     )
 
-    def _new_bank(shape, dtype, backing):
+    def _new_bank(shape, dtype, backing, *, bank_name: str, layer_id: int | None):
         try:
+            identity = NumaSampleIdentity(bank_name, layer_id)
             bank = HostBank(
                 shape,
                 dtype,
@@ -598,11 +622,11 @@ def load_ftw_banks(
             except (NameError, UnboundLocalError):
                 pass
             raise
-        allocated_banks.append(bank)
+        allocated_banks.append((identity, bank))
         return bank
 
     def _rollback_allocations() -> None:
-        for bank in reversed(allocated_banks):
+        for _identity, bank in reversed(allocated_banks):
             try:
                 bank.close()
             except BaseException as exc:
@@ -647,7 +671,7 @@ def load_ftw_banks(
     # Alphas: unchanged, one flat HostBank per entry.
     alpha_specs = {e["name"]: (tuple(e["shape"]), _dtype_of(e["dtype"])) for e in alpha_entries}
     alpha_hb = {
-        name: _new_bank(shape, dtype, _backing(0))
+        name: _new_bank(shape, dtype, _backing(0), bank_name=name, layer_id=None)
         for name, (shape, dtype) in alpha_specs.items()
     }
 
@@ -689,7 +713,11 @@ def load_ftw_banks(
             win_end = _align_up(off + layer_bytes)
             head_pad = off - win_off
             bank = _new_bank(
-                (win_end - win_off,), torch.uint8, _backing(layer_id)
+                (win_end - win_off,),
+                torch.uint8,
+                _backing(layer_id),
+                bank_name=name,
+                layer_id=layer_id,
             )
             row_hb[name].append(bank)
             row_view_args[name].append((head_pad, layer_bytes, num_experts, tuple(row_shape), dtype))
@@ -706,7 +734,11 @@ def load_ftw_banks(
             e = by_layer[layer_id]
             assert e["global_off"] % ALIGN == 0, (base, layer_id, e["global_off"])  # writer invariant
             bank = _new_bank(
-                tuple(e["shape"]), _dtype_of(e["dtype"]), _backing(layer_id)
+                tuple(e["shape"]),
+                _dtype_of(e["dtype"]),
+                _backing(layer_id),
+                bank_name=base,
+                layer_id=layer_id,
             )
             row_hb[base].append(bank)
             row_view_args[base].append(None)
@@ -753,8 +785,9 @@ def load_ftw_banks(
         if host_bank_policy is not None and host_bank_policy.sample_numa_residency:
             # Reads and settles have completed, so the optional self-only
             # residency sample cannot race the loader's writes.
-            for bank in allocated_banks:
-                host_bank_policy.sample_numa_bank(bank)
+            for identity, bank in allocated_banks:
+                host_bank_policy.sample_numa_bank(bank, identity=identity)
+        completed = True
     finally:
         bar.close()
         reader.close()
