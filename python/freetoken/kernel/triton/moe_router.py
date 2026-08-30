@@ -14,7 +14,6 @@ from typing import Tuple
 import torch
 import triton
 import triton.language as tl
-
 from freetoken.utils.arch import is_sm90_supported
 
 
@@ -80,9 +79,9 @@ def _router_triton_kernel(
         max_val = tl.max(cur, axis=1)[:, None]
         lane_id = tl.where(cur == max_val, offs_n[None, :], N + 1)  # lowest expert id wins ties
         win_lane = tl.min(lane_id, axis=1)[:, None].to(tl.int32)
-        win_activated = tl.sum(
-            tl.where(offs_n[None, :] == win_lane, activated, 0.0), axis=1
-        )[:, None]
+        win_activated = tl.sum(tl.where(offs_n[None, :] == win_lane, activated, 0.0), axis=1)[
+            :, None
+        ]
         slot = offs_k[None, :] == k
         selected_vals = tl.where(slot, win_activated, selected_vals)
         selected_idx = tl.where(slot, win_lane, selected_idx)
@@ -98,9 +97,14 @@ def _router_triton_kernel(
     if HAS_TOKEN_LIMIT:
         limit = tl.load(num_token_non_padded_ptr)
         selected_idx = tl.where(offs_m[:, None] < limit, selected_idx, -1)
+        selected_vals = tl.where(offs_m[:, None] < limit, selected_vals, 0.0)
 
-    out_w_ptr = out_weights_ptr + offs_m[:, None].to(tl.int64) * stride_wm + offs_k[None, :] * stride_wk
-    out_i_ptr = out_indices_ptr + offs_m[:, None].to(tl.int64) * stride_im + offs_k[None, :] * stride_ik
+    out_w_ptr = (
+        out_weights_ptr + offs_m[:, None].to(tl.int64) * stride_wm + offs_k[None, :] * stride_wk
+    )
+    out_i_ptr = (
+        out_indices_ptr + offs_m[:, None].to(tl.int64) * stride_im + offs_k[None, :] * stride_ik
+    )
     store_mask = mask_m[:, None] & mask_k[None, :]
     tl.store(out_w_ptr, selected_vals, mask=store_mask)
     tl.store(out_i_ptr, selected_idx, mask=store_mask)
@@ -114,10 +118,33 @@ def fused_topk_softmax(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Softmax over all experts, top-k, then renormalize; ties keep the lowest expert id.
 
-    ``num_token_non_padded`` is a device scalar; rows at or past it get expert id -1.
+    ``num_token_non_padded`` is a device scalar; rows at or past it get expert id -1
+    and zero weight. The candidate contract accepts finite logits only; the dispatch
+    layer rejects NaN and infinity before launch because exceptional-value behavior is
+    owned by the Torch reference.
     """
-    assert gating_output.ndim == 2, "gating_output must be 2D"
+    if gating_output.ndim != 2:
+        raise ValueError("gating_output must be 2D")
+    if type(topk) is not int or isinstance(topk, bool):
+        raise TypeError("topk must be an integer")
+    if type(renormalize) is not bool:
+        raise TypeError("renormalize must be a bool")
     M, N = gating_output.shape
+    if topk < 1 or topk > N:
+        raise ValueError("topk must be between 1 and the number of experts")
+    if num_token_non_padded is not None:
+        integer_dtypes = {torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64}
+        if not isinstance(num_token_non_padded, torch.Tensor):
+            raise TypeError("num_token_non_padded must be an integer scalar tensor")
+        if num_token_non_padded.ndim != 0:
+            raise ValueError("num_token_non_padded must be a scalar tensor")
+        if num_token_non_padded.dtype not in integer_dtypes:
+            raise TypeError("num_token_non_padded must have an integer dtype")
+        token_limit = int(num_token_non_padded.item())
+        if token_limit < 0 or token_limit > M:
+            raise ValueError("num_token_non_padded must be within the token range")
+    if not bool(torch.isfinite(gating_output.float()).all().item()):
+        raise ValueError("triton router candidate accepts finite logits only")
     weights = torch.empty((M, topk), dtype=torch.float32, device=gating_output.device)
     indices = torch.empty((M, topk), dtype=torch.int32, device=gating_output.device)
 

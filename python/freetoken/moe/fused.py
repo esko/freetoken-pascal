@@ -1,4 +1,5 @@
 import functools
+import importlib.util
 import json
 import os
 from collections.abc import Callable
@@ -8,76 +9,80 @@ from typing import Dict, Tuple
 import torch
 
 from freetoken.moe import BaseMoeBackend
+from freetoken.moe.router_contract import (
+    RouterDispatchDecision,
+    RouterDispatchError,
+    resolve_router_dispatch,
+)
 from freetoken.utils import div_ceil, init_logger
 
 logger = init_logger(__name__)
 
 _warned_torch_topk = False
 DebugObserver = Callable[[str, dict[str, object]], None]
+RouterObserver = Callable[[RouterDispatchDecision], None]
+
+_INTEGER_TOKEN_DTYPES = frozenset({torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64})
 
 
-def _torch_fused_topk(
+def _validate_router_arguments(
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_token_non_padded: torch.Tensor | None,
+) -> tuple[int, int, int | None]:
+    """Validate shared router arguments and return ``(tokens, experts, limit)``."""
+    if not isinstance(gating_output, torch.Tensor):
+        raise TypeError("gating_output must be a torch.Tensor")
+    if gating_output.ndim != 2:
+        raise ValueError("gating_output must be 2D")
+    if type(topk) is not int or isinstance(topk, bool):
+        raise TypeError("topk must be an integer")
+    if type(renormalize) is not bool:
+        raise TypeError("renormalize must be a bool")
+    num_tokens, num_experts = gating_output.shape
+    if topk < 1 or topk > num_experts:
+        raise ValueError("topk must be between 1 and the number of experts")
+
+    if num_token_non_padded is None:
+        return num_tokens, num_experts, None
+    if not isinstance(num_token_non_padded, torch.Tensor):
+        raise TypeError("num_token_non_padded must be an integer scalar tensor")
+    if num_token_non_padded.ndim != 0:
+        raise ValueError("num_token_non_padded must be a scalar tensor")
+    if num_token_non_padded.dtype not in _INTEGER_TOKEN_DTYPES:
+        raise TypeError("num_token_non_padded must have an integer dtype")
+    limit = int(num_token_non_padded.item())
+    if limit < 0 or limit > num_tokens:
+        raise ValueError("num_token_non_padded must be within the token range")
+    return num_tokens, num_experts, limit
+
+
+def _probe_triton_candidate() -> bool:
+    """Probe only importability; compilation and execution remain explicit gates."""
+    try:
+        return importlib.util.find_spec("triton") is not None
+    except Exception:
+        return False
+
+
+def _run_triton_candidate(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
     num_token_non_padded: torch.Tensor | None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Pure-torch softmax router matching triton_kernels.topk (Windows fallback).
+    from freetoken.kernel.triton.moe_router import fused_topk_softmax
 
-    Softmax over all experts, select the top-k, and (when ``renormalize``) rescale the
-    selected weights to sum to 1 -- the standard fused-MoE routing convention.
-    """
-    probs = torch.softmax(gating_output.float(), dim=-1)
-    topk_weights, topk_ids = torch.topk(probs, topk, dim=-1)
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    topk_ids = topk_ids.to(torch.int32)
-    if num_token_non_padded is not None:
-        indices = torch.arange(0, topk_ids.shape[0], device=topk_ids.device)
-        topk_ids[indices >= num_token_non_padded, :] = -1
-    return topk_weights.contiguous(), topk_ids.contiguous()
+    return fused_topk_softmax(gating_output, topk, renormalize, num_token_non_padded)
 
 
-def fused_topk(
-    hidden_states: torch.Tensor,
+def _run_external_triton(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    num_token_non_padded: torch.Tensor | None = None,
+    num_token_non_padded: torch.Tensor | None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
-
-    from freetoken.kernel.backend import is_triton_kernels_usable
-
-    # The external Triton kernel pads several internal dimensions to powers of two, but
-    # does not pad N_EXPTS_ACT. Its tl.arange therefore cannot compile for values such as
-    # Qwen3.8-Flash-Next's topk=10. Use the exact Torch path for those models and whenever
-    # the installed package is incompatible with the current GPU architecture.
-    triton_topk_supported = topk > 0 and (topk & (topk - 1)) == 0
-    triton_topk_usable = is_triton_kernels_usable()
-    if not triton_topk_usable or not triton_topk_supported:
-        global _warned_torch_topk
-        if not _warned_torch_topk:
-            _warned_torch_topk = True
-            if not triton_topk_supported:
-                logger.warning_rank0(
-                    f"fused_topk: topk={topk} is not supported by triton_kernels -> "
-                    "pure-torch router fallback (numerically equivalent, slower)."
-                )
-            else:
-                logger.warning_rank0(
-                    "fused_topk: triton_kernels is not installed or is incompatible with "
-                    "this GPU -> pure-torch router fallback (numerically equivalent, slower)."
-                )
-        return _torch_fused_topk(gating_output, topk, renormalize, num_token_non_padded)
-
-    if topk & (topk - 1):
-        # triton_kernels.topk builds tl.arange(0, k), which must be a power of 2; a
-        # top-10 router (qwen4_exp) takes the equivalent vendored triton router instead.
-        from freetoken.kernel.triton.moe_router import fused_topk_softmax
-
-        return fused_topk_softmax(gating_output, topk, renormalize, num_token_non_padded)
-
     from triton_kernels.topk import topk as triton_kernels_topk
 
     logits = gating_output.float()
@@ -97,8 +102,122 @@ def fused_topk(
     topk_ids = topk_ids.to(torch.int32)
     if num_token_non_padded is not None:
         indices = torch.arange(0, topk_ids.shape[0], device=topk_ids.device)
-        topk_ids[indices >= num_token_non_padded, :] = -1
-    return topk_weights, topk_ids
+        valid_rows = indices < num_token_non_padded
+        topk_ids = torch.where(valid_rows[:, None], topk_ids, -1)
+        topk_weights = torch.where(valid_rows[:, None], topk_weights, 0.0)
+    return topk_weights.contiguous(), topk_ids.contiguous()
+
+
+def _torch_fused_topk(
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_token_non_padded: torch.Tensor | None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Exact FP32 reference router used for fallback and correctness comparisons.
+
+    Softmax is over all experts before selection. NaNs rank below ``-inf``; positive
+    infinities share probability equally; a row containing no finite value is uniform.
+    Stable sorting makes equal logits choose the lowest expert ID. Those explicit
+    exceptional rules are intentionally stricter than the candidate kernel contract.
+    """
+    _, num_experts, limit = _validate_router_arguments(
+        gating_output, topk, renormalize, num_token_non_padded
+    )
+    logits = gating_output.float()
+    ranking_logits = torch.where(torch.isnan(logits), float("-inf"), logits)
+    positive_infinity = torch.isposinf(logits)
+    has_positive_infinity = positive_infinity.any(dim=-1)
+    finite_or_negative_infinity = torch.isfinite(ranking_logits).any(dim=-1)
+
+    # The ordinary softmax is defined for rows with at least one finite value and no
+    # positive infinity. Replace the all-infinite rows after the operation would have
+    # produced NaN, keeping the reference deterministic without suppressing warnings.
+    probs = torch.softmax(ranking_logits, dim=-1)
+    uniform = torch.full_like(probs, 1.0 / num_experts)
+    probs = torch.where(finite_or_negative_infinity[:, None], probs, uniform)
+    inf_count = positive_infinity.sum(dim=-1, keepdim=True).clamp_min(1)
+    positive_infinity_probs = positive_infinity.to(torch.float32) / inf_count
+    probs = torch.where(has_positive_infinity[:, None], positive_infinity_probs, probs)
+
+    ordered_ids = torch.argsort(ranking_logits, dim=-1, descending=True, stable=True)
+    topk_ids = ordered_ids[:, :topk].to(torch.int32)
+    topk_weights = probs.gather(1, ordered_ids[:, :topk])
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    if limit is not None:
+        indices = torch.arange(0, topk_ids.shape[0], device=topk_ids.device)
+        valid_rows = indices < limit
+        topk_ids = torch.where(valid_rows[:, None], topk_ids, -1)
+        topk_weights = torch.where(valid_rows[:, None], topk_weights, 0.0)
+    return topk_weights.contiguous(), topk_ids.contiguous()
+
+
+def fused_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_token_non_padded: torch.Tensor | None = None,
+    *,
+    router_mode: str = "auto",
+    router_observer: RouterObserver | None = None,
+    triton_candidate_available: bool | None = None,
+    triton_kernels_available: bool | None = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if not isinstance(hidden_states, torch.Tensor):
+        raise TypeError("hidden_states must be a torch.Tensor")
+    if hidden_states.ndim < 1:
+        raise ValueError("hidden_states must have a token dimension")
+    num_tokens, num_experts, _limit = _validate_router_arguments(
+        gating_output, topk, renormalize, num_token_non_padded
+    )
+    if hidden_states.shape[0] != num_tokens:
+        raise ValueError("router token count mismatch between hidden_states and logits")
+    if router_observer is not None and not callable(router_observer):
+        raise TypeError("router_observer must be callable")
+
+    if triton_candidate_available is None and router_mode == "triton-candidate":
+        triton_candidate_available = _probe_triton_candidate()
+    if triton_kernels_available is None and router_mode == "auto":
+        from freetoken.kernel.backend import is_triton_kernels_usable
+
+        triton_kernels_available = is_triton_kernels_usable()
+    # Exceptional-value validation is needed only for the explicitly requested
+    # candidate. Avoid a device-to-host reduction on the permanent auto/reference
+    # path, where the candidate is not eligible anyway.
+    candidate_inputs_supported = True
+    if router_mode == "triton-candidate":
+        candidate_inputs_supported = bool(torch.isfinite(gating_output.float()).all().item())
+    decision = resolve_router_dispatch(
+        requested_mode=router_mode,
+        topk=topk,
+        num_experts=num_experts,
+        renormalize=renormalize,
+        has_token_limit=num_token_non_padded is not None,
+        triton_candidate_available=triton_candidate_available,
+        triton_kernels_available=triton_kernels_available,
+        candidate_inputs_supported=candidate_inputs_supported,
+    )
+    if router_observer is not None:
+        router_observer(decision)
+
+    if decision.selected_implementation == "torch-reference":
+        global _warned_torch_topk
+        if decision.fallback_reason and not _warned_torch_topk:
+            _warned_torch_topk = True
+            logger.warning_rank0(
+                f"fused_topk: {decision.fallback_reason} -> pure-torch router fallback."
+            )
+        return _torch_fused_topk(gating_output, topk, renormalize, num_token_non_padded)
+    if decision.selected_implementation == "triton-candidate":
+        try:
+            return _run_triton_candidate(gating_output, topk, renormalize, num_token_non_padded)
+        except RouterDispatchError:
+            raise
+        except Exception as exc:
+            raise RouterDispatchError(f"triton-candidate launch failed: {exc}") from exc
+    return _run_external_triton(gating_output, topk, renormalize, num_token_non_padded)
 
 
 def moe_align_block_size(

@@ -113,6 +113,24 @@ def create_moe_backend(backend: str) -> BaseMoeBackend:
 
 
 def __getattr__(name: str):
+    if name in {
+        "RouterDispatchDecision",
+        "RouterDispatchError",
+        "resolve_router_dispatch",
+    }:
+        from .router_contract import (
+            RouterDispatchDecision,
+            RouterDispatchError,
+            resolve_router_dispatch,
+        )
+
+        values = {
+            "RouterDispatchDecision": RouterDispatchDecision,
+            "RouterDispatchError": RouterDispatchError,
+            "resolve_router_dispatch": resolve_router_dispatch,
+        }
+        globals().update(values)
+        return values[name]
     if name == "QwenGGUFCpuMoELayer":
         from .gguf_layer import QwenGGUFCpuMoELayer
 
@@ -187,6 +205,9 @@ __all__ = [
     "QwenGGUFCpuDeviceBridge",
     "QwenGGUFCpuEagerBridge",
     "QwenGGUFCpuMoELayer",
+    "RouterDispatchDecision",
+    "RouterDispatchError",
     "create_moe_backend",
     "is_offload_moe_backend",
+    "resolve_router_dispatch",
 ]
