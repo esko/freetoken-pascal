@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
 import json
+import os
+import subprocess
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from freetoken.engine.placement_plan import (
@@ -497,6 +499,31 @@ def test_geometry_cross_fields_must_match_plan_and_backoff() -> None:
 
 
 def test_profile_module_is_torch_free() -> None:
-    spec = importlib.util.find_spec("freetoken.engine.placement_profile")
-    assert spec is not None
-    assert "torch" not in set(sys.modules)
+    python_root = Path(__file__).resolve().parents[2] / "python"
+    script = """
+import json
+import sys
+
+before = set(sys.modules)
+import freetoken.engine.placement_profile  # noqa: F401
+added = sorted(
+    name for name in set(sys.modules) - before if name == "torch" or name.startswith("torch.")
+)
+print(json.dumps({"torch_modules_added": added}))
+if added:
+    raise SystemExit(1)
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(python_root)
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=python_root.parent,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "placement_profile imported torch modules in a clean interpreter or failed to import; "
+        f"returncode={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+    )
