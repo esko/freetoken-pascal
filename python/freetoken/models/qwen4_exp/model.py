@@ -294,6 +294,7 @@ class Qwen4ExpModel(BaseOP):
         self._gguf_cpu_attachment: GGUFCpuExpertAttachment | None = None
         self._gguf_attachment_lock = threading.RLock()
         self._ple_tables: list[object] = []
+        self._host_resources_closed = False
         self._image_token_id = config.image_token_id
 
     @property
@@ -340,11 +341,24 @@ class Qwen4ExpModel(BaseOP):
             super().load_state_dict(state_dict, prefix=prefix, _internal=_internal)
 
     def _close_ple_tables(self) -> None:
-        for table in reversed(self._ple_tables):
+        tables = getattr(self, "_ple_tables", ())
+        self._ple_tables = []
+        # Drop layer references before closing owners so a pinned tensor cannot keep an
+        # anonymous HostBank mapping exported while its registration is being released.
+        for layer in getattr(self, "_ple", ()):
+            layer.ple_embedding.attach_table(None)
+        for table in tables:
             close = getattr(table, "close", None)
             if close is not None:
                 close()
-        self._ple_tables.clear()
+
+    def close_host_resources(self) -> None:
+        """Close model-owned PLE resources; safe to call repeatedly during teardown."""
+        with self._gguf_attachment_lock:
+            if getattr(self, "_host_resources_closed", False):
+                return
+            self._host_resources_closed = True
+            self._close_ple_tables()
 
     def _has_eager_gguf_attachment(self) -> bool:
         attachment = getattr(self, "_gguf_cpu_attachment", None)
@@ -381,6 +395,8 @@ class Qwen4ExpModel(BaseOP):
         ple_planner_mode: str = "vectorized",
         ple_planner_direct_threshold: int = 8,
     ) -> int:
+        if getattr(self, "_host_resources_closed", False):
+            raise RuntimeError("Qwen host resources are already closed")
         if not self._ple:
             return 0
         args = self._config.qwen4_args
@@ -597,6 +613,9 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
 
     def load_host_tables(self, engine_config) -> int:
         return self.model.load_host_tables(engine_config)
+
+    def close_host_resources(self) -> None:
+        self.model.close_host_resources()
 
     def _record_debug_hook(self, logits: torch.Tensor) -> None:
         if self._debug_hook is not None:

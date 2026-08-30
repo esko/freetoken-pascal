@@ -201,6 +201,9 @@ class PleTable:
         """``[total_rows, ngram_head_dim]`` float8_e4m3fn view of the bank."""
         return self.bank.tensor
 
+    def close(self) -> None:
+        self.bank.close()
+
 
 _PLE_ST_DTYPE = "F8_E4M3"
 
