@@ -2,16 +2,18 @@
 
 - Status: Accepted
 - Date: 2026-08-29
+- Amended: 2026-08-30
 
 ## Context
 
-The three-tier storage decision in ADR 0010 establishes where PLE, routed experts, and hot computation belong. Recent Qwen3.8 field results add five constraints that are not fully captured by storage placement alone:
+The three-tier storage decision in ADR 0010 establishes where PLE, routed experts, and hot computation belong. Recent Qwen3.8 field results add six constraints that are not fully captured by storage placement alone:
 
 1. Sparse PLE reads can trigger severe kernel readahead and read amplification unless the runtime explicitly communicates random-access intent and measures physical I/O.
 2. Hybrid GPU placement can have a sharp cliff: one additional layer, workspace, context allocation, or cache increment can silently trigger fallback or spill and collapse throughput while outputs remain correct.
 3. QSA selection and top-k/gather workspaces can grow or become retained during the first large prefill, so post-load free VRAM does not establish a safe serving envelope. Context-dependent host synchronization and selection cost can also dominate long-context decode.
 4. Whole-model bit width does not predict speed. Q4 is the quality reference, a specific Q3 artifact is a serious whole-model throughput candidate, and Q5/Q8 are primarily component-level candidates for sensitive or continuously active tensors on this 128 GB host.
-5. Exact context-derived n-gram speculation has produced large, output-identical gains on copy-heavy code and structured transformations while remaining neutral on a novel-code control. Native MTP also exists, but its artifacts and runtime contracts are still fragmented and its value on Pascal is unproven.
+5. Qwen3.8-Flash-Next is highly non-uniform in quantization sensitivity. Tiny router, shared-expert gating, recurrent-state and residual/control tensors can affect every token and every layer; a scaling or precision error in a few hundred KiB can catastrophically damage long reasoning while short prompts, retrieval probes and throughput still look healthy. Recurrent GDN control projections can also accumulate small numeric errors across many decode steps.
+6. Exact context-derived n-gram speculation has produced large, output-identical gains on copy-heavy code and structured transformations while remaining neutral on a novel-code control. Native MTP also exists, but its artifacts and runtime contracts are still fragmented and its value on Pascal is unproven.
 
 The North Star remains a reliable, highly performant, full-model Qwen3.8-Flash-Next server on the dual-Xeon, dual-P4 target. No optimization may hide a slower fallback, change model topology, or become a release dependency without evidence from the actual hardware.
 
@@ -28,6 +30,24 @@ FreeToken-Pascal defines independently reproducible profiles rather than one pre
 - `coding-ngram`: an optional exact context-derived speculative profile layered on the winning base profile. It never blocks the core v1 release and automatically falls back to ordinary decode.
 
 Q5, Q8, and other high-precision formats are benchmarked for the tensors or components where they are plausible. The project does not require an impossible full-model Q8 profile to fit in 128 GB merely to satisfy the format matrix.
+
+### Sensitive-tensor precision island
+
+Quantization policy is architecture-aware rather than a whole-model bitrate switch. Routed expert matrices and the PLE table may be compressed aggressively, but control/state tensors never inherit the routed-expert quant tier implicitly.
+
+Every candidate profile carries a machine-readable sensitive-tensor census and explicit precision decision for at least:
+
+- MoE router tensors and router-adjacent scaling;
+- `shared_expert_gate` tensors and their quantization scales;
+- Gated DeltaNet state-driving/control projections, including `in_proj_a` / `in_proj_b`-class tensors where present in the reconciled graph;
+- residual/hyperconnection write gates and other continuously active control tensors;
+- normalization and other small tensors shown by reference comparison to be numerically sensitive.
+
+The correctness baseline preserves these tensors at their authoritative source precision or the nearest lossless runtime representation. A release candidate may reduce an individual class to Q8 or another format only after tensor-level scale/dequant parity and paired model-level quality evidence show that the change is safe. Sub-8-bit control/state tensors are experimental by default and may not be selected merely because the surrounding expert bank is Q2/Q3/Q4.
+
+The loader must preserve and validate quantization scales for sensitive tensors independently from payload bytes. Sanity checks include finite/range checks and reference comparison of representative gate/control outputs so a missing or misapplied scale fails loudly rather than appearing as a valid fast model.
+
+The quality gate is deliberately capable of detecting stateful failures that short retrieval can miss. Mixed-precision promotion therefore requires long-horizon reasoning/coding/tool trajectories and repeated-state tests in addition to first-token logits, perplexity-like metrics, needle retrieval, or short deterministic prompts. A deliberately degraded sensitive-tensor fixture must fail the gate, proving that the gate is sensitive to this failure class.
 
 ### PLE random-I/O contract
 
@@ -72,22 +92,27 @@ Native MTP, external draft models, DFlash, and lossy speculative prefill remain 
 
 ## Consequences
 
-- Issue #13 gains random-access advice, read-amplification telemetry, adaptive vectorized lookup, and an explicit PLE codec boundary.
-- Issue #17 treats a named Q3 whole-model artifact as the throughput candidate while benchmarking Q5/Q8 at component scope where full-model fit is impossible.
+- Issue #13 gains random-access advice, read-amplification telemetry, adaptive vectorized lookup, and an explicit PLE codec boundary. SSD residency remains PLE-specific in the v1 steady-state path; routed-expert SSD execution remains an explicitly labeled experiment rather than a fallback.
+- Issue #17 treats a named Q3 whole-model artifact as the throughput candidate while benchmarking Q5/Q8 at component scope where full-model fit is impossible, and now owns the sensitive-tensor precision census and promotion gates.
 - Issue #17 adds AP-Q4_K_XL and AP-IQ4_XS as gated candidates. A reported static-IQ4_XS converter oracle remains excluded until its immutable source and conversion log are independently verified.
-- Converter regression coverage includes centered hyperconnection `1 + weight`, GDN fused-projection segmentation/head ordering, QSA/indexer projection splitting, PLE row scale interpretation, first/middle/last expert addressing, and tokenizer/chat-template identity.
+- Converter regression coverage includes centered hyperconnection `1 + weight`, GDN fused-projection segmentation/head ordering, QSA/indexer projection splitting, PLE row scale interpretation, first/middle/last expert addressing, tokenizer/chat-template identity, and independent scale handling for sensitive control/state tensors.
+- Issue #14 must include long-horizon semantic and agentic probes plus a degraded-sensitive-tensor positive control; short retrieval success alone cannot establish correctness.
+- Issue #18 must bind host expert-bank/staging placement to measured PCIe/NUMA topology and compare local-node versus cross-socket access before selecting the H3 policy.
+- Issue #26 must stress recurrent state over long trajectories and checkpoint/restore boundaries so cumulative numerical/state corruption is observable.
 - Issue #38 adapts the merged upstream arbitrary-`K` router first and creates a Pascal CUDA fallback only when measured evidence requires it.
 - Issue #21 uses static hot-expert placement as a mandatory comparator and warm-start source before dynamic cache claims.
 - Issue #73 makes placement planning, post-load/post-prefill high-water accounting, canary execution, backoff, and fail-readiness release-critical.
 - Issue #76 makes QSA context scaling, workspace bounds, synchronization and controlled-OOM behavior explicit release work.
 - Issue #76 is P3 critical-path work and precedes dynamic-cache performance claims.
 - Issue #74 adds exact context-derived speculation as optional, output-preserving work that cannot block core v1.
-- Issue #29 reports placement cliffs, QSA context scaling, PLE read amplification, Q4/Q3 whole-model profiles, component-format tests, and all relevant fallbacks.
+- Issue #29 reports placement cliffs, QSA context scaling, PLE read amplification, Q4/Q3 whole-model profiles, sensitive-tensor precision decisions, component-format tests, long-horizon quality gates, and all relevant fallbacks.
 - Field measurements from modern GPUs and unified-memory systems are evidence for what to test, not performance predictions for the P4 server.
 
 ## Alternatives considered
 
 Use the smallest quant as the default: rejected because decoder kernels and dequantization cost can reverse the apparent bit-width ordering.
+
+Apply one quant tier uniformly to every tensor: rejected because tiny continuously active control/state tensors can dominate semantic correctness while contributing negligible storage. Compression budget is spent on routed experts and PLE first; control/state precision is reduced only from evidence.
 
 Fill VRAM until allocation fails: rejected because spill and fallback can occur before a visible OOM and may produce a healthy but unusably slow service.
 
