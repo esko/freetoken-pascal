@@ -8,18 +8,17 @@ for Engine/scheduler/server integration or any H1/H2 hardware evidence.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from freetoken.attention.qsa import TorchDenseQSAReference
 from freetoken.core import Batch, Context, Req, SamplingParams, set_global_ctx
 from freetoken.distributed import set_tp_info, try_get_tp_info
 from freetoken.kvcache.linear_state_pool import LinearStatePool
 from freetoken.models.qwen4_exp.config import parse_config
+from freetoken.models.qwen4_exp.attention import TorchDenseQSAReference
 from freetoken.models.qwen4_exp.model import Qwen4ExpForCausalLM
 
 
