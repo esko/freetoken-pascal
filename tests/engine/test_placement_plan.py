@@ -6,6 +6,7 @@ import pytest
 from freetoken.engine.placement_plan import (
     PLACEMENT_CATEGORIES,
     BackoffProfile,
+    BackoffStateMachine,
     PlacementObservation,
     PlacementPlanInput,
     PlacementPlannerError,
@@ -54,12 +55,18 @@ def _gpu(*, capacity: int = 500, available: int | None = None, **overrides: int)
 def _observation(plan, *, rank: int = 0, **overrides):
     categories = dict(plan.gpus[rank].categories)
     categories.update(overrides.pop("categories", {}))
-    allocated = sum(categories.values()) - categories["safety_reserve"]
+    transient = sum(
+        categories[name]
+        for name in PLACEMENT_CATEGORIES
+        if name.startswith("qsa_transient_")
+    )
+    peak = sum(categories.values()) - categories["safety_reserve"]
+    allocated = peak - transient
     allocated = overrides.pop("allocator_allocated_bytes", allocated)
-    reserved = overrides.pop("allocator_reserved_bytes", allocated)
+    reserved = overrides.pop("allocator_reserved_bytes", peak)
     free = overrides.pop(
         "driver_free_bytes",
-        plan.gpus[rank].capacity_bytes - sum(categories.values()) + categories["safety_reserve"],
+        plan.gpus[rank].capacity_bytes - peak,
     )
     return PlacementObservation(
         rank=rank,
@@ -68,7 +75,7 @@ def _observation(plan, *, rank: int = 0, **overrides):
         driver_free_bytes=free,
         allocator_allocated_bytes=allocated,
         allocator_reserved_bytes=reserved,
-        allocator_high_water_bytes=overrides.pop("allocator_high_water_bytes", allocated),
+        allocator_high_water_bytes=overrides.pop("allocator_high_water_bytes", peak),
         categories=categories,
         **overrides,
     )
@@ -93,6 +100,8 @@ def test_plan_has_exact_release_categories_per_rank_and_structured_telemetry() -
         "qsa_persistent_bytes": plan.gpus[0].qsa_persistent_bytes,
         "qsa_transient_high_water_bytes": plan.gpus[0].qsa_transient_high_water_bytes,
         "qsa_required_bytes": plan.gpus[0].qsa_required_bytes,
+        "live_required_bytes": plan.gpus[0].live_required_bytes,
+        "peak_required_bytes": plan.gpus[0].peak_required_bytes,
         "available_bytes": 500,
         "headroom_bytes": plan.gpus[0].headroom_bytes,
         "deficit_bytes": 0,
@@ -139,6 +148,10 @@ def test_qsa_lifetimes_and_gpu_identity_are_explicit() -> None:
     assert item.as_dict()["qsa_required_bytes"] == (
         item.qsa_persistent_bytes + item.qsa_transient_high_water_bytes
     )
+    assert item.live_required_bytes == (
+        item.non_qsa_required_bytes + item.qsa_persistent_bytes
+    )
+    assert item.peak_required_bytes == item.nonreserve_required_bytes
 
 
 def test_input_categories_and_integer_values_fail_closed() -> None:
@@ -184,6 +197,8 @@ def test_canary_accepts_bounded_category_drift_and_reports_checkpoint() -> None:
     assert result.status == "pass"
     assert result.checkpoint == "post-first-large-prefill"
     assert result.gpus[0].headroom_bytes == observed.driver_free_bytes - plan.safety_reserve_bytes
+    assert result.gpus[0].allocator_allocated_bytes == plan.gpus[0].live_required_bytes
+    assert result.gpus[0].allocator_high_water_bytes == observed.allocator_high_water_bytes
     assert result.as_dict()["checkpoint"] == "post-first-large-prefill"
 
 
@@ -261,6 +276,108 @@ def test_canary_requires_exact_checkpoint_and_rejects_unavailable_high_water() -
     result = evaluate_canary(plan, checkpoint="post-load", observations=(high,))
     assert result.status == "fail"
     assert any("high-water" in item for item in result.reasons)
+
+
+def test_canary_distinguishes_live_allocation_from_qsa_transient_peak() -> None:
+    plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
+    live = plan.gpus[0].live_required_bytes
+    peak = plan.gpus[0].peak_required_bytes
+
+    passing = _observation(plan, allocator_allocated_bytes=live, allocator_high_water_bytes=peak)
+    assert (
+        evaluate_canary(
+            plan,
+            checkpoint="post-first-large-prefill",
+            observations=(passing,),
+        ).status
+        == "pass"
+    )
+
+    under_materialized = _observation(
+        plan,
+        allocator_allocated_bytes=live - 1,
+        allocator_high_water_bytes=peak,
+    )
+    assert evaluate_canary(
+        plan,
+        checkpoint="post-first-large-prefill",
+        observations=(under_materialized,),
+    ).status == "pass"
+
+    conflated = _observation(plan, allocator_allocated_bytes=peak, allocator_high_water_bytes=peak)
+    result = evaluate_canary(
+        plan,
+        checkpoint="post-first-large-prefill",
+        observations=(conflated,),
+        tolerance_bytes=0,
+    )
+    assert result.status == "fail"
+    assert any("live" in reason for reason in result.reasons)
+
+
+def test_synthetic_observation_factory_keeps_resident_and_peak_distinct() -> None:
+    plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
+    observation = PlacementObservation.from_plan(plan.gpus[0])
+
+    assert observation.allocator_allocated_bytes == plan.gpus[0].live_required_bytes
+    assert observation.allocator_reserved_bytes == plan.gpus[0].peak_required_bytes
+    assert observation.allocator_high_water_bytes == plan.gpus[0].peak_required_bytes
+    assert evaluate_canary(
+        plan,
+        checkpoint="post-load",
+        observations=(observation,),
+    ).status == "pass"
+
+
+def test_backoff_starts_pending_and_becomes_safe_only_after_a_pass() -> None:
+    plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
+    profiles = (
+        BackoffProfile("full-cache", cache_slots=4, context_tokens=4096, batch_size=4),
+        BackoffProfile("cache-zero", cache_slots=0, context_tokens=2048, batch_size=1),
+    )
+    machine = plan.backoff(profiles)
+    assert machine.status == "pending"
+    assert not machine.ready
+
+    failed = evaluate_canary(
+        plan,
+        checkpoint="post-load",
+        observations=(_observation(plan, fallback=True),),
+    )
+    decision = machine.observe(failed)
+    assert decision.status == "backoff"
+    assert machine.status == "pending"
+    assert not machine.ready
+
+    passed = evaluate_canary(
+        plan,
+        checkpoint="post-first-large-prefill",
+        observations=(_observation(plan),),
+    )
+    decision = machine.observe(passed)
+    assert decision.status == "safe"
+    assert machine.status == "safe"
+    assert machine.ready
+
+    failed_later = evaluate_canary(
+        plan,
+        checkpoint="post-first-large-prefill",
+        observations=(_observation(plan, fallback=True),),
+    )
+    decision = machine.observe(failed_later)
+    assert decision.status == "fail-readiness"
+    assert machine.status == "fail-readiness"
+    assert not machine.ready
+
+
+def test_backoff_rejects_identical_resource_profiles() -> None:
+    with pytest.raises(PlacementPlannerError, match="strict progress"):
+        BackoffStateMachine(
+            (
+                BackoffProfile("a", cache_slots=2, context_tokens=1024, batch_size=1),
+                BackoffProfile("b", cache_slots=2, context_tokens=1024, batch_size=1),
+            )
+        )
 
 
 def test_backoff_profiles_are_ordered_and_never_oscillate() -> None:

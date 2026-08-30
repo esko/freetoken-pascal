@@ -98,7 +98,8 @@ The Torch-free `freetoken.engine.placement_plan` module is the H0 owner for the 
 It keys each rank by stable GPU UUID plus rank and keeps dense/resident weights, shared experts, GDN/QSA/KV state, every persistent and transient QSA phase category, CUDA context, generic workspaces, transfer buffers, static and dynamic cache slots, and safety reserve explicit.
 Its required high-water is non-QSA demand plus QSA persistent bytes plus QSA transient high-water bytes plus reserve, so lifetime phases are not double-counted.
 The planner and canary evaluator are immutable, versioned, allocation-free accounting only; they do not claim runtime placement or hardware qualification.
-Canary observations keep driver total/free bytes separate from allocator allocated/reserved/high-water bytes and reject unavailable or inconsistent samples before readiness.
+Canary observations compare allocator allocated bytes with the live non-QSA plus persistent-QSA demand and allocator high-water with the live plus transient-QSA peak, while keeping driver total/free and allocator reserved bytes separate.
+They reject unavailable or inconsistent samples before readiness.
 
 The exact ordinary-tensor placement is measured. The architecture requires the routed expert bank to remain complete in DDR4 even when a subset is cached in VRAM.
 The PLE file or shard set has a separate ownership and accounting boundary so model-weight mappings cannot be accidentally paged, prefetched, or pinned with it.

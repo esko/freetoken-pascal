@@ -270,6 +270,8 @@ class GPUPlacementPlan:
             "qsa_persistent_bytes": self.qsa_persistent_bytes,
             "qsa_transient_high_water_bytes": self.qsa_transient_high_water_bytes,
             "qsa_required_bytes": self.qsa_required_bytes,
+            "live_required_bytes": self.live_required_bytes,
+            "peak_required_bytes": self.peak_required_bytes,
             "available_bytes": self.available_bytes,
             "headroom_bytes": self.headroom_bytes,
             "deficit_bytes": self.deficit_bytes,
@@ -285,6 +287,20 @@ class GPUPlacementPlan:
     @property
     def nonreserve_required_bytes(self) -> int:
         return self.required_bytes - self.categories["safety_reserve"]
+
+    @property
+    def live_required_bytes(self) -> int:
+        """Resident high-water floor excluding transient QSA workspaces and reserve."""
+        return _add(
+            self.non_qsa_required_bytes,
+            self.qsa_persistent_bytes,
+            label="live required bytes",
+        )
+
+    @property
+    def peak_required_bytes(self) -> int:
+        """Resident plus transient QSA high-water demand, excluding safety reserve."""
+        return self.nonreserve_required_bytes
 
     @property
     def safety_reserve_bytes(self) -> int:
@@ -505,15 +521,16 @@ class PlacementObservation:
     @classmethod
     def from_plan(cls, plan: GPUPlacementPlan) -> PlacementObservation:
         """Create a deterministic passing observation for synthetic H0 tests."""
-        allocated = plan.nonreserve_required_bytes
+        allocated = plan.live_required_bytes
+        peak = plan.peak_required_bytes
         return cls(
             rank=plan.rank,
             gpu_uuid=plan.gpu_uuid,
             driver_total_bytes=plan.capacity_bytes,
-            driver_free_bytes=plan.headroom_bytes + plan.safety_reserve_bytes,
+            driver_free_bytes=plan.capacity_bytes - peak,
             allocator_allocated_bytes=allocated,
-            allocator_reserved_bytes=allocated,
-            allocator_high_water_bytes=allocated,
+            allocator_reserved_bytes=peak,
+            allocator_high_water_bytes=peak,
             categories=plan.categories,
         )
 
@@ -608,6 +625,8 @@ class GPUCanaryTelemetry:
             "qsa_persistent_bytes": self.qsa_persistent_bytes,
             "qsa_transient_high_water_bytes": self.qsa_transient_high_water_bytes,
             "qsa_required_bytes": self.qsa_required_bytes,
+            "live_required_bytes": self.live_required_bytes,
+            "peak_required_bytes": self.peak_required_bytes,
             "available_bytes": self.available_bytes,
             "headroom_bytes": self.headroom_bytes,
             "deficit_bytes": self.deficit_bytes,
@@ -620,6 +639,22 @@ class GPUCanaryTelemetry:
             "observed_categories": dict(self.observed_categories),
             "reasons": list(self.reasons),
         }
+
+    @property
+    def live_required_bytes(self) -> int:
+        return _add(
+            self.non_qsa_required_bytes,
+            self.qsa_persistent_bytes,
+            label="canary live required bytes",
+        )
+
+    @property
+    def peak_required_bytes(self) -> int:
+        return _add(
+            self.live_required_bytes,
+            self.qsa_transient_high_water_bytes,
+            label="canary peak required bytes",
+        )
 
     to_dict = as_dict
 
@@ -668,9 +703,15 @@ def evaluate_canary(
 ) -> CanaryResult:
     """Compare planned and observed state and fail closed on any unsafe signal.
 
-    The comparison is deterministic and allocation-free.  ``tolerance_bytes`` applies per
-    category; reserve, allocator consistency, and explicit fallback/spill signals are always
-    enforced regardless of category tolerance.
+    The comparison is deterministic and allocation-free.  Allocator ``allocated`` is compared
+    with the live resident demand (non-QSA plus persistent QSA), while allocator high-water is
+    compared with live demand plus the transient QSA peak.  Live allocation has an upper-bound
+    safety rule (it must not exceed live demand plus tolerance), while high-water must agree
+    within tolerance because it is the capacity-cliff measurement.
+    Reserved bytes remain a separate allocator-consistency signal and are not treated as live
+    demand.  ``tolerance_bytes`` applies per category and to those two comparisons; reserve,
+    allocator consistency, and explicit fallback/spill signals are always enforced regardless
+    of category tolerance.
     """
     if not isinstance(plan, PlacementPlan):
         raise PlacementInputError("plan must be a PlacementPlan")
@@ -728,23 +769,19 @@ def evaluate_canary(
             > observed.driver_total_bytes + tolerance
         ):
             reasons.append("allocation-reserved-free-inconsistency")
-        expected_allocated = _add(
-            *(
-                observed.categories[name]
-                for name in PLACEMENT_CATEGORIES
-                if name != "safety_reserve"
-            ),
-            label="observed non-reserve allocation",
-        )
-        if abs(observed.allocator_allocated_bytes - expected_allocated) > tolerance:
+        expected_live = expected.live_required_bytes
+        expected_peak = expected.peak_required_bytes
+        if observed.allocator_allocated_bytes > expected_live + tolerance:
             reasons.append(
-                "allocator-category-mismatch "
-                f"planned={expected_allocated} observed={observed.allocator_allocated_bytes}"
+                "allocator-live-exceeds-planned "
+                f"planned={expected_live} observed={observed.allocator_allocated_bytes} "
+                f"tolerance={tolerance}"
             )
-        if observed.allocator_high_water_bytes - expected_allocated > tolerance:
+        if abs(observed.allocator_high_water_bytes - expected_peak) > tolerance:
+            relation = "exceeds" if observed.allocator_high_water_bytes > expected_peak else "below"
             reasons.append(
-                "retained-workspace-growth-high-water="
-                f"{observed.allocator_high_water_bytes - expected_allocated} "
+                f"allocator-high-water-{relation}-planned "
+                f"planned={expected_peak} observed={observed.allocator_high_water_bytes} "
                 f"tolerance={tolerance}"
             )
         if observed.driver_free_bytes < plan.safety_reserve_bytes:
@@ -861,9 +898,9 @@ class BackoffDecision:
 
 
 class BackoffStateMachine:
-    """Bounded ordered backoff with no oscillation or implicit runtime side effects."""
+    """Bounded ordered backoff with pending, safe, and fail-readiness states."""
 
-    __slots__ = ("_failed_readiness", "_index", "_profiles")
+    __slots__ = ("_index", "_profiles", "_status")
 
     def __init__(self, profiles: Sequence[BackoffProfile]) -> None:
         values = tuple(profiles)
@@ -884,9 +921,18 @@ class BackoffStateMachine:
                 raise PlacementInputError(
                     "backoff profiles must be ordered monotonically toward less GPU demand"
                 )
+            if (
+                current.cache_slots == previous.cache_slots
+                and current.context_tokens == previous.context_tokens
+                and current.batch_size == previous.batch_size
+                and current.gpu_placement == previous.gpu_placement
+            ):
+                raise PlacementInputError(
+                    "backoff profiles require strict progress between candidates"
+                )
         self._profiles = values
         self._index = 0
-        self._failed_readiness = False
+        self._status = "pending"
 
     @property
     def profiles(self) -> tuple[BackoffProfile, ...]:
@@ -902,17 +948,27 @@ class BackoffStateMachine:
 
     @property
     def ready(self) -> bool:
-        return not self._failed_readiness
+        return self._status == "safe"
+
+    @property
+    def status(self) -> str:
+        return self._status
 
     def observe(self, result: CanaryResult | bool) -> BackoffDecision:
-        """Keep a passing profile or advance exactly one profile after a failed canary."""
+        """Advance once on failure and mark a profile safe only after a canary pass.
+
+        Safe is checkpoint-local rather than terminal: a later failed checkpoint returns to
+        pending and advances, which is required when post-load passes but large-prefill fails.
+        """
         passed = result if isinstance(result, bool) else result.status == "pass"
-        if passed and not self._failed_readiness:
+        if passed and self._status != "fail-readiness":
+            self._status = "safe"
             return BackoffDecision("safe", self.profile, self._index, "canary-pass")
         if not passed and self._index + 1 < len(self._profiles):
             self._index += 1
+            self._status = "pending"
             return BackoffDecision("backoff", self.profile, self._index, "canary-fail")
-        self._failed_readiness = True
+        self._status = "fail-readiness"
         return BackoffDecision("fail-readiness", self.profile, self._index, "no-safe-profile")
 
 
