@@ -1003,9 +1003,15 @@ def test_moe_route_observer_snapshots_semantic_ids_and_weights(monkeypatch) -> N
     layer.renormalize = False
     ids = torch.tensor([[4, 1]], dtype=torch.int32)
     weights = torch.tensor([[0.7, 0.2]], dtype=torch.float32)
+    route_calls = []
+
+    def fake_topk(**kwargs):
+        route_calls.append(kwargs)
+        return weights, ids
+
     monkeypatch.setattr(
         "freetoken.layers.moe.fused_topk",
-        lambda **kwargs: (weights, ids),
+        fake_topk,
     )
 
     events = []
@@ -1018,6 +1024,7 @@ def test_moe_route_observer_snapshots_semantic_ids_and_weights(monkeypatch) -> N
     assert observed_ids.tolist() == [[-1, -1]]
     assert events[0]["ids"].tolist() == [[4, 1]]
     torch.testing.assert_close(events[0]["weights"], torch.tensor([[0.7, 0.2]]))
+    assert route_calls[0]["router_mode"] == "auto"
 
 
 def test_moe_route_observer_excludes_padded_rows(monkeypatch) -> None:
@@ -1026,6 +1033,12 @@ def test_moe_route_observer_excludes_padded_rows(monkeypatch) -> None:
     layer.renormalize = False
     ids = torch.tensor([[4, 1], [3, 2], [9, 8]], dtype=torch.int32)
     weights = torch.tensor([[0.7, 0.2], [0.6, 0.3], [0.9, 0.1]])
+    route_calls = []
+
+    def fake_topk(**kwargs):
+        route_calls.append(kwargs)
+        return weights, ids
+
     active = SimpleNamespace(uid=101, extend_len=2, cached_len=4, device_len=6)
     padded = SimpleNamespace(uid=-1, extend_len=1, cached_len=0, device_len=1)
     batch = SimpleNamespace(
@@ -1036,7 +1049,7 @@ def test_moe_route_observer_excludes_padded_rows(monkeypatch) -> None:
     monkeypatch.setattr("freetoken.layers.moe.get_global_ctx", lambda: SimpleNamespace(batch=batch))
     monkeypatch.setattr(
         "freetoken.layers.moe.fused_topk",
-        lambda **kwargs: (weights, ids),
+        fake_topk,
     )
 
     events = []
@@ -1050,6 +1063,7 @@ def test_moe_route_observer_excludes_padded_rows(monkeypatch) -> None:
     assert events[0]["valid_token_count"] == 2
     assert events[0]["padded_token_count"] == 3
     assert events[0]["request_uids"].tolist() == [101]
+    assert route_calls[0]["router_mode"] == "auto"
 
 
 def test_fused_backend_observer_reports_the_executed_route(monkeypatch) -> None:
