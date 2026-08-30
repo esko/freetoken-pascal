@@ -8,6 +8,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+from freetoken.attention.qsa_workspace import qsa_attention_split_plan
 
 
 @triton.jit
@@ -261,26 +262,16 @@ def qsa_sparse_paged_attention(
 
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
-    base_programs = q.shape[0] * k_cache.shape[2]
-    small_profile_limit = 8 if block_m <= 8 else 4
 
     # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
-    # Narrow tiles favor decode; wide tiles improve throughput for prefill.
-    if base_programs <= small_profile_limit:
-        block_n, target_splits, partial_warps = 16, 64, 4
-    elif base_programs < 32:
-        block_n, target_splits, partial_warps = 16, 32, 4
-    elif base_programs <= 256:
-        block_n, target_splits, partial_warps = 64, 8, 2
-    elif base_programs <= 512:
-        block_n, target_splits, partial_warps = 64, 4, 2
-    else:
-        block_n, target_splits, partial_warps = 64, 1, 2
+    # Narrow tiles favor decode; wide tiles improve throughput for prefill.  The shape policy is
+    # shared with the pure H0 planner so its partial-buffer accounting cannot silently drift.
+    block_n, _target_splits, num_splits = qsa_attention_split_plan(
+        q.shape[0], k_cache.shape[2], q.shape[1], logical_indices.shape[1]
+    )
+    partial_warps = 4 if block_n == 16 else 2
 
     num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
-    # Avoid empty splits when the selection width is smaller than the profile.
-    max_useful_splits = 1 << (num_tiles.bit_length() - 1)
-    num_splits = min(max_useful_splits, target_splits)
 
     # Split=1 writes output directly and compiles out all workspace accesses.
     if num_splits == 1:

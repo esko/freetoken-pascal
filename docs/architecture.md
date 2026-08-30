@@ -60,6 +60,40 @@ PLE mappings remain pageable by default so the OS can consume spare RAM dynamica
 
 Pascal DP4A integer kernels and format-specific tuning are prioritized over FP16, BF16, and FP8 paths until actual P4 measurements justify otherwise.
 
+### QSA workspace contract
+
+`freetoken.attention.qsa_workspace` is the Torch-free H0 accounting boundary for the merged QSA implementation from FreeToken commit `bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40` and its current tip `58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6`.
+`QSAWorkspaceInputs` accepts the concrete context, ragged token-row, request `batch_size`, raw
+page-table token-slot width, page, ring, head, dtype, and layer dimensions.
+The planner derives the page count and compressed score columns from the raw page-table width and
+uses the runtime's 128 MiB FP32 score-tile cap; it never treats token slots as already-compressed
+columns.
+Capture plans separately accept `capture_max_batch_size` because every graph buffer is allocated
+for that maximum, while eager metadata uses the active request batch.
+`calculate_qsa_workspace()` inventories the score, top-k, expand-gather, attention, and state categories from those dimensions and returns component shapes, byte totals, and a checked aggregate without importing CUDA or allocating memory.
+The score category includes the index query, FP32 logits, and visible-block vectors.
+The top-k category includes block IDs and the candidate scratch required by the upstream split path.
+The expand-gather category includes the selected logical-index rows, including the incomplete causal-group tail.
+The attention category includes the output and, when split attention is selected, FP32 partial output and log-sum-exp buffers.
+The state category includes the persistent compressed slab, pending ring, and index RoPE table plus
+the per-forward pooled rows, first-position rows, and `QSASparseMetadata.cmp_rows`/
+`ring_rows` scatter plans. The latter are `[token_rows]` int32 buffers and remain live from index
+compression through selected-row attention, including graph capture.
+Eager high-water accounting overlaps actual batch metadata with each live phase: pooled/index rows,
+selection (`q_index`, retained indices, and one score/top-k chunk), and selected-row attention.
+The selected-row phases also retain both per-forward scatter plans.
+Capture high-water accounting includes every `_graph` buffer simultaneously and the active capture
+attention allocations, including the active capture batch's scatter plans.
+The eager Torch top-k fallback is accounted separately for its Python-visible column arange,
+visibility mask, values, chosen indices, validity mask, int32 cast, and `where` output. PyTorch
+allocator fragmentation and opaque kernel-internal top-k workspace cannot be observed by this
+Torch-free planner, so the resulting Torch estimate is conservative but not an exact guarantee.
+CUDA graph capture requires the Triton top-k backend; a Torch top-k request is rejected as an
+eager-only plan rather than being reported as capture-safe.
+`QSAWorkspacePlan.validate_capacity()` is a pure preflight accounting primitive for a future placement/launch owner and reports structured `ready` or `insufficient-capacity` telemetry.
+Negative, zero-invalid, incomplete-category, shape-inconsistent, and checked 64-bit arithmetic inputs fail closed with a controlled `ValueError` subtype.
+This H0 contract makes no kernel, throughput, or Tesla P4 claim and does not change QSA selection, token budget, or dispatch defaults.
+
 The exact ordinary-tensor placement is measured. The architecture requires the routed expert bank to remain complete in DDR4 even when a subset is cached in VRAM.
 The PLE file or shard set has a separate ownership and accounting boundary so model-weight mappings cannot be accidentally paged, prefetched, or pinned with it.
 
