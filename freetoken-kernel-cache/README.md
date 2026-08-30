@@ -17,7 +17,7 @@ By default, artifacts are written to `dist/`:
 
 ```text
 dist/freetoken-<version>-cp312-cp312-linux_x86_64.whl
-dist/freetoken_kernel_cache-<version>+cu130-py3-none-linux_x86_64.whl
+dist/freetoken_kernel_cache-<version>+cu126-py3-none-linux_x86_64.whl
 ```
 
 Useful knobs:
@@ -56,12 +56,12 @@ At runtime, `freetoken.kernel.utils.load_jit()` and `load_aot()` look for
 
 ```bash
 FREETOKEN_WHEEL=dist/freetoken-0.1.1-cp312-cp312-linux_x86_64.whl \
-FREETOKEN_KERNEL_CACHE_WHEEL=dist/freetoken_kernel_cache-0.1.1+cu130-py3-none-linux_x86_64.whl \
+FREETOKEN_KERNEL_CACHE_WHEEL=dist/freetoken_kernel_cache-0.1.1+cu126-py3-none-linux_x86_64.whl \
 bash install.sh
 ```
 
-If the cache wheel is next to the runtime wheel, `install.sh` can auto-detect the
-sibling `freetoken_kernel_cache-*.whl` when only `FREETOKEN_WHEEL` is set.
+The default Pascal profile requires both local paths explicitly and verifies their embedded
+CUDA 12.6/`sm_61` profiles before it creates or modifies the managed environment.
 
 For release validation, disable runtime JIT:
 

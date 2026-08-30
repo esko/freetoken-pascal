@@ -37,6 +37,8 @@ NO_STAMP="${FREETOKEN_BUILD_NO_STAMP:-0}"
 RELEASE="${FREETOKEN_BUILD_RELEASE:-0}"
 DEV_STAMP="${FREETOKEN_BUILD_DEV_STAMP:-}"
 SKIP_KERNEL_CACHE="${FREETOKEN_BUILD_SKIP_KERNEL_CACHE:-0}"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-6.1}"
+export FREETOKEN_KERNEL_CACHE_ARCHES="${FREETOKEN_KERNEL_CACHE_ARCHES:-6.1}"
 
 TRUE_VALUES=" 1 true yes on "
 
@@ -58,9 +60,10 @@ warn_arch_override() {
   local var
   for var in TVM_FFI_CUDA_ARCH_LIST FREETOKEN_KERNEL_CACHE_ARCHES; do
     if [[ -n "${!var:-}" ]]; then
+      [[ "${!var}" == "6.1" ]] && continue
       warn "############################################################"
       warn "$var='${!var}' is set in this shell and OVERRIDES the"
-      warn "default multi-arch list (8.0 8.6 8.9 9.0 10.0 12.0, see"
+      warn "default Pascal architecture (6.1, see"
       warn "freetoken-kernel-cache/build_backend.py). The kernel-cache"
       warn "wheel will only carry SASS for the listed archs — do NOT"
       warn "release it unless the narrowing is intentional."
@@ -116,6 +119,8 @@ cleanup_generated() {
     "$ROOT/freetoken-kernel-cache/__pycache__" \
     "$ROOT/freetoken-kernel-cache/freetoken_kernel_cache/__pycache__" \
     "$ROOT/freetoken-kernel-cache/freetoken_kernel_cache/_build_meta.py" \
+    "$ROOT/freetoken-kernel-cache/freetoken_kernel_cache/_pascal_build_meta.json" \
+    "$ROOT/python/freetoken/_pascal_build_meta.json" \
     "$ROOT/freetoken-kernel-cache/freetoken_kernel_cache/jit_cache"
 }
 # --- Release provenance stamp ------------------------------------------------
@@ -125,7 +130,7 @@ cleanup_generated() {
 # an unchanged name keeps serving stale installs from warm caches forever. Stamp
 # version.py with +g<sha> for the duration of the build; both wheels pick it up
 # (the runtime via pyproject's dynamic attr, the kernel cache via
-# build_backend.py, which merges its +cuNNN in front: 0.1.1+cu130.g<sha>).
+# build_backend.py, which merges its +cuNNN in front: 0.1.1+cu126.g<sha>).
 VERSION_FILE="$ROOT/python/freetoken/version.py"
 STAMPED=0
 restore_version() {
@@ -141,7 +146,7 @@ stamp_version() {
   # Release mode: the runtime wheel must carry a bare PEP 440 version (PyPI rejects
   # any +local segment), so no stamp -- provenance comes from the tag instead, which
   # is verified to point at exactly this commit and this version.py. The kernel-cache
-  # wheel then comes out as <version>+cu130 (no .g<sha>): build_backend.py appends
+  # wheel then comes out as <version>+cu126 (no .g<sha>): build_backend.py appends
   # .g<sha> only when version.py already carries one.
   if enabled "$RELEASE"; then
     enabled "$NO_STAMP" \

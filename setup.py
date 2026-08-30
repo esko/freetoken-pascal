@@ -1,13 +1,37 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import runpy
 from pathlib import Path
 
+import torch
 from setuptools import Extension, setup
-from torch.utils.cpp_extension import BuildExtension, CUDA_HOME, CppExtension
-
+from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CppExtension
 
 ROOT = Path(__file__).parent
+BUILD_METADATA = ROOT / "python" / "freetoken" / "_pascal_build_meta.json"
+os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "6.1")
+
+
+def _write_build_metadata() -> None:
+    from scripts.pascal_wheel_metadata import (
+        canonical_architectures,
+        canonical_cuda_version,
+        write_wheel_metadata,
+    )
+
+    runtime_version = runpy.run_path(ROOT / "python" / "freetoken" / "version.py")["__version__"]
+    cuda = canonical_cuda_version(getattr(torch.version, "cuda", None))
+    architectures = canonical_architectures(os.getenv("TORCH_CUDA_ARCH_LIST"))
+    write_wheel_metadata(
+        BUILD_METADATA,
+        role="runtime",
+        version=runtime_version,
+        cuda=cuda,
+        architectures=architectures,
+        runtime_version=runtime_version,
+    )
 
 
 def _check_toolchain() -> None:
@@ -33,6 +57,7 @@ def _cuda_runtime_paths() -> tuple[list[str], list[str]]:
 
 cuda_include_dirs, cuda_library_dirs = _cuda_runtime_paths()
 _check_toolchain()
+_write_build_metadata()
 
 
 setup(

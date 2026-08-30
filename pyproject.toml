@@ -114,7 +114,7 @@ version = {attr = "freetoken.version.__version__"}
 where = ["python"]
 
 [tool.setuptools.package-data]
-"*" = ["csrc/**/*", "moe/configs/**/*.json"]
+"*" = ["csrc/**/*", "moe/configs/**/*.json", "_pascal_build_meta.json"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

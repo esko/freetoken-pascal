@@ -4,11 +4,13 @@
 #
 # Installs the `freetoken` runtime (the `ft` CLI) and its prebuilt kernel-cache
 # wheel into a managed venv, then wires it up so FreeToken Desktop can find it.
-# Dependencies come from PyPI via uv, except torch and sglang-kernel whose cu130
-# wheels live on dedicated indexes (see CU_INDEX_ARGS below).
+# The downstream default is the fail-closed Pascal profile. The upstream CUDA 13
+# flow remains available only as the explicitly named `upstream-cu130` profile.
 #
-# Typical use (once a release exists):
-#   curl -fsSL https://<host>/install.sh | bash
+# Pascal use (from a release bundle that includes this script and its verifier):
+#   FREETOKEN_WHEEL=./freetoken_pascal-...whl \
+#   FREETOKEN_KERNEL_CACHE_WHEEL=./freetoken_kernel_cache-...+cu126-...whl \
+#   bash install.sh
 #
 # Configurable via environment:
 #   FREETOKEN_WHEEL               runtime wheel — local path OR URL. Defaults to the
@@ -24,14 +26,24 @@
 #   FREETOKEN_PY_VERSION          python for the venv (default: 3.12 — must match the wheel tag)
 #   FREETOKEN_BIN_DIR             where to symlink `ft` (default: ~/.local/bin)
 #   FREETOKEN_ENV_DIR             environment.d dir (default: ~/.config/environment.d)
+#   FREETOKEN_INSTALL_PROFILE     `pascal` (default) or `upstream-cu130`.
 #
 # NOTE: common TVM FFI kernels come from the kernel-cache wheel. A working CUDA
 # toolkit (nvcc) is still needed when falling back to JIT for an uncovered kernel
 # variant, a mismatched cache wheel, or development builds.
 set -euo pipefail
 
-DEFAULT_WHEEL_URL=""   # filled in once GitHub Releases are live
-DEFAULT_KERNEL_CACHE_WHEEL_URL=""   # filled in once GitHub Releases are live
+DEFAULT_WHEEL_URL=""   # used only by the explicit upstream-cu130 profile
+DEFAULT_KERNEL_CACHE_WHEEL_URL=""   # used only by the explicit upstream-cu130 profile
+
+INSTALL_PROFILE="${FREETOKEN_INSTALL_PROFILE:-pascal}"
+case "$INSTALL_PROFILE" in
+  pascal|upstream-cu130) ;;
+  *)
+    printf '[error] unknown install profile %s; choose pascal or upstream-cu130.\n' "$INSTALL_PROFILE" >&2
+    exit 1
+    ;;
+esac
 
 FT_HOME="${FREETOKEN_HOME:-$HOME/.freetoken}"
 VENV="$FT_HOME/venv"
@@ -63,6 +75,36 @@ say()  { printf '%s==>%s %s\n' "$C_CYAN" "$C_RESET" "$*"; }
 warn() { printf '%s[warn]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 die()  { printf '%s[error]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
+# This is intentionally before command -v uv, venv creation, mkdir, network access, or any
+# other installer side effect. A Pascal install may consume only an explicit local wheel pair
+# whose embedded build profiles prove the downstream CUDA and architecture contract.
+verify_pascal_bundle_before_side_effects() {
+  [ "$INSTALL_PROFILE" = pascal ] || return 0
+  [ -n "${FREETOKEN_WHEEL:-}" ] || die "Pascal install requires FREETOKEN_WHEEL as a local runtime wheel."
+  [ -n "${FREETOKEN_KERNEL_CACHE_WHEEL:-}" ] \
+    || die "Pascal install requires FREETOKEN_KERNEL_CACHE_WHEEL as a local cache wheel."
+  case "$FREETOKEN_WHEEL" in
+    http://*|https://*) die "Pascal install rejects runtime wheel URLs; supply a local Pascal bundle." ;;
+  esac
+  case "$FREETOKEN_KERNEL_CACHE_WHEEL" in
+    http://*|https://*) die "Pascal install rejects kernel-cache wheel URLs; supply a local Pascal bundle." ;;
+  esac
+
+  local script_dir verifier
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+  verifier="$script_dir/scripts/verify_pascal_wheel_bundle.py"
+  [ -f "$verifier" ] \
+    || die "Pascal wheel verifier is missing next to install.sh; refusing to install an unaudited bundle."
+  command -v python3 >/dev/null 2>&1 \
+    || die "Pascal install requires python3 to audit the local wheel bundle before bootstrap."
+  python3 "$verifier" \
+    --runtime "$FREETOKEN_WHEEL" \
+    --kernel-cache "$FREETOKEN_KERNEL_CACHE_WHEEL" \
+    || exit 1
+}
+
+verify_pascal_bundle_before_side_effects
+
 infer_kernel_cache_wheel() {
   [ -z "$KERNEL_CACHE_WHEEL" ] || return 0
   case "$WHEEL" in
@@ -90,6 +132,7 @@ infer_kernel_cache_wheel() {
 }
 
 build_from_repo_if_needed() {
+  [ "$INSTALL_PROFILE" = upstream-cu130 ] || return 0
   [ -n "$WHEEL" ] && return 0
   local script_dir builder out_dir rt kc
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
@@ -104,12 +147,12 @@ build_from_repo_if_needed() {
   # staleness to defend against. FREETOKEN_BUILD_NO_STAMP=0 forces a stamp anyway.
   FREETOKEN_BUILD_OUT_DIR="$out_dir" FREETOKEN_BUILD_NO_STAMP="${FREETOKEN_BUILD_NO_STAMP:-1}" bash "$builder"
 
-  rt="$(ls -t "$out_dir"/freetoken-*.whl 2>/dev/null | head -1)" || true
+  rt="$(find "$out_dir" -maxdepth 1 -type f -name 'freetoken-*.whl' ! -name 'freetoken-kernel-cache-*.whl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)" || true
   [ -n "$rt" ] || die "build finished but no freetoken-*.whl found in $out_dir"
   WHEEL="$rt"
   say "built runtime wheel: $WHEEL"
   if [ -z "$KERNEL_CACHE_WHEEL" ]; then
-    kc="$(ls -t "$out_dir"/freetoken_kernel_cache-*.whl 2>/dev/null | head -1)" || true
+    kc="$(find "$out_dir" -maxdepth 1 -type f -name 'freetoken_kernel_cache-*.whl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)" || true
     if [ -n "$kc" ]; then
       KERNEL_CACHE_WHEEL="$kc"
       say "built kernel-cache wheel: $KERNEL_CACHE_WHEEL"
@@ -119,12 +162,13 @@ build_from_repo_if_needed() {
 
 # The FreeToken Desktop engine bundle ships the wheels in ./dist next to this script.
 find_bundled_wheel() {
+  [ "$INSTALL_PROFILE" = upstream-cu130 ] || return 0
   [ -z "$WHEEL" ] || return 0
   local script_dir dist rt
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
   dist="$script_dir/dist"
   [ -d "$dist" ] || return 0
-  rt="$(ls -t "$dist"/freetoken-*.whl 2>/dev/null | grep -Ev 'freetoken[_-]kernel[_-]cache-' | head -1)" || true
+  rt="$(find "$dist" -maxdepth 1 -type f -name 'freetoken-*.whl' ! -name 'freetoken-kernel-cache-*.whl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)" || true
   [ -n "$rt" ] && { WHEEL="$rt"; say "found bundled runtime wheel: $WHEEL"; }
 }
 
@@ -201,30 +245,38 @@ mkdir -p "$FT_HOME"
 # re-install can't inherit a stale/mismatched torch (e.g. an old cu128 venv after a cu130 bump).
 "$UV" venv "$VENV" --python "$PY_VERSION" --clear
 
-# PyPI's torch 2.11.0 and sglang-kernel 0.4.5 are the same cu130 builds these indexes
-# serve; the explicit indexes pin provenance to the cu130 channels. `unsafe-best-match`
-# is needed because the pytorch index also mirrors stale copies of common deps (e.g.
-# packaging<=24.1) that would shadow PyPI under uv's first-index strategy; all indexes
-# here are trusted. [tool.uv.sources] does not survive into a built wheel, so the
-# indexes it names must be repeated below.
-# flashinfer JIT-compiles its kernels on first use (e.g. sampling softmax), which needs nvcc --
-# breaking driver-only on a box with no CUDA toolkit. flashinfer-cubin + flashinfer-jit-cache ship
-# those kernels PREBUILT (multi-arch), so nothing compiles at runtime. They live on flashinfer's
-# own index (cubin arch-agnostic; jit-cache per-cuNNN). Large (~2 GiB) but downloaded once.
-INSTALL_WHEELS=(
-  "${WHEEL}[accel]"
-  flashinfer-cubin
-  flashinfer-jit-cache
-  "$KERNEL_CACHE_WHEEL"
-)
-CU_INDEX_ARGS=(
-  --index-strategy unsafe-best-match
-  --extra-index-url https://download.pytorch.org/whl/cu130
-  --extra-index-url https://docs.sglang.io/whl/cu130
-  --extra-index-url https://flashinfer.ai/whl
-  --extra-index-url https://flashinfer.ai/whl/cu130
-)
-say "installing $WHEEL + accel (flashinfer prebuilt + sglang-kernel) + $KERNEL_CACHE_WHEEL ..."
+# The Pascal profile installs only the core wheels and resolves torch from the pinned CUDA 12.6
+# index. It deliberately does not request the modern acceleration extra, FlashInfer, SGLang, or
+# any CUDA 13 index. The explicit upstream-cu130 profile below preserves that old flow for users
+# who intentionally opt into it.
+if [ "$INSTALL_PROFILE" = pascal ]; then
+  INSTALL_WHEELS=("$WHEEL" "$KERNEL_CACHE_WHEEL")
+  CU_INDEX_ARGS=(
+    --index-strategy unsafe-best-match
+    --index-url https://download.pytorch.org/whl/cu126
+    --extra-index-url https://pypi.org/simple
+  )
+  say "installing Pascal core $WHEEL + $KERNEL_CACHE_WHEEL (CUDA 12.6, sm_61) ..."
+else
+  # PyPI's torch 2.11.0 and sglang-kernel 0.4.5 are the same cu130 builds these indexes serve;
+  # the explicit indexes pin provenance to the cu130 channels. `unsafe-best-match` is needed
+  # because the pytorch index also mirrors stale copies of common deps under uv's first-index
+  # strategy. FlashInfer's prebuilt packages avoid JIT compilation on driver-only machines.
+  INSTALL_WHEELS=(
+    "${WHEEL}[accel]"
+    flashinfer-cubin
+    flashinfer-jit-cache
+    "$KERNEL_CACHE_WHEEL"
+  )
+  CU_INDEX_ARGS=(
+    --index-strategy unsafe-best-match
+    --extra-index-url https://download.pytorch.org/whl/cu130
+    --extra-index-url https://docs.sglang.io/whl/cu130
+    --extra-index-url https://flashinfer.ai/whl
+    --extra-index-url https://flashinfer.ai/whl/cu130
+  )
+  say "installing upstream-cu130 $WHEEL + accel (flashinfer prebuilt + sglang-kernel) + $KERNEL_CACHE_WHEEL ..."
+fi
 # --refresh-package: the engine wheels have been republished under unchanged URLs (the
 # rolling `beta` release), and uv's URL-keyed cache does not revalidate by default -- a
 # box that cached a wheel before a republish silently reinstalls the stale copy forever
