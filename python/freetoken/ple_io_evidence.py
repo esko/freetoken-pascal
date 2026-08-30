@@ -10,12 +10,20 @@ of :mod:`freetoken.gguf_host` so a normal lookup cannot accidentally turn proces
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+import os
+import platform as platform_module
+import stat as stat_module
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from math import isfinite
+from pathlib import Path
 from typing import Any
 
 PLE_IO_PHASES = frozenset({"cold", "warm", "steady"})
+# Linux documents /sys/block/<dev>/stat sector counters in 512-byte units,
+# independently of the device's logical block size.
+LINUX_SYSFS_STAT_SECTOR_BYTES = 512
 PLE_IO_PHYSICAL_SOURCE_KINDS = frozenset(
     {
         "blktrace",
@@ -50,6 +58,554 @@ _COUNTER_FIELDS = frozenset(
 
 class PLEIOEvidenceError(ValueError):
     """Raised when a phase cannot produce trustworthy PLE I/O evidence."""
+
+
+class PLEBlockProbeError(PLEIOEvidenceError):
+    """Raised when a dedicated PLE payload cannot map to one block device."""
+
+
+@dataclass(frozen=True, slots=True)
+class PLEBlockDevice:
+    """One unambiguous terminal block device selected for PLE evidence."""
+
+    name: str
+    major: int
+    minor: int
+    sysfs_path: str
+    stat_path: str
+
+
+def _read_sysfs_text(path: str | os.PathLike[str]) -> str:
+    try:
+        return Path(path).read_text(encoding="ascii")
+    except (OSError, UnicodeError) as error:
+        raise PLEBlockProbeError(f"cannot read Linux sysfs path {path}: {error}") from error
+
+
+@contextmanager
+def _open_readonly(
+    path: str | os.PathLike[str], *, dir_fd: int | None = None, directory: bool = False
+) -> Iterator[int]:
+    """Open one path without following symlinks and close it on every path."""
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    fd: int | None = None
+    try:
+        if dir_fd is None:
+            fd = os.open(path, flags)
+        else:
+            fd = os.open(path, flags, dir_fd=dir_fd)
+    except (OSError, TypeError, ValueError) as error:
+        raise PLEBlockProbeError(f"cannot open Linux sysfs path {path}: {error}") from error
+    try:
+        yield fd
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _read_fd_text(fd: int, *, path: str | os.PathLike[str]) -> str:
+    try:
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode("ascii")
+    except (OSError, UnicodeError) as error:
+        raise PLEBlockProbeError(f"cannot read Linux sysfs path {path}: {error}") from error
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return value.st_dev, value.st_ino, value.st_mode
+
+
+def _parse_device_number(value: object, *, label: str) -> tuple[int, int]:
+    if not isinstance(value, str):
+        raise PLEBlockProbeError(f"{label} must contain one major:minor device number")
+    fields = value.strip().split(":")
+    if len(fields) != 2:
+        raise PLEBlockProbeError(f"{label} must contain one major:minor device number")
+    try:
+        major, minor = (int(field, 10) for field in fields)
+    except ValueError as error:
+        raise PLEBlockProbeError(f"{label} has malformed major:minor device number") from error
+    if major < 0 or minor < 0:
+        raise PLEBlockProbeError(f"{label} has a negative major:minor device number")
+    return major, minor
+
+
+class LinuxPLEBlockCounterProbe:
+    """Sample physical PLE bytes from one Linux sysfs block-device counter.
+
+    The payload path is deliberately explicit: its ``st_dev`` is mapped through
+    ``sysfs_root/dev/block/<major>:<minor>`` and then reduced through a single
+    ``slaves`` entry when the mapping is not already a partition.  A partition is
+    a terminal device: its own stat is the correct filesystem-partition counter,
+    and it must not be replaced with its whole-disk parent.  A multiple-slave
+    graph is rejected because combining devices would make read amplification
+    unreviewable.  The probe does not inspect process I/O and does not mutate page
+    caches.
+
+    ``counter_source`` can provide the non-physical fields required by
+    :class:`PLEIOCounters` (for example, a separately collected process snapshot).
+    When omitted, those fields are zero solely to make the physical probe usable as
+    a standalone injected source; zero is not a process-I/O measurement.
+    """
+
+    def __init__(
+        self,
+        payload_path: str | os.PathLike[str],
+        *,
+        sysfs_root: str | os.PathLike[str] = "/sys",
+        counter_source: Callable[[], PLEIOCounters | Mapping[str, Any]] | None = None,
+        stat_fn: Callable[[str | os.PathLike[str]], object] | None = None,
+        read_text_fn: Callable[[str | os.PathLike[str]], str] | None = None,
+        system: str | None = None,
+    ) -> None:
+        selected_system = platform_module.system() if system is None else system
+        if selected_system.lower() != "linux":
+            raise PLEBlockProbeError(
+                f"Linux sysfs block probing is unsupported on {selected_system!r}"
+            )
+        if counter_source is not None and not callable(counter_source):
+            raise TypeError("counter_source must be callable")
+        if stat_fn is not None and not callable(stat_fn):
+            raise TypeError("stat_fn must be callable")
+        if read_text_fn is not None and not callable(read_text_fn):
+            raise TypeError("read_text_fn must be callable")
+        self.payload_path = Path(payload_path)
+        self.sysfs_root = Path(sysfs_root)
+        self.counter_source = counter_source
+        # ``stat_fn`` is an explicit metadata seam for deterministic tests.  The
+        # production path below deliberately does not stat the payload pathname.
+        self._stat_fn = stat_fn
+        self._read_text_injected = read_text_fn is not None
+        self._read_text_fn = _read_sysfs_text if read_text_fn is None else read_text_fn
+
+    @staticmethod
+    def _payload_device_number_from_stat(payload_stat: object, *, path: Path) -> tuple[int, int]:
+        mode = getattr(payload_stat, "st_mode", None)
+        if mode is not None and not stat_module.S_ISREG(mode):
+            raise PLEBlockProbeError(f"dedicated PLE payload is not a regular file: {path}")
+        device = getattr(payload_stat, "st_dev", None)
+        if isinstance(device, bool) or not isinstance(device, int) or device < 0:
+            raise PLEBlockProbeError("dedicated PLE payload has no valid st_dev")
+        try:
+            major, minor = os.major(device), os.minor(device)
+        except (OverflowError, ValueError) as error:
+            raise PLEBlockProbeError("dedicated PLE payload st_dev is malformed") from error
+        if major == 0:
+            raise PLEBlockProbeError(
+                "dedicated PLE payload is on a non-block filesystem (major 0; overlay/tmpfs?)"
+            )
+        return major, minor
+
+    @contextmanager
+    def _payload_device_scope(self) -> Iterator[tuple[int, int]]:
+        """Pin payload identity for the complete operation using a production FD."""
+        if self._stat_fn is not None:
+            try:
+                payload_stat = self._stat_fn(self.payload_path)
+            except (OSError, ValueError, TypeError) as error:
+                raise PLEBlockProbeError(
+                    f"cannot stat dedicated PLE payload {self.payload_path}: {error}"
+                ) from error
+            yield self._payload_device_number_from_stat(payload_stat, path=self.payload_path)
+            return
+
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd: int | None = None
+        try:
+            try:
+                fd = os.open(self.payload_path, flags)
+                payload_stat = os.fstat(fd)
+            except (OSError, TypeError, ValueError) as error:
+                raise PLEBlockProbeError(
+                    f"cannot open dedicated PLE payload {self.payload_path}: {error}"
+                ) from error
+            yield self._payload_device_number_from_stat(payload_stat, path=self.payload_path)
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def _payload_device_number(self) -> tuple[int, int]:
+        """Return payload identity, with a scoped FD for production callers."""
+        with self._payload_device_scope() as device:
+            return device
+
+    def _read_text(self, path: Path) -> str:
+        try:
+            value = self._read_text_fn(path)
+        except PLEBlockProbeError:
+            raise
+        except (OSError, UnicodeError, ValueError, TypeError) as error:
+            raise PLEBlockProbeError(f"cannot read Linux sysfs path {path}: {error}") from error
+        if not isinstance(value, str):
+            raise PLEBlockProbeError(f"Linux sysfs path {path} did not return text")
+        return value
+
+    def _validate_block_path(
+        self,
+        path: Path,
+        *,
+        expected_device: tuple[int, int] | None = None,
+    ) -> tuple[int, int]:
+        if not path.is_dir():
+            raise PLEBlockProbeError(f"resolved sysfs block path is missing: {path}")
+        dev_file = path / "dev"
+        if not dev_file.is_file():
+            raise PLEBlockProbeError(f"resolved sysfs path is not a block device: {path}")
+        actual = _parse_device_number(self._read_text(dev_file), label=str(dev_file))
+        if expected_device is not None and actual != expected_device:
+            raise PLEBlockProbeError(
+                f"sysfs dev mapping changed: expected {expected_device[0]}:{expected_device[1]}, "
+                f"found {actual[0]}:{actual[1]}"
+            )
+        return actual
+
+    def _resolve_target(self, major: int, minor: int) -> Path:
+        try:
+            root = self.sysfs_root.resolve(strict=True)
+            dev_block = root / "dev" / "block"
+            if not dev_block.is_dir():
+                raise PLEBlockProbeError(f"Linux sysfs block mapping is missing: {dev_block}")
+            link = dev_block / f"{major}:{minor}"
+            target = link.resolve(strict=True)
+        except PLEBlockProbeError:
+            raise
+        except (OSError, RuntimeError) as error:
+            raise PLEBlockProbeError(
+                f"cannot resolve Linux sysfs block mapping {major}:{minor}: {error}"
+            ) from error
+        try:
+            target.relative_to(root)
+        except ValueError as error:
+            raise PLEBlockProbeError(
+                f"Linux sysfs block mapping {major}:{minor} escapes {root}"
+            ) from error
+        self._validate_block_path(target, expected_device=(major, minor))
+        return target
+
+    def _next_block_path(self, path: Path) -> Path | None:
+        partition = path / "partition"
+        if partition.exists() or partition.is_symlink():
+            text = self._read_text(partition).strip()
+            try:
+                partition_number = int(text, 10)
+            except ValueError as error:
+                raise PLEBlockProbeError(f"malformed partition marker: {partition}") from error
+            if partition_number <= 0:
+                raise PLEBlockProbeError(f"invalid partition marker: {partition}")
+            # /sys/block/<dev>/stat is already scoped to this partition.  Walking
+            # to the parent disk would combine unrelated filesystem partitions.
+            return None
+
+        slaves = path / "slaves"
+        if not (slaves.exists() or slaves.is_symlink()):
+            if "virtual" in path.parts:
+                raise PLEBlockProbeError(
+                    f"virtual block device {path.name} has no discoverable physical backing"
+                )
+            return None
+        if not slaves.is_dir():
+            raise PLEBlockProbeError(f"Linux sysfs slaves path is not a directory: {slaves}")
+        try:
+            entries = tuple(sorted(slaves.iterdir(), key=lambda item: item.name))
+        except OSError as error:
+            raise PLEBlockProbeError(
+                f"cannot enumerate Linux sysfs slaves {slaves}: {error}"
+            ) from error
+        if len(entries) > 1:
+            names = ", ".join(entry.name for entry in entries)
+            raise PLEBlockProbeError(
+                f"ambiguous Linux sysfs block backing for {path.name}: {names}"
+            )
+        if not entries:
+            if "virtual" in path.parts:
+                raise PLEBlockProbeError(
+                    f"virtual block device {path.name} has no discoverable physical backing"
+                )
+            return None
+        try:
+            target = entries[0].resolve(strict=True)
+        except RuntimeError as error:
+            raise PLEBlockProbeError(f"cycle in Linux sysfs slave target {entries[0]}") from error
+        except OSError as error:
+            raise PLEBlockProbeError(f"missing Linux sysfs slave target {entries[0]}") from error
+        try:
+            target.relative_to(self.sysfs_root.resolve(strict=True))
+        except (OSError, RuntimeError, ValueError) as error:
+            raise PLEBlockProbeError(
+                f"Linux sysfs slave target is outside the sysfs root: {entries[0]}"
+            ) from error
+        self._validate_block_path(target)
+        return target
+
+    def _resolve_device(self, major: int, minor: int) -> PLEBlockDevice:
+        """Resolve one already-pinned payload identity to a terminal device."""
+        current = self._resolve_target(major, minor)
+        visited: set[Path] = set()
+        terminal_device = (major, minor)
+        while True:
+            if current in visited:
+                raise PLEBlockProbeError(f"cycle in Linux sysfs block backing at {current}")
+            visited.add(current)
+            terminal_device = self._validate_block_path(current)
+            next_path = self._next_block_path(current)
+            if next_path is None:
+                break
+            current = next_path
+
+        stat_path = current / "stat"
+        if not stat_path.is_file():
+            raise PLEBlockProbeError(f"Linux block stat is missing: {stat_path}")
+        return PLEBlockDevice(
+            name=current.name,
+            major=terminal_device[0],
+            minor=terminal_device[1],
+            sysfs_path=str(current),
+            stat_path=str(stat_path),
+        )
+
+    def resolve(self) -> PLEBlockDevice:
+        """Resolve the payload's unique terminal block device."""
+        with self._payload_device_scope() as payload_device:
+            return self._resolve_device(*payload_device)
+
+    @staticmethod
+    def _parse_sectors(value: str, *, path: str) -> int:
+        fields = value.strip().split()
+        if len(fields) < 3:
+            raise PLEBlockProbeError(
+                f"Linux block stat {path} has no documented sectors-read field 3"
+            )
+        try:
+            values = [int(field, 10) for field in fields]
+        except ValueError as error:
+            raise PLEBlockProbeError(f"malformed Linux block stat: {path}") from error
+        if any(value < 0 for value in values):
+            raise PLEBlockProbeError(f"negative Linux block stat counter: {path}")
+        # Linux /sys/block/<dev>/stat field 3 is sectors read (1-based), i.e. index 2.
+        return values[2]
+
+    def _read_sectors(self, device: PLEBlockDevice) -> int:
+        return self._parse_sectors(
+            self._read_text(Path(device.stat_path)),
+            path=device.stat_path,
+        )
+
+    @staticmethod
+    def _require_expected_device(
+        actual: tuple[int, int], expected: tuple[int, int], *, path: str
+    ) -> None:
+        if actual != expected:
+            raise PLEBlockProbeError(
+                f"sysfs dev mapping changed at {path}: expected {expected[0]}:{expected[1]}, "
+                f"found {actual[0]}:{actual[1]}"
+            )
+
+    @staticmethod
+    def _check_fd_path_identity(
+        fd: int,
+        path: str | os.PathLike[str],
+        *,
+        dir_fd: int | None = None,
+        label: str,
+    ) -> tuple[int, int, int]:
+        try:
+            fd_stat = os.fstat(fd)
+            path_stat = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+        except (OSError, TypeError, ValueError) as error:
+            raise PLEBlockProbeError(
+                f"cannot revalidate Linux sysfs path {path}: {error}"
+            ) from error
+        if _stat_identity(fd_stat) != _stat_identity(path_stat):
+            raise PLEBlockProbeError(f"Linux sysfs {label} was replaced while sampling: {path}")
+        return _stat_identity(fd_stat)
+
+    def _read_terminal_snapshot_with_fds(
+        self, device: PLEBlockDevice
+    ) -> tuple[int, tuple[int, int]]:
+        """Read terminal ``dev`` and ``stat`` from one identity-stable directory."""
+        expected = device.major, device.minor
+        terminal_path = Path(device.sysfs_path)
+        with _open_readonly(terminal_path, directory=True) as terminal_fd:
+            self._check_fd_path_identity(
+                terminal_fd,
+                terminal_path,
+                label="terminal directory",
+            )
+            with _open_readonly("dev", dir_fd=terminal_fd) as dev_fd:
+                dev_fd_identity = self._check_fd_path_identity(
+                    dev_fd,
+                    "dev",
+                    dir_fd=terminal_fd,
+                    label="terminal dev",
+                )
+                dev_before = _parse_device_number(
+                    _read_fd_text(dev_fd, path=terminal_path / "dev"),
+                    label=str(terminal_path / "dev"),
+                )
+                self._require_expected_device(
+                    dev_before,
+                    expected,
+                    path=str(terminal_path / "dev"),
+                )
+
+            with _open_readonly("stat", dir_fd=terminal_fd) as stat_fd:
+                self._check_fd_path_identity(
+                    stat_fd,
+                    "stat",
+                    dir_fd=terminal_fd,
+                    label="terminal stat",
+                )
+                stat_text = _read_fd_text(stat_fd, path=terminal_path / "stat")
+                self._check_fd_path_identity(
+                    stat_fd,
+                    "stat",
+                    dir_fd=terminal_fd,
+                    label="terminal stat",
+                )
+
+            with _open_readonly("dev", dir_fd=terminal_fd) as dev_after_fd:
+                dev_after_identity = self._check_fd_path_identity(
+                    dev_after_fd,
+                    "dev",
+                    dir_fd=terminal_fd,
+                    label="terminal dev",
+                )
+                dev_after = _parse_device_number(
+                    _read_fd_text(dev_after_fd, path=terminal_path / "dev"),
+                    label=str(terminal_path / "dev"),
+                )
+            if dev_after_identity != dev_fd_identity:
+                raise PLEBlockProbeError(
+                    f"Linux terminal dev was replaced while sampling: {terminal_path / 'dev'}"
+                )
+            if dev_after != dev_before:
+                raise PLEBlockProbeError(
+                    f"Linux terminal device changed while sampling: "
+                    f"{dev_before[0]}:{dev_before[1]} -> {dev_after[0]}:{dev_after[1]}"
+                )
+            self._check_fd_path_identity(
+                terminal_fd,
+                terminal_path,
+                label="terminal directory",
+            )
+        return self._parse_sectors(stat_text, path=device.stat_path), dev_before
+
+    def _read_terminal_snapshot_with_callback(
+        self, device: PLEBlockDevice
+    ) -> tuple[int, tuple[int, int]]:
+        """Read terminal attributes through the explicit deterministic test seam."""
+        dev_path = Path(device.sysfs_path) / "dev"
+        stat_path = Path(device.stat_path)
+        try:
+            stat_identity_before = _stat_identity(os.stat(stat_path, follow_symlinks=False))
+        except (OSError, TypeError, ValueError) as error:
+            raise PLEBlockProbeError(
+                f"cannot stat Linux block stat {stat_path}: {error}"
+            ) from error
+        dev_before = _parse_device_number(
+            self._read_text(dev_path),
+            label=str(dev_path),
+        )
+        self._require_expected_device(
+            dev_before,
+            (device.major, device.minor),
+            path=str(dev_path),
+        )
+        sectors = self._parse_sectors(
+            self._read_text(stat_path),
+            path=device.stat_path,
+        )
+        try:
+            stat_identity_after = _stat_identity(os.stat(stat_path, follow_symlinks=False))
+        except (OSError, TypeError, ValueError) as error:
+            raise PLEBlockProbeError(
+                f"cannot revalidate Linux block stat {stat_path}: {error}"
+            ) from error
+        if stat_identity_after != stat_identity_before:
+            raise PLEBlockProbeError(
+                f"Linux sysfs terminal stat was replaced while sampling: {stat_path}"
+            )
+        dev_after = _parse_device_number(
+            self._read_text(dev_path),
+            label=str(dev_path),
+        )
+        if dev_after != dev_before:
+            raise PLEBlockProbeError(
+                f"Linux terminal device changed while sampling: "
+                f"{dev_before[0]}:{dev_before[1]} -> {dev_after[0]}:{dev_after[1]}"
+            )
+        return sectors, dev_before
+
+    def _read_terminal_snapshot(self, device: PLEBlockDevice) -> tuple[int, tuple[int, int]]:
+        if self._read_text_injected:
+            return self._read_terminal_snapshot_with_callback(device)
+        return self._read_terminal_snapshot_with_fds(device)
+
+    def sample(
+        self,
+        counters: PLEIOCounters | Mapping[str, Any] | None = None,
+    ) -> PLEIOCounters:
+        """Return a PLE snapshot with physical bytes and explicit sysfs provenance."""
+        with self._payload_device_scope() as payload_device:
+            if counters is None:
+                counters = (
+                    self.counter_source()
+                    if self.counter_source is not None
+                    else PLEIOCounters(0, 0, 0, 0)
+                )
+            base = _coerce_counters(counters)
+            device = self._resolve_device(*payload_device)
+            sectors, sampled_device = self._read_terminal_snapshot(device)
+            # Re-resolve after the stat read so a mapping replacement between
+            # resolution and sampling cannot silently change the source identity.
+            verified_device = self._resolve_device(*payload_device)
+            if verified_device != device or sampled_device != (device.major, device.minor):
+                raise PLEBlockProbeError("Linux block mapping changed while sampling")
+            physical_bytes = sectors * LINUX_SYSFS_STAT_SECTOR_BYTES
+            detail = (
+                f"{sampled_device[0]}:{sampled_device[1]}/{device.name}:"
+                f"field=3(sectors-read):sector-size={LINUX_SYSFS_STAT_SECTOR_BYTES}"
+            )
+            return replace(
+                base,
+                physical_block_device_bytes=physical_bytes,
+                device_identity=f"{sampled_device[0]}:{sampled_device[1]}/{device.name}",
+                physical_source="sysfs-block-stat",
+                physical_source_detail=detail,
+            )
+
+    __call__ = sample
+    probe = sample
+
+
+def probe_linux_ple_io_counters(
+    payload_path: str | os.PathLike[str],
+    *,
+    sysfs_root: str | os.PathLike[str] = "/sys",
+    counters: PLEIOCounters | Mapping[str, Any] | None = None,
+    counter_source: Callable[[], PLEIOCounters | Mapping[str, Any]] | None = None,
+    stat_fn: Callable[[str | os.PathLike[str]], object] | None = None,
+    read_text_fn: Callable[[str | os.PathLike[str]], str] | None = None,
+    system: str | None = None,
+) -> PLEIOCounters:
+    """Sample one explicit PLE payload through its Linux sysfs block device."""
+    return LinuxPLEBlockCounterProbe(
+        payload_path,
+        sysfs_root=sysfs_root,
+        counter_source=counter_source,
+        stat_fn=stat_fn,
+        read_text_fn=read_text_fn,
+        system=system,
+    ).sample(counters)
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,11 +915,16 @@ class PLEIOEvidenceRecorder:
 
 
 __all__ = [
+    "LINUX_SYSFS_STAT_SECTOR_BYTES",
     "PLE_IO_PHASES",
     "PLE_IO_PHYSICAL_SOURCE_KINDS",
+    "LinuxPLEBlockCounterProbe",
+    "PLEBlockDevice",
+    "PLEBlockProbeError",
     "PLEIOCounters",
     "PLEIOEvidenceError",
     "PLEIOEvidenceRecorder",
     "PLEIOPhaseEvidence",
     "measure_ple_io_phase",
+    "probe_linux_ple_io_counters",
 ]
