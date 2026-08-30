@@ -167,15 +167,17 @@ def classify_sensitive_tensor(
         ),
     ):
         return "residual_write_gate"
-    if re.fullmatch(r"output_hc_(?:up|down)\.weight", name) or re.fullmatch(
-        r"blk\.\d+\.hc_(?:attn|ffn)_(?:up|down)\.weight", name
-    ) or _ends_with_any(
-        name,
-        (
-            ".input_mix_weight_up.weight",
-            ".input_mix_weight_down.weight",
-            ".input_mix_weight_down_block_inject.weight",
-        ),
+    if (
+        re.fullmatch(r"output_hc_(?:up|down)\.weight", name)
+        or re.fullmatch(r"blk\.\d+\.hc_(?:attn|ffn)_(?:up|down)\.weight", name)
+        or _ends_with_any(
+            name,
+            (
+                ".input_mix_weight_up.weight",
+                ".input_mix_weight_down.weight",
+                ".input_mix_weight_down_block_inject.weight",
+            ),
+        )
     ):
         return "hyperconnection_control"
 
