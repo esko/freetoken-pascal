@@ -63,6 +63,7 @@ _CHECKPOINTS = frozenset(
         "checkpoint-restore",
     }
 )
+_READINESS_CHECKPOINTS = frozenset({"post-load", "post-first-large-prefill"})
 PLACEMENT_CHECKPOINTS = tuple(
     (
         "post-load",
@@ -279,7 +280,13 @@ class GPUPlacementPlan:
         object.__setattr__(self, "deficit_bytes", deficit)
         object.__setattr__(self, "categories", categories)
         object.__setattr__(self, "gpu_uuid", gpu_uuid)
-        object.__setattr__(self, "reasons", tuple(self.reasons))
+        try:
+            reasons = tuple(self.reasons)
+        except TypeError as exc:
+            raise PlacementInputError("placement reasons must be an iterable") from exc
+        if any(not isinstance(reason, str) for reason in reasons):
+            raise PlacementInputError("placement reasons must be strings")
+        object.__setattr__(self, "reasons", reasons)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -366,7 +373,10 @@ class PlacementPlan:
     safety_reserve_bytes: int
 
     def __post_init__(self) -> None:
-        gpus = tuple(self.gpus)
+        try:
+            gpus = tuple(self.gpus)
+        except TypeError as exc:
+            raise PlacementInputError("placement plan GPUs must be iterable") from exc
         if len(gpus) not in {1, 2}:
             raise PlacementInputError("placement plan requires 1 or 2 GPUs")
         if any(not isinstance(item, GPUPlacementPlan) for item in gpus):
@@ -512,12 +522,24 @@ class PlacementObservation:
         if isinstance(self.rank, bool) or not isinstance(self.rank, int) or self.rank < 0:
             raise PlacementInputError("rank must be a non-negative integer")
         gpu_uuid = _gpu_uuid(self.gpu_uuid)
-        driver_total = _int(self.driver_total_bytes, "driver_total_bytes")
+        driver_total = _positive(self.driver_total_bytes, "driver_total_bytes")
         driver_free = _int(self.driver_free_bytes, "driver_free_bytes")
         allocated = _int(self.allocator_allocated_bytes, "allocator_allocated_bytes")
         reserved = _int(self.allocator_reserved_bytes, "allocator_reserved_bytes")
         high_water = _int(self.allocator_high_water_bytes, "allocator_high_water_bytes")
         categories = _categories(self.categories, name="observed categories")
+        if driver_free > driver_total:
+            raise PlacementInputError("driver_free_bytes exceeds driver_total_bytes")
+        if allocated > reserved:
+            raise PlacementInputError("allocator_allocated_bytes exceeds allocator_reserved_bytes")
+        if reserved > driver_total:
+            raise PlacementInputError("allocator_reserved_bytes exceeds driver_total_bytes")
+        if high_water < allocated:
+            raise PlacementInputError("allocator_high_water_bytes is below allocated bytes")
+        if high_water > driver_total:
+            raise PlacementInputError("allocator_high_water_bytes exceeds driver_total_bytes")
+        if reserved + driver_free > driver_total:
+            raise PlacementInputError("allocation reserved/free counters are inconsistent")
         for name in (
             "managed_memory",
             "host_spill",
@@ -674,6 +696,30 @@ class GPUCanaryTelemetry:
             raise PlacementInputError("canary headroom_bytes does not match driver free/reserve")
         if normalized["deficit_bytes"] != max(0, -headroom):
             raise PlacementInputError("canary deficit_bytes does not match headroom")
+        if normalized["driver_total_bytes"] == 0:
+            raise PlacementInputError("driver_total_bytes must be positive")
+        if normalized["driver_free_bytes"] > normalized["driver_total_bytes"]:
+            raise PlacementInputError("driver_free_bytes exceeds driver_total_bytes")
+        if normalized["allocator_allocated_bytes"] > normalized["allocator_reserved_bytes"]:
+            raise PlacementInputError("allocator_allocated_bytes exceeds allocator_reserved_bytes")
+        if normalized["allocator_reserved_bytes"] > normalized["driver_total_bytes"]:
+            raise PlacementInputError("allocator_reserved_bytes exceeds driver_total_bytes")
+        if normalized["allocator_high_water_bytes"] < normalized["allocator_allocated_bytes"]:
+            raise PlacementInputError("allocator_high_water_bytes is below allocated bytes")
+        if normalized["allocator_high_water_bytes"] > normalized["driver_total_bytes"]:
+            raise PlacementInputError("allocator_high_water_bytes exceeds driver_total_bytes")
+        if (
+            normalized["allocator_reserved_bytes"] + normalized["driver_free_bytes"]
+            > normalized["driver_total_bytes"]
+        ):
+            raise PlacementInputError("allocation reserved/free counters are inconsistent")
+        if self.status == "pass" and (
+            normalized["deficit_bytes"] != 0
+            or headroom < 0
+            or normalized["driver_free_bytes"] < reserve
+            or normalized["required_bytes"] > normalized["driver_total_bytes"]
+        ):
+            raise PlacementInputError("passing canary telemetry is not capacity-safe")
         if (self.status == "pass") != (not reasons):
             raise PlacementInputError("canary status must agree with reasons")
 
@@ -990,6 +1036,22 @@ class BackoffDecision:
     index: int
     reason: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, str) or self.status not in {
+            "pending",
+            "safe",
+            "backoff",
+            "fail-readiness",
+        }:
+            raise PlacementInputError(f"unknown backoff decision status {self.status!r}")
+        if not isinstance(self.profile, BackoffProfile):
+            raise PlacementInputError("backoff decision profile must be a BackoffProfile")
+        if isinstance(self.index, bool) or not isinstance(self.index, int) or self.index < 0:
+            raise PlacementInputError("backoff decision index must be a non-negative integer")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise PlacementInputError("backoff decision reason must be non-empty text")
+        object.__setattr__(self, "reason", self.reason.strip())
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "schema_version": PLACEMENT_SCHEMA_VERSION,
@@ -1003,7 +1065,7 @@ class BackoffDecision:
 class BackoffStateMachine:
     """Bounded ordered backoff with pending, safe, and fail-readiness states."""
 
-    __slots__ = ("_index", "_profiles", "_status")
+    __slots__ = ("_index", "_passed_checkpoints", "_profiles", "_status")
 
     def __init__(self, profiles: Sequence[BackoffProfile]) -> None:
         values = tuple(profiles)
@@ -1036,6 +1098,7 @@ class BackoffStateMachine:
         self._profiles = values
         self._index = 0
         self._status = "pending"
+        self._passed_checkpoints = frozenset()
 
     @property
     def profiles(self) -> tuple[BackoffProfile, ...]:
@@ -1057,23 +1120,42 @@ class BackoffStateMachine:
     def status(self) -> str:
         return self._status
 
-    def observe(self, result: CanaryResult | bool) -> BackoffDecision:
-        """Advance once on failure and mark a profile safe only after a canary pass.
+    @property
+    def passed_checkpoints(self) -> tuple[str, ...]:
+        return tuple(
+            checkpoint
+            for checkpoint in PLACEMENT_CHECKPOINTS
+            if checkpoint in self._passed_checkpoints
+        )
 
-        Safe is checkpoint-local rather than terminal: a later failed checkpoint returns to
-        pending and advances, which is required when post-load passes but large-prefill fails.
+    def observe(self, result: CanaryResult) -> BackoffDecision:
+        """Advance on failure and mark a profile safe after both readiness checkpoints pass.
+
+        A pass is tracked only for the current profile.  Safe is checkpoint-local rather than
+        terminal: a later failed checkpoint returns to pending and advances, which is required
+        when post-load passes but large-prefill fails.
         """
-        if type(result) is not bool and not isinstance(result, CanaryResult):
-            raise PlacementInputError("result must be a boolean or CanaryResult")
-        passed = result if type(result) is bool else result.status == "pass"
-        if passed and self._status != "fail-readiness":
-            self._status = "safe"
-            return BackoffDecision("safe", self.profile, self._index, "canary-pass")
-        if not passed and self._index + 1 < len(self._profiles):
+        if not isinstance(result, CanaryResult):
+            raise PlacementInputError("result must be a CanaryResult")
+        if result.status == "pass" and self._status != "fail-readiness":
+            self._passed_checkpoints = frozenset((*self._passed_checkpoints, result.checkpoint))
+            if _READINESS_CHECKPOINTS.issubset(self._passed_checkpoints):
+                self._status = "safe"
+                return BackoffDecision("safe", self.profile, self._index, "canary-pass")
+            self._status = "pending"
+            return BackoffDecision(
+                "pending",
+                self.profile,
+                self._index,
+                f"checkpoint-pass:{result.checkpoint}",
+            )
+        if result.status == "fail" and self._index + 1 < len(self._profiles):
             self._index += 1
             self._status = "pending"
+            self._passed_checkpoints = frozenset()
             return BackoffDecision("backoff", self.profile, self._index, "canary-fail")
         self._status = "fail-readiness"
+        self._passed_checkpoints = frozenset()
         return BackoffDecision("fail-readiness", self.profile, self._index, "no-safe-profile")
 
 
