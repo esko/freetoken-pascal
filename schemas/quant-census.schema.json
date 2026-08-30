@@ -10,6 +10,10 @@
     "by_quant_type", "expert_layers", "expert_pools", "expert_slot_pools",
     "host_memory", "tensors"
   ],
+  "dependentRequired": {
+    "sensitive_tensors": ["sensitive_policy"],
+    "sensitive_policy": ["sensitive_tensors"]
+  },
   "properties": {
     "schema_name": {"const": "quant-census.schema.json"},
     "schema_version": {"const": 3},
@@ -120,6 +124,7 @@
     },
     "sensitive_tensors": {
       "type": "array",
+      "minItems": 1,
       "items": {"$ref": "#/$defs/sensitive_tensor"}
     },
     "sensitive_policy": {

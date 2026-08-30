@@ -337,6 +337,18 @@ def test_checked_in_qwen_profiles_carry_complete_sensitive_census(
         validate_sensitive_profile_qualification(records)
 
 
+def test_schema_requires_sensitive_policy_and_records_together() -> None:
+    census = json.loads(
+        (ROOT / "tests" / "fixtures" / "results" / "qwen38-q4-census.metadata.json").read_text()
+    )
+    schema = json.loads((ROOT / "schemas" / "quant-census.schema.json").read_text())
+    census.pop("sensitive_policy")
+
+    errors = list(Draft202012Validator(schema).iter_errors(census))
+
+    assert any("sensitive_policy" in error.message for error in errors)
+
+
 @pytest.mark.parametrize("name", ["shared-gate-mis-scaled.json", "gdn-control-perturbed.json"])
 def test_controlled_sensitive_tensor_fixtures_are_rejected(name: str) -> None:
     fixture = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
