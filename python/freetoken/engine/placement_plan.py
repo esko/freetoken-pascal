@@ -727,6 +727,36 @@ class GPUCanaryTelemetry:
         if self.status == "pass":
             live = _add(non_qsa, persistent, label="canary live required bytes")
             peak = _add(live, transient, label="canary peak required bytes")
+            if observed["safety_reserve"] != reserve:
+                raise PlacementInputError(
+                    "passing canary telemetry safety reserve must match the plan"
+                )
+            for category in PLACEMENT_CATEGORIES:
+                if abs(observed[category] - planned[category]) > tolerance:
+                    raise PlacementInputError(
+                        "passing canary telemetry category delta exceeds tolerance"
+                    )
+            observed_non_qsa, observed_persistent, observed_transient, _, _ = _required_totals(
+                observed, label="observed"
+            )
+            observed_live = _add(
+                observed_non_qsa,
+                observed_persistent,
+                label="observed canary live required bytes",
+            )
+            observed_peak = _add(
+                observed_live,
+                observed_transient,
+                label="observed canary peak required bytes",
+            )
+            if abs(observed_live - live) > tolerance:
+                raise PlacementInputError(
+                    "passing canary telemetry observed live aggregate exceeds tolerance"
+                )
+            if abs(observed_peak - peak) > tolerance:
+                raise PlacementInputError(
+                    "passing canary telemetry observed peak aggregate exceeds tolerance"
+                )
             if abs(normalized["allocator_allocated_bytes"] - live) > tolerance:
                 raise PlacementInputError(
                     "passing canary telemetry allocator live bytes exceed tolerance"
@@ -735,11 +765,6 @@ class GPUCanaryTelemetry:
                 raise PlacementInputError(
                     "passing canary telemetry allocator high-water bytes exceed tolerance"
                 )
-            for category in PLACEMENT_CATEGORIES:
-                if abs(observed[category] - planned[category]) > tolerance:
-                    raise PlacementInputError(
-                        "passing canary telemetry category delta exceeds tolerance"
-                    )
         if (self.status == "pass") != (not reasons):
             raise PlacementInputError("canary status must agree with reasons")
 

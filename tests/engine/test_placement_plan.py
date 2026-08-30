@@ -438,6 +438,18 @@ def test_canary_telemetry_rejects_forged_pass_and_invalid_allocator_counters() -
         replace(telemetry, allocator_allocated_bytes=telemetry.live_required_bytes - 1)
     with pytest.raises(PlacementPlannerError, match="high-water bytes"):
         replace(telemetry, allocator_high_water_bytes=telemetry.peak_required_bytes - 1)
+    drifted_categories = {
+        category: value + 1
+        for category, value in telemetry.observed_categories.items()
+        if category != "safety_reserve"
+    }
+    drifted_categories["safety_reserve"] = telemetry.observed_categories["safety_reserve"]
+    with pytest.raises(PlacementPlannerError, match="live aggregate"):
+        replace(telemetry, observed_categories=drifted_categories, tolerance_bytes=1)
+    reserve_drift = dict(telemetry.observed_categories)
+    reserve_drift["safety_reserve"] += 1
+    with pytest.raises(PlacementPlannerError, match="safety reserve"):
+        replace(telemetry, observed_categories=reserve_drift, tolerance_bytes=1)
     with pytest.raises(PlacementPlannerError, match="category delta"):
         replace(
             telemetry,
