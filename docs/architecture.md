@@ -76,11 +76,20 @@ The top-k category includes block IDs and the candidate scratch required by the 
 The expand-gather category includes the selected logical-index rows, including the incomplete causal-group tail.
 The attention category includes the output and, when split attention is selected, FP32 partial output and log-sum-exp buffers.
 The state category includes the persistent compressed slab, pending ring, and index RoPE table plus
-the per-forward pooled rows and first-position rows used by `QSAKVCache` and index compression.
+the per-forward pooled rows, first-position rows, and `QSASparseMetadata.cmp_rows`/
+`ring_rows` scatter plans. The latter are `[token_rows]` int32 buffers and remain live from index
+compression through selected-row attention, including graph capture.
 Eager high-water accounting overlaps actual batch metadata with each live phase: pooled/index rows,
 selection (`q_index`, retained indices, and one score/top-k chunk), and selected-row attention.
+The selected-row phases also retain both per-forward scatter plans.
 Capture high-water accounting includes every `_graph` buffer simultaneously and the active capture
-attention allocations.
+attention allocations, including the active capture batch's scatter plans.
+The eager Torch top-k fallback is accounted separately for its Python-visible column arange,
+visibility mask, values, chosen indices, validity mask, int32 cast, and `where` output. PyTorch
+allocator fragmentation and opaque kernel-internal top-k workspace cannot be observed by this
+Torch-free planner, so the resulting Torch estimate is conservative but not an exact guarantee.
+CUDA graph capture requires the Triton top-k backend; a Torch top-k request is rejected as an
+eager-only plan rather than being reported as capture-safe.
 `QSAWorkspacePlan.validate_capacity()` is a pure preflight accounting primitive for a future placement/launch owner and reports structured `ready` or `insufficient-capacity` telemetry.
 Negative, zero-invalid, incomplete-category, shape-inconsistent, and checked 64-bit arithmetic inputs fail closed with a controlled `ValueError` subtype.
 This H0 contract makes no kernel, throughput, or Tesla P4 claim and does not change QSA selection, token budget, or dispatch defaults.

@@ -13,6 +13,8 @@ from typing import Any
 
 MAX_QSA_WORKSPACE_BYTES = (1 << 63) - 1
 _I32 = 4
+_I64 = 8
+_BOOL = 1
 _FP32 = 4
 _QSA_DTYPE = 2
 # Keep this in lockstep with qsa_sparse._LOGITS_WORKSPACE_BYTES.  The score kernel's
@@ -198,6 +200,10 @@ class QSAWorkspaceInputs:
             raise QSAWorkspaceInputError("phase must be 'eager' or 'capture'")
         if self.topk_backend not in {"triton", "torch"}:
             raise QSAWorkspaceInputError("topk_backend must be 'triton' or 'torch'")
+        if self.phase == "capture" and self.topk_backend == "torch":
+            raise QSAWorkspaceInputError(
+                "capture phase requires Triton top-k; the torch.topk fallback is eager-only"
+            )
         if self.query_heads % self.kv_heads:
             raise QSAWorkspaceInputError("query_heads must be divisible by kv_heads")
         if self.top_k % self.compression_ratio:
@@ -444,13 +450,58 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
         },
     )
     scratch = qsa_topk_scratch_width(columns, block_top_k, request.topk_backend)
+    # The Torch fallback has several Python-visible temporaries that the Triton path avoids.
+    # Keep them in the inventory so an eager plan is conservative.  PyTorch's allocator
+    # fragmentation and opaque kernel-internal topk workspace are not observable from this
+    # Torch-free planner and therefore cannot be represented as exact components.
+    torch_width = min(block_top_k, columns)
+    torch_fallback = request.topk_backend == "torch"
     top_k = _category(
         "top_k",
         {
             "blocks": _mul(chunk, block_top_k, _I32, label="top-k blocks"),
             "candidate_scratch": _mul(chunk, scratch, _I32, label="top-k scratch"),
+            "torch_columns": (
+                _mul(columns, _I32, label="torch top-k columns") if torch_fallback else 0
+            ),
+            "torch_visibility_mask": (
+                _mul(chunk, columns, _BOOL, label="torch top-k visibility mask")
+                if torch_fallback
+                else 0
+            ),
+            "torch_values": (
+                _mul(chunk, torch_width, _FP32, label="torch top-k values") if torch_fallback else 0
+            ),
+            "torch_chosen": (
+                _mul(chunk, torch_width, _I64, label="torch top-k chosen") if torch_fallback else 0
+            ),
+            "torch_valid": (
+                _mul(chunk, torch_width, _BOOL, label="torch top-k valid mask")
+                if torch_fallback
+                else 0
+            ),
+            "torch_chosen_i32": (
+                _mul(chunk, torch_width, _I32, label="torch top-k chosen cast")
+                if torch_fallback
+                else 0
+            ),
+            "torch_where": (
+                _mul(chunk, torch_width, _I32, label="torch top-k where output")
+                if torch_fallback
+                else 0
+            ),
         },
-        {"blocks": (chunk, block_top_k), "candidate_scratch": (chunk, scratch)},
+        {
+            "blocks": (chunk, block_top_k),
+            "candidate_scratch": (chunk, scratch),
+            "torch_columns": (columns,) if torch_fallback else (0,),
+            "torch_visibility_mask": (chunk, columns) if torch_fallback else (0, 0),
+            "torch_values": (chunk, torch_width) if torch_fallback else (0, 0),
+            "torch_chosen": (chunk, torch_width) if torch_fallback else (0, 0),
+            "torch_valid": (chunk, torch_width) if torch_fallback else (0, 0),
+            "torch_chosen_i32": (chunk, torch_width) if torch_fallback else (0, 0),
+            "torch_where": (chunk, torch_width) if torch_fallback else (0, 0),
+        },
     )
     expand = _category(
         "expand_gather",
@@ -505,6 +556,8 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
             "index_rope": _mul(request.max_position, request.rotary_dim, _FP32, label="index RoPE"),
             "pooled": _mul(rows, request.index_head_dim, _QSA_DTYPE, label="pooled rows"),
             "first_positions": _mul(rows, _I32, label="first positions"),
+            "cmp_rows": _mul(rows, _I32, label="compressed row destinations"),
+            "ring_rows": _mul(rows, _I32, label="pending ring rows"),
         },
         {
             "compressed_slab": (request.num_index_layers, state_rows, request.index_head_dim),
@@ -517,6 +570,8 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
             "index_rope": (request.max_position, request.rotary_dim),
             "pooled": (rows, request.index_head_dim),
             "first_positions": (rows,),
+            "cmp_rows": (rows,),
+            "ring_rows": (rows,),
         },
     )
     inventory = QSAWorkspaceInventory(
@@ -534,6 +589,11 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
         state.components["index_rope"],
         label="persistent state",
     )
+    scatter_rows = _add(
+        state.components["cmp_rows"],
+        state.components["ring_rows"],
+        label="per-forward scatter rows",
+    )
 
     # Eager metadata remains live while index compression, selection, and sparse attention
     # execute.  Selection retains q_index and the complete indices output while replacing only
@@ -544,10 +604,12 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
         metadata_bytes,
         state.components["pooled"],
         state.components["first_positions"],
+        scatter_rows,
         label="eager index-update phase",
     )
     eager_select = _add(
         metadata_bytes,
+        scatter_rows,
         score.components["q_index"],
         expand.components["indices"],
         score.components["logits"],
@@ -558,6 +620,7 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
     )
     eager_attention = _add(
         metadata_bytes,
+        scatter_rows,
         expand.components["indices"],
         attention.bytes,
         label="eager attention phase",
@@ -599,6 +662,7 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
     )
     capture_dynamic = _add(
         _mul(request.batch_size, _I32, label="capture last indices"),
+        scatter_rows,
         attention.bytes,
         label="capture dynamic attention",
     )

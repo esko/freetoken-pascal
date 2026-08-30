@@ -60,6 +60,10 @@ def test_inventory_uses_actual_qsa_shapes_and_all_categories() -> None:
     assert plan.inventory["attention"].components["partial_lse"] == 0
     assert plan.inventory["state"].components["compressed_slab"] == (2 * (8 // 4 + 3) * 8 * 2)
     assert plan.inventory["state"].components["index_rope"] == 16 * 8 * 4
+    assert plan.inventory["state"].components["cmp_rows"] == 2 * 4
+    assert plan.inventory["state"].components["ring_rows"] == 2 * 4
+    assert plan.inventory["state"].shapes["cmp_rows"] == (2,)
+    assert plan.inventory["state"].shapes["ring_rows"] == (2,)
     assert plan.persistent_bytes == (
         plan.inventory["state"].components["compressed_slab"]
         + plan.inventory["state"].components["pending_ring"]
@@ -102,6 +106,8 @@ def test_zero_and_negative_dimensions_fail_closed() -> None:
     for field, value in (("phase", "unknown"), ("topk_backend", "other"), ("dtype_bytes", 4)):
         with pytest.raises(QSAWorkspaceInputError):
             _inputs(**{field: value})
+    with pytest.raises(QSAWorkspaceInputError, match=r"capture.*Triton|Triton.*capture"):
+        _inputs(phase="capture", topk_backend="torch")
 
 
 def test_missing_or_unknown_inventory_categories_fail_closed() -> None:
@@ -226,6 +232,75 @@ def test_eager_peak_retains_indices_and_overlaps_current_score_chunk() -> None:
     assert plan.required_bytes == plan.persistent_bytes + plan.eager_transient_peak_bytes
 
 
+def test_scatter_rows_are_retained_through_eager_selection_and_attention() -> None:
+    plan = calculate_qsa_workspace(
+        _inputs(
+            token_rows=17,
+            batch_size=2,
+            page_table_width=128,
+            page_size=8,
+            context_tokens=128,
+            top_k=4,
+        )
+    )
+    state = plan.inventory["state"]
+    scatter = state.components["cmp_rows"] + state.components["ring_rows"]
+    assert scatter == 17 * 4 * 2
+    # The fixture has enough selection/attention work that the per-forward scatter plan is
+    # part of both retained-phase lower bounds, rather than merely an index-update allocation.
+    score = plan.inventory["score"].components
+    topk = plan.inventory["top_k"].components
+    metadata = sum(
+        score[name]
+        for name in (
+            "last_indices",
+            "token_to_req",
+            "cu_seqlens",
+            "seq_lens",
+            "ring_slots",
+            "block_table",
+        )
+    )
+    select_floor = (
+        metadata
+        + scatter
+        + score["q_index"]
+        + plan.inventory["expand_gather"].components["indices"]
+        + score["logits"]
+        + score["visible"]
+        + topk["blocks"]
+        + topk["candidate_scratch"]
+    )
+    attention_floor = (
+        metadata
+        + scatter
+        + plan.inventory["expand_gather"].components["indices"]
+        + plan.inventory["attention"].bytes
+    )
+    assert plan.eager_transient_peak_bytes >= max(select_floor, attention_floor)
+
+
+def test_scatter_rows_are_accounted_in_capture_residency() -> None:
+    plan = calculate_qsa_workspace(
+        _inputs(
+            phase="capture",
+            batch_size=2,
+            capture_max_batch_size=8,
+            num_req_slots=8,
+            token_rows=2,
+            page_table_width=128,
+            page_size=8,
+            context_tokens=128,
+        )
+    )
+    scatter = (
+        plan.inventory["state"].components["cmp_rows"]
+        + plan.inventory["state"].components["ring_rows"]
+    )
+    assert scatter == 2 * 4 * 2
+    assert plan.capture_resident_bytes >= scatter
+
+
 def test_capture_resident_accounts_all_graph_buffers_and_active_attention() -> None:
     plan = calculate_qsa_workspace(
         _inputs(
@@ -264,3 +339,32 @@ def test_capture_resident_accounts_all_graph_buffers_and_active_attention() -> N
     assert plan.capture_resident_bytes >= graph
     assert plan.required_bytes == plan.persistent_bytes + plan.capture_resident_bytes
     assert plan.capture_resident_bytes > plan.eager_transient_peak_bytes
+
+
+def test_torch_topk_accounts_python_visible_fallback_temporaries() -> None:
+    plan = calculate_qsa_workspace(
+        _inputs(
+            topk_backend="torch",
+            page_table_width=20_000,
+            context_tokens=8,
+            token_rows=3,
+        )
+    )
+    request = plan.request
+    topk = plan.inventory["top_k"]
+    columns = request.score_columns
+    chunk = request.chunk_rows
+    width = min(request.top_k // request.compression_ratio, columns)
+    assert columns > 4096
+    assert topk.components["torch_columns"] == columns * 4
+    assert topk.components["torch_visibility_mask"] == chunk * columns
+    assert topk.components["torch_values"] == chunk * width * 4
+    assert topk.components["torch_chosen"] == chunk * width * 8
+    assert topk.components["torch_valid"] == chunk * width
+    assert topk.components["torch_chosen_i32"] == chunk * width * 4
+    assert topk.components["torch_where"] == chunk * width * 4
+    assert topk.shapes["torch_columns"] == (columns,)
+    assert topk.shapes["torch_values"] == (chunk, width)
+    assert topk.shapes["torch_chosen"] == (chunk, width)
+    assert topk.shapes["torch_where"] == (chunk, width)
+    assert plan.as_dict()["categories"]["top_k"] == topk.bytes
