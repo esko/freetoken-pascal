@@ -32,6 +32,34 @@ from freetoken.kvcache.linear_state_pool import (
 logger = init_logger(__name__)
 
 
+def _load_model_host_resources(model, config: EngineConfig) -> int:
+    """Acquire model-owned host resources through exactly one compatible hook.
+
+    ``load_host_tables(config)`` is the explicit current hook and therefore takes
+    precedence when a model exposes both hooks.  ``load_host_weights(model_path, ...)``
+    remains the compatibility path for older models that only provide the legacy hook.
+    """
+    load_host_tables = getattr(model, "load_host_tables", None)
+    if callable(load_host_tables):
+        return int(load_host_tables(config) or 0)
+
+    load_host_weights = getattr(model, "load_host_weights", None)
+    if callable(load_host_weights):
+        return int(
+            load_host_weights(
+                config.model_path,
+                dummy=config.use_dummy_weight,
+                ple_warm_mode=config.ple_warm_mode,
+                ple_artifact_path=config.ple_artifact_path,
+                ple_backend=config.ple_backend,
+                ple_planner_mode=config.ple_planner_mode,
+                ple_planner_direct_threshold=config.ple_planner_direct_threshold,
+            )
+            or 0
+        )
+    return 0
+
+
 def _require_offload_cache_size(cache_size: int, num_experts: int) -> None:
     """The offload MoE cache needs at least one slot per expert per layer. A too-small size
     (e.g. a bare offload run with moe_cache_size unset and auto disabled) must fail loudly."""
@@ -307,6 +335,9 @@ class ForwardOutput(NamedTuple):
 
 class Engine:
     def __init__(self, config: EngineConfig):
+        # Set this before initialization so rollback is safe even when model creation fails
+        # before ``self.model`` exists.  The cleanup path owns this one-shot transition.
+        self._model_host_resources_closed = False
         try:
             self._initialize(config)
         except BaseException:
@@ -356,16 +387,9 @@ class Engine:
         with torch.device("meta"), torch_dtype(config.dtype):
             self.model = create_model(config.model_config)
         self.model.load_state_dict(self._load_weight_state_dict(config))
-        if hasattr(self.model, "load_host_weights"):
-            self.model.load_host_weights(
-                config.model_path,
-                dummy=config.use_dummy_weight,
-                ple_warm_mode=config.ple_warm_mode,
-                ple_artifact_path=config.ple_artifact_path,
-                ple_backend=config.ple_backend,
-                ple_planner_mode=config.ple_planner_mode,
-                ple_planner_direct_threshold=config.ple_planner_direct_threshold,
-            )
+        # Host-side auxiliary stores (for example Qwen's PLE table) are acquired once through
+        # the model lifecycle seam, before cache residency planning sees their byte count.
+        self._host_tables_bytes = _load_model_host_resources(self.model, config)
         if hasattr(self.model, "host_weight_telemetry"):
             logger.info_rank0(
                 f"Host weight placement: {self.model.host_weight_telemetry()}"
@@ -380,12 +404,6 @@ class Engine:
         self._post_weights_free = post_weights_free
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
-        # Host-side auxiliary stores (qwen4_exp's pinned PLE table): after the weights so a
-        # load failure is not masked, before the MoE offload cache so the bank residency
-        # planning sees the pin quota the table already spent.
-        self._host_tables_bytes = 0
-        if hasattr(self.model, "load_host_tables"):
-            self._host_tables_bytes = int(self.model.load_host_tables(config) or 0)
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
         if hasattr(self.model, "prepare_for_runtime"):
@@ -1120,6 +1138,19 @@ class Engine:
                 logger.error(f"Host expert-bank cleanup failed: {exc}")
             finally:
                 self._expert_banks = None
+
+        # Qwen's PLE table is owned by the model rather than the generic expert-bank cache.
+        # Mark the transition before invoking model code so repeated shutdown and re-entrant
+        # rollback cannot close the same model resource twice.
+        if getattr(self, "_model_host_resources_closed", False):
+            return
+        self._model_host_resources_closed = True
+        close_host_resources = getattr(getattr(self, "model", None), "close_host_resources", None)
+        if callable(close_host_resources):
+            try:
+                close_host_resources()
+            except Exception as exc:
+                logger.error(f"Model host-resource cleanup failed: {exc}")
 
 
 def _profile_gpu(index: "int | None" = None) -> Tuple[str | None, str | None]:

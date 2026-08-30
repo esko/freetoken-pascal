@@ -49,6 +49,7 @@ N-gram/PLE in this document names the required table and lookup substrate; it do
 
 The complete expert bank is loaded and pre-faulted into DDR4 for v1, is covered by the release no-swap policy, and supplies all steady-state CPU expert execution and GPU cache fills. SSD-backed expert reads are startup backing or an explicitly labeled experiment only.
 PLE mappings remain pageable by default so the OS can consume spare RAM dynamically, and the full PLE table is never permanently pinned.
+Engine host-resource acquisition is single-shot: `load_host_tables(config)` is the explicit hook and takes precedence when present, while `load_host_weights(model_path, ...)` remains the compatibility hook for older models that expose only it. The Engine records the returned host-byte count once and calls the model's idempotent `close_host_resources()` hook during both startup rollback and normal shutdown. A model must detach PLE layers before closing its owned mappings or pinned banks; models without host-resource hooks retain the no-op legacy behavior.
 
 ### GPU tier
 

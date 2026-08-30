@@ -153,6 +153,7 @@ class PinnedUVATable:
         self._staging: torch.Tensor | None = None
         self._graph_staging: dict[int, torch.Tensor] = {}
         self._pending: Tuple[torch.Tensor, torch.Tensor] | None = None
+        self._closed = False
 
     def _stage(self, rows: int) -> torch.Tensor:
         # Captured graphs keep one buffer per size for good: growing the eager one would free the
@@ -183,6 +184,8 @@ class PinnedUVATable:
         )
 
     def prefetch(self, row_ids: torch.Tensor) -> None:
+        if self._closed:
+            raise RuntimeError("PLE table is closed")
         if self._stream is None or row_ids.numel() == 0:
             return
         dst = self._stage(row_ids.numel())
@@ -194,6 +197,8 @@ class PinnedUVATable:
         self._pending = (row_ids, dst)
 
     def lookup(self, row_ids: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        if self._closed:
+            raise RuntimeError("PLE table is closed")
         pending, self._pending = self._pending, None
         if pending is not None:
             # join even on a miss: the stale prefetch owns the staging buffer about to be reused
@@ -207,6 +212,18 @@ class PinnedUVATable:
             return rows
         out.copy_(rows)
         return out
+
+    def close(self) -> None:
+        """Release references to the pinned host tensor and reusable staging buffers."""
+        if self._closed:
+            return
+        if self._stream is not None:
+            self._stream.synchronize()
+        self._closed = True
+        self._pending = None
+        self._staging = None
+        self._graph_staging.clear()
+        self.weight = None
 
 
 def _splitmix64(value: int) -> int:
@@ -440,7 +457,7 @@ class NGramEmbedding(BaseOP):
             self.ngram_heads_offsets.copy_(torch.tensor(offsets, dtype=torch.int64))
         self._table = table
 
-    def attach_table(self, table: PLETableBackend) -> None:
+    def attach_table(self, table: PLETableBackend | None) -> None:
         self._table = table
 
     @property
