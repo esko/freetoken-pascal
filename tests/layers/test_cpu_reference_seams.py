@@ -59,7 +59,7 @@ def test_cpu_activation_seam_honors_output_buffer():
 def test_cpu_activation_seam_uses_fp32_intermediates_for_bfloat16():
     values = torch.linspace(-2, 2, 8, dtype=torch.float32).reshape(1, 8).bfloat16()
     expected = F.silu(values.float()[..., :4]) * values.float()[..., 4:]
-    torch.testing.assert_close(silu_and_mul(values).float(), expected)
+    torch.testing.assert_close(silu_and_mul(values).float(), expected.to(values.dtype).float())
 
 
 def test_cpu_embedding_seam_matches_torch_embedding():
