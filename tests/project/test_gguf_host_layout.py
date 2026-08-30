@@ -233,6 +233,7 @@ def test_ple_warm_modes_and_fault_telemetry_are_observable() -> None:
         after = weights.ple.telemetry()
 
     assert before["mode"] == "cold"
+    assert before["source_kind"] == "gguf-mmap"
     if hasattr(mmap, "MADV_RANDOM"):
         assert before["advice"] == "madv-random"
         assert before["advice_applied"] is True
@@ -386,6 +387,7 @@ def test_source_ple_pread_lookup_matches_mmap_for_first_middle_last_and_duplicat
 
     np.testing.assert_array_equal(actual, expected)
     assert telemetry["backend"] == "pread"
+    assert telemetry["source_kind"] == "gguf-pread"
     assert source_kind == "gguf-pread"
     assert telemetry["mapped_bytes"] == 0
     assert telemetry["batch_unique_rows"] == 3

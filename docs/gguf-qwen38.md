@@ -123,7 +123,7 @@ then the 16 n-gram heads are assembled into the 2,560-element PLE input. Row bou
 checked before any lookup. The exact artifact multipliers, head offsets and prime vocab
 sizes come from GGUF metadata; they are not regenerated or guessed.
 
-The current GGUF-backed implementation exposes four modes for reference and conversion
+The current GGUF-backed implementation exposes five modes for reference and conversion
 validation:
 
 - `cold` is the default and issues `MADV_DONTNEED` for the PLE range;

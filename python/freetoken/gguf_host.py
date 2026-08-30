@@ -1841,6 +1841,7 @@ class MappedPLETable:
             active = self._prefetch_active is not None and not self._prefetch_active.done()
             return {
                 "mode": self.mode,
+                "source_kind": self.source_kind,
                 "mapped_bytes": 0 if self.mapping is None else self.mapping.length,
                 "resident_pages": resident_pages,
                 "resident_bytes": (
