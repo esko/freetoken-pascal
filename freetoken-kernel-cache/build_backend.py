@@ -10,6 +10,17 @@ PACKAGE_PROJECT_ROOT = Path(__file__).resolve().parent
 FREETOKEN_PROJECT_ROOT = PACKAGE_PROJECT_ROOT.parent
 PACKAGE_ROOT = PACKAGE_PROJECT_ROOT / "freetoken_kernel_cache"
 BUILD_META = PACKAGE_ROOT / "_build_meta.py"
+PASCAL_BUILD_META = PACKAGE_ROOT / "_pascal_build_meta.json"
+
+
+def _metadata_helpers():
+    import importlib.util
+
+    path = FREETOKEN_PROJECT_ROOT / "scripts" / "pascal_wheel_metadata.py"
+    spec = importlib.util.spec_from_file_location("_pascal_wheel_metadata", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _ensure_freetoken_importable() -> None:
@@ -56,14 +67,32 @@ def _write_build_meta() -> None:
     # stamped release build, see scripts/build-release-wheels.sh). PEP 440 allows a
     # single `+`, so merge instead of concatenating -- cu first, so every existing
     # `+cu` matcher keeps working (kernel/utils.py's regex, install.sh's
-    # wheel_cuda_major): 0.1.1+g<sha> and +cu130 -> 0.1.1+cu130.g<sha>.
+    # wheel_cuda_major): 0.1.1+g<sha> and +cu126 -> 0.1.1+cu126.g<sha>.
     base, _, local = freetoken_version.partition("+")
-    suffix = _cuda_version_suffix()  # "+cu130" or ""
+    suffix = _cuda_version_suffix()  # "+cu126" or ""
     if suffix and local:
         version = f"{base}{suffix}.{local}"
     else:
         version = f"{freetoken_version}{suffix}"
     BUILD_META.write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    helpers = _metadata_helpers()
+    try:
+        import torch
+    except Exception:
+        cuda = "unknown"
+    else:
+        cuda = helpers.canonical_cuda_version(getattr(torch.version, "cuda", None))
+    architectures = helpers.canonical_architectures(
+        os.getenv("TVM_FFI_CUDA_ARCH_LIST") or os.getenv("FREETOKEN_KERNEL_CACHE_ARCHES")
+    )
+    helpers.write_wheel_metadata(
+        PASCAL_BUILD_META,
+        role="kernel-cache",
+        version=version,
+        cuda=cuda,
+        architectures=architectures,
+        runtime_version=freetoken_version,
+    )
 
 
 def _selected_specs() -> list[str] | None:
@@ -100,20 +129,11 @@ def _build_jit_cache() -> None:
         "yes",
         "on",
     }
-    # Multi-arch fatbin: one SASS cubin per listed arch, plus the PTX of the highest one.
-    # A GPU whose arch is not listed and is below the highest one has no usable image.
-    #   8.0  -> A100, A800, A30                      (Ampere, datacenter)
-    #   8.6  -> RTX 30 series, A10, A40              (Ampere, consumer / workstation)
-    #   8.9  -> RTX 40 series, L4, L40, RTX 6000 Ada (Ada Lovelace)
-    #   9.0  -> H100, H800, H20                      (Hopper)
-    #   10.0 -> B200, B100, GB200                    (Blackwell, datacenter)
-    #   12.0 -> RTX 50 series, RTX PRO 6000 Blackwell (Blackwell, consumer / workstation)
-    # Override with FREETOKEN_KERNEL_CACHE_ARCHES (space-separated maj.min) or
-    # TVM_FFI_CUDA_ARCH_LIST directly. Needs an nvcc that supports every listed arch.
+    # The downstream wheel is deliberately Pascal-only by default. Override with
+    # FREETOKEN_KERNEL_CACHE_ARCHES (space-separated maj.min) or TVM_FFI_CUDA_ARCH_LIST
+    # only for an explicitly separate artifact; the embedded profile records the exact list.
     if "TVM_FFI_CUDA_ARCH_LIST" not in os.environ:
-        os.environ["TVM_FFI_CUDA_ARCH_LIST"] = os.getenv(
-            "FREETOKEN_KERNEL_CACHE_ARCHES", "8.0 8.6 8.9 9.0 10.0 12.0"
-        )
+        os.environ["TVM_FFI_CUDA_ARCH_LIST"] = os.getenv("FREETOKEN_KERNEL_CACHE_ARCHES", "6.1")
     compile_and_package_kernels(
         out_dir=out_dir,
         build_dir=build_dir,

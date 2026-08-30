@@ -22,16 +22,14 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 dependencies = ["apache-tvm-ffi==0.1.13.post3"]
 
-# Provenance pin: PyPI's torch 2.11.0 is itself the cu130 build, but this index serves
-# ONLY cu130 wheels, so an isolated build can never resolve a different-CUDA torch and
-# stamp the wheel +cu126/+cu128. uv applies these to build-system.requires when this
-# directory is the build root. Mirrors ../pyproject.toml.
+# The downstream cache is built against the same pinned CUDA 12.6 Torch as the runtime.
+# Build isolation must not silently resolve PyPI's CUDA 13 wheel and stamp an unusable cache.
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
+torch = { index = "pytorch-cu126" }
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.setuptools]
@@ -42,4 +40,4 @@ packages = ["freetoken_kernel_cache"]
 version = {attr = "freetoken_kernel_cache.__version__"}
 
 [tool.setuptools.package-data]
-freetoken_kernel_cache = ["jit_cache/**/*.so", "_build_meta.py"]
+freetoken_kernel_cache = ["jit_cache/**/*.so", "_build_meta.py", "_pascal_build_meta.json"]
