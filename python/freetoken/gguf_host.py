@@ -759,21 +759,23 @@ class PLEPrefetchHandle:
         self._future = future
         self._cancel_event = cancel_event
         self._finalized_event = finalized_event
+        self._lifecycle_lock = threading.RLock()
 
     @property
     def row_ids(self) -> tuple[int, ...]:
         return self._row_ids
 
     def done(self) -> bool:
-        return self._future.done()
+        return self._finalized_event.is_set()
 
     def cancel(self) -> bool:
         """Request cancellation and report whether the request was still pending."""
-        if self._future.done():
-            return False
-        self._cancel_event.set()
-        self._future.cancel()
-        return True
+        with self._lifecycle_lock:
+            if self._finalized_event.is_set():
+                return False
+            self._cancel_event.set()
+            self._future.cancel()
+            return True
 
     def result(self, timeout: float | None = None) -> None:
         """Wait for completion without exposing any prefetched row data."""
@@ -1054,35 +1056,36 @@ class MappedPLETable:
         return warmed
 
     def _finish_prefetch(self, handle: PLEPrefetchHandle, future: Future[int]) -> None:
-        warmed = 0
-        status = "completed"
-        if future.cancelled():
-            status = "cancelled"
-        else:
-            error = future.exception()
-            if isinstance(error, _PrefetchCancelled):
+        with handle._lifecycle_lock:
+            warmed = 0
+            status = "completed"
+            if future.cancelled():
                 status = "cancelled"
-                warmed = error.warmed_rows
-            elif isinstance(error, _PrefetchWorkerError):
-                status = "failed"
-                warmed = error.warmed_rows
-            elif error is not None:
-                status = "failed"
             else:
-                warmed = int(future.result())
-                if handle._cancel_event.is_set():
+                error = future.exception()
+                if isinstance(error, _PrefetchCancelled):
                     status = "cancelled"
-        with self._prefetch_lock:
-            if self._prefetch_active is handle:
-                self._prefetch_active = None
-            self._prefetch_warmed_rows += warmed
-            if status == "completed":
-                self._prefetch_completed += 1
-            elif status == "cancelled":
-                self._prefetch_cancelled += 1
-            else:
-                self._prefetch_failed += 1
-        handle._finalized_event.set()
+                    warmed = error.warmed_rows
+                elif isinstance(error, _PrefetchWorkerError):
+                    status = "failed"
+                    warmed = error.warmed_rows
+                elif error is not None:
+                    status = "failed"
+                else:
+                    warmed = int(future.result())
+                    if handle._cancel_event.is_set():
+                        status = "cancelled"
+            with self._prefetch_lock:
+                if self._prefetch_active is handle:
+                    self._prefetch_active = None
+                self._prefetch_warmed_rows += warmed
+                if status == "completed":
+                    self._prefetch_completed += 1
+                elif status == "cancelled":
+                    self._prefetch_cancelled += 1
+                else:
+                    self._prefetch_failed += 1
+            handle._finalized_event.set()
 
     def prefetch(self, ids: np.ndarray) -> PLEPrefetchHandle:
         """Warm a bounded set of PLE rows asynchronously.

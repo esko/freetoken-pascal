@@ -512,6 +512,35 @@ def test_ple_prefetch_partial_failure_reports_rows_and_finalizes_before_result(
         assert telemetry["prefetch_active"] is False
 
 
+def test_ple_prefetch_done_and_cancel_share_finalization_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        entered_finish = threading.Event()
+        release_finish = threading.Event()
+        real_finish = table._finish_prefetch
+
+        def delayed_finish(handle, future) -> None:
+            entered_finish.set()
+            release_finish.wait(timeout=2)
+            real_finish(handle, future)
+
+        monkeypatch.setattr(table, "_finish_prefetch", delayed_finish)
+        handle = table.prefetch(np.array([0]))
+        assert entered_finish.wait(timeout=2)
+        assert handle.done() is False
+        assert handle.cancel() is True
+        release_finish.set()
+        with pytest.raises(CancelledError):
+            handle.result()
+        assert handle.done() is True
+        assert handle.cancel() is False
+        telemetry = table.telemetry()
+        assert telemetry["prefetch_cancelled"] == 1
+        assert telemetry["prefetch_completed"] == 0
+
+
 def test_ple_close_waits_for_synchronous_lookup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
