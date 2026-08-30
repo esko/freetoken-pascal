@@ -132,8 +132,11 @@ def test_tiny_qwen_text_composes_prefill_decode_and_is_deterministic():
     decoded = _run(model, context, decode)
     assert decoded.shape == (1, config.vocab_size)
     assert torch.isfinite(decoded).all()
-    assert 0 <= int(first.argmax()) < config.vocab_size
-    assert 0 <= int(decoded.argmax()) < config.vocab_size
+    # These are the deterministic greedy IDs for the seeded tiny fixture.  They
+    # make an accidental change to the composed text path visible even when the
+    # logits remain finite and shapes still agree.
+    assert int(first.argmax()) == 61
+    assert int(decoded.argmax()) == 56
 
     context.linear_state_pool.reset(1)
     context.attn_backend = TorchDenseQSAReference(
