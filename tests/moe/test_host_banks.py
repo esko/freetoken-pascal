@@ -504,6 +504,55 @@ def test_host_bank_accounting_exposes_cross_node_residency():
     banks["x"][0].close()
 
 
+def test_ftw_numa_samples_retain_global_and_per_layer_bank_identity(tmp_path):
+    from freetoken.checkpoint.ftw import FTWWriter, layer_bank_entry_name, load_ftw_banks
+    from freetoken.moe.host_banks import HostBankPolicy
+
+    checkpoint = tmp_path / "ftw"
+    writer = FTWWriter(str(checkpoint))
+    writer.add_tensor("gate_up_alpha", torch.ones(4), kind="experts_bank")
+    for bank_name in ("gate_up", "down"):
+        for layer_id in range(2):
+            writer.add_tensor(
+                layer_bank_entry_name(bank_name, layer_id),
+                torch.full((2, 8), layer_id, dtype=torch.uint8),
+                kind="experts_bank",
+            )
+    writer.finalize({"quant_format": "bf16", "expert_bank_num_layers": 2})
+
+    class Backend:
+        def mbind(self, *args):
+            return None
+
+        def move_pages(self, addresses):
+            return (0,) * len(addresses)
+
+    policy = HostBankPolicy(
+        strategy="pageable",
+        numa_policy="preferred",
+        numa_node=0,
+        enforce_numa_placement=True,
+        sample_numa_residency=True,
+        numa_sample_max_pages=1,
+        numa_backend=Backend(),
+        numa_reader=lambda path: {
+            "/proc/self/status": "Mems_allowed_list:\t0\n",
+            "/sys/devices/system/node/online": "0\n",
+        }[path],
+    )
+    banks = load_ftw_banks(str(checkpoint), num_layers=2, workers=1, host_bank_policy=policy)
+    assert banks is not None
+    samples = banks.host_bank_accounting["numa_sample_banks"]
+    assert [sample["identity"] for sample in samples] == [
+        {"bank_name": "gate_up_alpha", "layer_id": None},
+        {"bank_name": "gate_up", "layer_id": 0},
+        {"bank_name": "gate_up", "layer_id": 1},
+        {"bank_name": "down", "layer_id": 0},
+        {"bank_name": "down", "layer_id": 1},
+    ]
+    banks.close()
+
+
 def test_default_policy_does_not_call_numa_backend():
     from freetoken.moe.host_banks import HostBankPolicy, alloc_layer_banks
 

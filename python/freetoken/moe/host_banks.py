@@ -38,6 +38,7 @@ import torch
 from freetoken.moe.host_memory import SwapProbe, probe_swap
 from freetoken.moe.numa_memory import (
     NumaPlacementController,
+    NumaSampleIdentity,
     NumaSyscallBackend,
     resolve_numa_placement,
 )
@@ -438,13 +439,19 @@ class HostBankPolicy:
     def refresh_numa_accounting(self) -> None:
         self._sync_numa_accounting()
 
-    def sample_numa_bank(self, bank: HostBank) -> None:
+    def sample_numa_bank(
+        self,
+        bank: HostBank,
+        *,
+        identity: NumaSampleIdentity | None = None,
+    ) -> None:
         if self.sample_numa_residency and self._numa_controller is not None:
             self._numa_controller.sample(
                 bank.addr,
                 bank.allocated_nbytes,
                 stride=self.numa_sample_stride,
                 max_pages=self.numa_sample_max_pages,
+                identity=identity,
             )
             self._sync_numa_accounting()
 

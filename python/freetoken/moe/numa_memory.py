@@ -279,6 +279,31 @@ class NumaSyscallBackend:
 
 
 @dataclass(frozen=True, slots=True)
+class NumaSampleIdentity:
+    """Stable logical identity for one sampled host-bank allocation."""
+
+    bank_name: str
+    layer_id: int | None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.bank_name, str)
+            or not self.bank_name
+            or self.bank_name != self.bank_name.strip()
+        ):
+            raise ValueError("NUMA sample bank_name must be a canonical non-empty string")
+        if self.layer_id is not None and (
+            isinstance(self.layer_id, bool)
+            or not isinstance(self.layer_id, int)
+            or self.layer_id < 0
+        ):
+            raise ValueError("NUMA sample layer_id must be a non-negative integer or None")
+
+    def as_dict(self) -> dict[str, object]:
+        return {"bank_name": self.bank_name, "layer_id": self.layer_id}
+
+
+@dataclass(frozen=True, slots=True)
 class NumaSample:
     status: NumaSampleStatus
     counts: tuple[tuple[int, int], ...] = ()
@@ -286,6 +311,11 @@ class NumaSample:
     error: str | None = None
     sampled_pages: int = 0
     errors: tuple[str, ...] = ()
+    identity: NumaSampleIdentity | None = None
+
+    def __post_init__(self) -> None:
+        if self.identity is not None and not isinstance(self.identity, NumaSampleIdentity):
+            raise ValueError("NUMA sample identity must be a NumaSampleIdentity or None")
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -296,6 +326,7 @@ class NumaSample:
             "sampled_pages": self.sampled_pages,
             "sampled_total": self.sampled_pages,
             "errors": list(self.errors),
+            "identity": None if self.identity is None else self.identity.as_dict(),
         }
 
 
@@ -366,6 +397,7 @@ class NumaPlacementController:
         *,
         stride: int = 4096,
         max_pages: int = 64,
+        identity: NumaSampleIdentity | None = None,
     ) -> NumaSample:
         """Read a bounded sample of page locations for this process only."""
         if stride <= 0 or max_pages <= 0:
@@ -376,6 +408,7 @@ class NumaPlacementController:
                     "unavailable",
                     error=self.fallback_reason,
                     errors=(self.fallback_reason,) if self.fallback_reason else (),
+                    identity=identity,
                 )
             )
         count = min(max_pages, max(0, (nbytes + stride - 1) // stride))
@@ -384,10 +417,14 @@ class NumaPlacementController:
             statuses = tuple(self.backend.move_pages(addresses))
         except Exception as error:
             detail = str(error)
-            return self._record_sample(NumaSample("unavailable", error=detail, errors=(detail,)))
+            return self._record_sample(
+                NumaSample("unavailable", error=detail, errors=(detail,), identity=identity)
+            )
         if len(statuses) != len(addresses):
             detail = "move_pages returned wrong sample length"
-            return self._record_sample(NumaSample("unavailable", error=detail, errors=(detail,)))
+            return self._record_sample(
+                NumaSample("unavailable", error=detail, errors=(detail,), identity=identity)
+            )
         counts: dict[int, int] = {}
         unknown = 0
         for status in statuses:
@@ -397,7 +434,13 @@ class NumaPlacementController:
                 unknown += 1
         status: NumaSampleStatus = "verified" if unknown == 0 else "partial"
         return self._record_sample(
-            NumaSample(status, tuple(sorted(counts.items())), unknown, sampled_pages=len(statuses))
+            NumaSample(
+                status,
+                tuple(sorted(counts.items())),
+                unknown,
+                sampled_pages=len(statuses),
+                identity=identity,
+            )
         )
 
     def _record_sample(self, result: NumaSample) -> NumaSample:
@@ -500,6 +543,7 @@ __all__ = [
     "NumaPlacementError",
     "NumaPlacementPlan",
     "NumaSample",
+    "NumaSampleIdentity",
     "NumaSyscallBackend",
     "linux_syscall_numbers",
     "resolve_allowed_numa_nodes",

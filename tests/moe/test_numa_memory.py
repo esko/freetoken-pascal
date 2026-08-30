@@ -9,6 +9,7 @@ from freetoken.moe.numa_memory import (
     NumaPlacementController,
     NumaPlacementError,
     NumaSample,
+    NumaSampleIdentity,
     NumaSyscallBackend,
     linux_syscall_numbers,
     resolve_allowed_numa_nodes,
@@ -180,6 +181,43 @@ def test_sample_classifies_target_and_cross_node_pages():
     assert sample["known_pages"] == 3
     assert sample["target_fraction"] == pytest.approx(1 / 3)
     assert sample["placement_match"] is False
+
+
+def test_per_bank_sample_retains_typed_identity_but_aggregate_does_not():
+    controller = NumaPlacementController(
+        resolve_numa_placement(
+            "bind", 0, enforce=True, allowed=AllowedNumaNodes((0,), "available", "fixture")
+        ),
+        FakeBackend(statuses=(0,)),
+    )
+    controller.apply(0x2000, 4096, private_anonymous=True, before_touch=True)
+    identity = NumaSampleIdentity(bank_name="gate_up", layer_id=7)
+    controller.sample(0x2000, 4096, max_pages=1, identity=identity)
+    telemetry = controller.telemetry()
+    assert telemetry["sample"]["identity"] is None
+    assert telemetry["sample_banks"][0]["identity"] == {
+        "bank_name": "gate_up",
+        "layer_id": 7,
+    }
+
+
+@pytest.mark.parametrize(
+    ("bank_name", "layer_id", "message"),
+    [
+        ("", 0, "bank_name"),
+        (" gate_up", 0, "bank_name"),
+        ("gate_up", -1, "layer_id"),
+        ("gate_up", True, "layer_id"),
+    ],
+)
+def test_sample_identity_rejects_ambiguous_values(bank_name, layer_id, message):
+    with pytest.raises(ValueError, match=message):
+        NumaSampleIdentity(bank_name=bank_name, layer_id=layer_id)
+
+
+def test_sample_rejects_untyped_identity():
+    with pytest.raises(ValueError, match="NumaSampleIdentity"):
+        NumaSample("verified", identity=object())
 
 
 def test_sample_target_match_is_unknown_without_known_pages():
