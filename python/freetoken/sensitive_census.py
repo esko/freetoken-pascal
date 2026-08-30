@@ -56,8 +56,10 @@ _CLASSES = frozenset(
         "shared_expert_gate_scale",
         "gdn_in_proj_a",
         "gdn_in_proj_b",
+        "gdn_state_projection",
         "gdn_control",
         "gdn_output_gate",
+        "hyperconnection_control",
         "residual_write_gate",
         "norm",
         "reference_control",
@@ -134,6 +136,8 @@ def classify_sensitive_tensor(
         return "gdn_in_proj_a"
     if _ends_with_any(name, (".ssm_beta.weight", ".in_proj_b.weight")):
         return "gdn_in_proj_b"
+    if _ends_with_any(name, (".attn_qkv.weight", ".linear_attn.in_proj_qkv.weight")):
+        return "gdn_state_projection"
     if _ends_with_any(
         name,
         (
@@ -163,6 +167,17 @@ def classify_sensitive_tensor(
         ),
     ):
         return "residual_write_gate"
+    if re.fullmatch(r"output_hc_(?:up|down)\.weight", name) or re.fullmatch(
+        r"blk\.\d+\.hc_(?:attn|ffn)_(?:up|down)\.weight", name
+    ) or _ends_with_any(
+        name,
+        (
+            ".input_mix_weight_up.weight",
+            ".input_mix_weight_down.weight",
+            ".input_mix_weight_down_block_inject.weight",
+        ),
+    ):
+        return "hyperconnection_control"
 
     # Norms are small, continuously active tensors.  This suffix set is shared by
     # GGUF (ssm_norm, attn_q_norm, indexer.q_norm) and source names (hc_norm,
@@ -238,7 +253,12 @@ def _rationale(tensor_class: str, quant_format: str) -> str:
             "The shared-expert gate contributes on every layer/token and its scale must be "
             "validated independently."
         )
-    if tensor_class in {"gdn_in_proj_a", "gdn_in_proj_b", "gdn_control"}:
+    if tensor_class in {
+        "gdn_in_proj_a",
+        "gdn_in_proj_b",
+        "gdn_state_projection",
+        "gdn_control",
+    }:
         return (
             "GDN state-driving/control values recur across decode steps; scale and precision "
             "errors can accumulate."
@@ -252,6 +272,11 @@ def _rationale(tensor_class: str, quant_format: str) -> str:
         return (
             "Hyperconnection/residual writes affect the active stream every layer and require "
             "an explicit precision island."
+        )
+    if tensor_class == "hyperconnection_control":
+        return (
+            "Hyperconnection mix projections control the active residual streams on every layer; "
+            "they require an explicit precision decision outside expert-bank rules."
         )
     if tensor_class == "norm":
         return (

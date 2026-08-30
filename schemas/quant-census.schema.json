@@ -175,8 +175,9 @@
         "class": {
           "enum": [
             "moe_router", "shared_expert_gate", "shared_expert_gate_scale",
-            "gdn_in_proj_a", "gdn_in_proj_b", "gdn_control", "gdn_output_gate",
-            "residual_write_gate", "norm", "reference_control"
+            "gdn_in_proj_a", "gdn_in_proj_b", "gdn_state_projection", "gdn_control",
+            "gdn_output_gate", "hyperconnection_control", "residual_write_gate", "norm",
+            "reference_control"
           ]
         },
         "dtype": {"type": ["string", "null"]},

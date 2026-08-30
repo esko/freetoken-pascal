@@ -37,8 +37,8 @@ down projections may use different formats and the down format varies by layer.
 For a profile census, pass `--profile reference-q4` or `--profile throughput-q3` and
 record immutable source/converter provenance with `--conversion-provenance`. The output
 then contains `sensitive_tensors` records for the exact router, shared-expert gate,
-reconciled GDN `in_proj_a`/`in_proj_b` (`ssm_alpha`/`ssm_beta`) and recurrent controls,
-hyperconnection write gates, and norm identities. Each record includes `class`, source
+reconciled GDN state projections, `in_proj_a`/`in_proj_b` (`ssm_alpha`/`ssm_beta`) and
+recurrent controls, hyperconnection mix/write controls, and norm identities. Each record includes `class`, source
 `dtype`/`quant_format`, structured `scale_representation`, `conversion_provenance`,
 `selected_precision`, promotion status/evidence, and a rationale. The accompanying
 `sensitive_policy` scopes ordinary quantization to explicit routed-expert identities and
@@ -53,7 +53,7 @@ positive controls at `tests/fixtures/sensitive/shared-gate-mis-scaled.json` and
 `tests/fixtures/sensitive/gdn-control-perturbed.json` exercise tensor-level rejection
 of a mis-scaled shared gate and perturbed GDN control. They do not qualify the later
 long-horizon semantic gate owned by Issue #14. The checked-in profiles are therefore
-census-only: their existing Q8 GDN output-gate records are marked `unqualified`, and
+census-only: their existing Q8 GDN and hyperconnection-control records are marked `unqualified`, and
 `serving_qualification` remains blocked until a real parity/quality evidence artifact
 provides a qualified per-class status.
 

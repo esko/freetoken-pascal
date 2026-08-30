@@ -45,6 +45,12 @@ def _records() -> list[dict[str, object]]:
             "quant_type": 0,
         },
         {
+            "name": "blk.0.attn_qkv.weight",
+            "shape": [5632, 2560],
+            "quant_name": "F32",
+            "quant_type": 0,
+        },
+        {
             "name": "blk.0.ssm_a",
             "shape": [48],
             "quant_name": "F32",
@@ -63,6 +69,12 @@ def _records() -> list[dict[str, object]]:
             "quant_type": 0,
         },
         {
+            "name": "blk.0.hc_attn_up.weight",
+            "shape": [10240, 512],
+            "quant_name": "F32",
+            "quant_type": 0,
+        },
+        {
             "name": "blk.0.ssm_norm.weight",
             "shape": [128],
             "quant_name": "F32",
@@ -76,9 +88,12 @@ def test_sensitive_census_classifies_reconciled_tensor_identities() -> None:
     assert classify_sensitive_tensor("blk.0.ffn_gate_inp_shexp.weight") == "shared_expert_gate"
     assert classify_sensitive_tensor("blk.0.ssm_alpha.weight") == "gdn_in_proj_a"
     assert classify_sensitive_tensor("blk.0.ssm_beta.weight") == "gdn_in_proj_b"
+    assert classify_sensitive_tensor("blk.0.attn_qkv.weight") == "gdn_state_projection"
     assert classify_sensitive_tensor("blk.0.ssm_a") == "gdn_control"
     assert classify_sensitive_tensor("blk.0.ssm_dt.bias") == "gdn_control"
     assert classify_sensitive_tensor("blk.0.hc_attn_inject.weight") == "residual_write_gate"
+    assert classify_sensitive_tensor("blk.0.hc_attn_up.weight") == "hyperconnection_control"
+    assert classify_sensitive_tensor("output_hc_down.weight") == "hyperconnection_control"
     assert classify_sensitive_tensor("blk.0.ssm_norm.weight") == "norm"
     assert classify_sensitive_tensor("blk.0.ffn_gate_exps.weight") is None
 
@@ -296,13 +311,15 @@ def test_checked_in_qwen_profiles_carry_complete_sensitive_census(
     records = census["sensitive_tensors"]
     validate_sensitive_tensor_census(records, expert_rule=census["sensitive_policy"]["expert_rule"])
     assert census["sensitive_policy"]["profile"] == profile
-    assert len(records) == 553
+    assert len(records) == 783
     assert {record["class"] for record in records} >= {
         "moe_router",
         "shared_expert_gate",
         "gdn_in_proj_a",
         "gdn_in_proj_b",
+        "gdn_state_projection",
         "gdn_control",
+        "hyperconnection_control",
         "residual_write_gate",
         "norm",
     }
@@ -313,7 +330,7 @@ def test_checked_in_qwen_profiles_carry_complete_sensitive_census(
     )
     assert {record["selected_precision"] for record in records} == {"F32", "Q8_0"}
     q8_records = [record for record in records if record["selected_precision"] == "Q8_0"]
-    assert len(q8_records) == 36
+    assert len(q8_records) == 266
     assert all(record["promotion_status"] == "unqualified" for record in q8_records)
     assert all(record["promotion_evidence"] is None for record in q8_records)
     with pytest.raises(ValueError, match="blocked by unqualified"):
