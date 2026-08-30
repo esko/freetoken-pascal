@@ -1024,7 +1024,7 @@ def test_moe_route_observer_snapshots_semantic_ids_and_weights(monkeypatch) -> N
     assert observed_ids.tolist() == [[-1, -1]]
     assert events[0]["ids"].tolist() == [[4, 1]]
     torch.testing.assert_close(events[0]["weights"], torch.tensor([[0.7, 0.2]]))
-    assert route_calls[0]["router_mode"] == "auto"
+    assert route_calls[0]["router_mode"] == "torch-reference"
 
 
 def test_moe_route_observer_excludes_padded_rows(monkeypatch) -> None:
@@ -1063,7 +1063,7 @@ def test_moe_route_observer_excludes_padded_rows(monkeypatch) -> None:
     assert events[0]["valid_token_count"] == 2
     assert events[0]["padded_token_count"] == 3
     assert events[0]["request_uids"].tolist() == [101]
-    assert route_calls[0]["router_mode"] == "auto"
+    assert route_calls[0]["router_mode"] == "torch-reference"
 
 
 def test_fused_backend_observer_reports_the_executed_route(monkeypatch) -> None:

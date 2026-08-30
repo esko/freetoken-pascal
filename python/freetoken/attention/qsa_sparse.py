@@ -112,6 +112,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
         )
         self.device = self.kvcache.device
         self.dtype = self.kvcache.dtype
+        self.reference_only = bool(getattr(config, "reference_only", False))
         self.index_head_dim = self.kvcache.index_head_dim
         self.ratio = self.kvcache.index_ratio
         self.ring_capacity = self.kvcache.ring_capacity
@@ -174,6 +175,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
                     max_position=rotary.max_position,
                     base=rotary.base,
                     rope_scaling=tuple(rotary.scaling.items()) if rotary.scaling else None,
+                    allow_reference_geometry=self.reference_only,
                 )
             self._index_cos_sin = rope._cos_sin_cache.to(self.device)
         return self._index_cos_sin

@@ -14,7 +14,6 @@ import functools
 import torch
 import triton
 import triton.language as tl
-
 from freetoken.utils.arch import is_sm90_supported
 
 
@@ -61,6 +60,13 @@ def shared_gate_sigmoid(hidden_states: torch.Tensor, gate_weight: torch.Tensor) 
     num_tokens, hidden_dim = hidden_states.shape
     assert hidden_states.stride(1) == 1, "shared gate requires unit inner stride"
     assert gate_weight.shape == (hidden_dim,) and gate_weight.is_contiguous()
+
+    if not hidden_states.is_cuda:
+        # The fused kernel is CUDA-only.  Keep the exact public operation
+        # available to CPU/reference model composition and parity tests.
+        return torch.sigmoid(torch.sum(hidden_states.float() * gate_weight.float(), dim=-1)).to(
+            dtype=torch.float32
+        )
 
     gate = torch.empty(num_tokens, dtype=torch.float32, device=hidden_states.device)
     _gate_sigmoid_kernel[(num_tokens,)](
@@ -115,6 +121,9 @@ def shared_gate_mul_add(
     assert shared.shape == routed.shape
     assert routed.stride(1) == 1 and shared.stride(1) == 1
     assert gate.shape == (num_tokens,)
+
+    if not routed.is_cuda:
+        return routed + gate.to(dtype=shared.dtype).view(num_tokens, 1) * shared
 
     out = torch.empty_like(routed)
     block_size = min(triton.next_power_of_2(hidden_dim), 2048)

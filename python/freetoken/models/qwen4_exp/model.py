@@ -80,6 +80,14 @@ class _SparseMoE(Qwen4ExpMoE):
         eager = bool(getattr(self.experts, "requires_moe_execution_context", False))
         if execution_context is not None:
             _validate_eager_moe_context(execution_context)
+        if (
+            not hidden_states.is_cuda
+            and execution_context is None
+            and hasattr(self.experts, "_route_and_observe")
+            and hasattr(self.experts, "gate_up_proj")
+            and hasattr(self.experts, "down_proj")
+        ):
+            return super().forward(hidden_states, debug_observer=debug_observer)
         shared_gate_weight = getattr(self.shared_expert_gate, "weight", None)
         if (
             not eager

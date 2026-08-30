@@ -10,6 +10,8 @@ from .base import StateLessOP
 
 
 class RotaryEmbedding(StateLessOP):
+    _FUSED_HEAD_SIZES = frozenset((64, 128, 256, 512))
+
     def __init__(
         self,
         head_size: int,
@@ -20,10 +22,13 @@ class RotaryEmbedding(StateLessOP):
         proportional: bool = False,
         attention_factor: float = 1.0,
         is_neox: bool = True,
+        allow_reference_geometry: bool = False,
     ) -> None:
         super().__init__()
         self.head_size = head_size
         self.rotary_dim = rotary_dim
+        self.allow_reference_geometry = allow_reference_geometry
+        self._fused_geometry_supported = head_size in self._FUSED_HEAD_SIZES
         # NeoX (half-rotation, HF default) vs GPT-J interleaved (adjacent pairs,
         # ``rope_interleave`` models: GLM MLA lineage). Both underlying kernels
         # accept the flag; the cos/sin cache layout is identical.
@@ -57,7 +62,13 @@ class RotaryEmbedding(StateLessOP):
         sin = freqs.sin() * attention_factor
         # buffer, so don't load/save
         self._cos_sin_cache = torch.cat((cos, sin), dim=-1)
-        assert self.head_size in [64, 128, 256, 512]
+        if self.head_size <= 0 or self.head_size % 2:
+            raise ValueError("rotary head_size must be a positive even number")
+        if not self._fused_geometry_supported and not self.allow_reference_geometry:
+            raise ValueError(
+                "rotary head_size must be one of 64, 128, 256, or 512; "
+                "set allow_reference_geometry=True for CPU-only reference fixtures"
+            )
 
         from freetoken.kernel.backend import is_flashinfer_usable
 
@@ -68,12 +79,48 @@ class RotaryEmbedding(StateLessOP):
 
         self.apply_rope_with_cos_sin_cache_inplace = apply_rope_with_cos_sin_cache_inplace
 
+    def _forward_reference(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if query.shape[0] != positions.numel() or key.shape[0] != positions.numel():
+            raise ValueError("rope positions and token dimensions must agree")
+        if query.shape[-1] % self.head_size or key.shape[-1] % self.head_size:
+            raise ValueError("rope query/key dimensions must be whole head counts")
+        if self.rotary_dim > self.head_size:
+            raise ValueError("rotary_dim cannot exceed head_size")
+        cache = self._cos_sin_cache.to(device=query.device)
+        cos, sin = cache[positions.to(device=query.device, dtype=torch.long)].chunk(2, dim=-1)
+        q = query.view(query.shape[0], -1, self.head_size)
+        k = key.view(key.shape[0], -1, self.head_size)
+        q_rot, q_tail = q[..., : self.rotary_dim], q[..., self.rotary_dim :]
+        k_rot, k_tail = k[..., : self.rotary_dim], k[..., self.rotary_dim :]
+        if self.is_neox:
+            half = self.rotary_dim // 2
+            q_neg_half = torch.cat((-q_rot[..., half:], q_rot[..., :half]), dim=-1)
+            k_neg_half = torch.cat((-k_rot[..., half:], k_rot[..., :half]), dim=-1)
+            cos = torch.cat((cos, cos), dim=-1).unsqueeze(1)
+            sin = torch.cat((sin, sin), dim=-1).unsqueeze(1)
+        else:
+            q_neg_half = torch.stack((-q_rot[..., 1::2], q_rot[..., 0::2]), dim=-1).flatten(-2)
+            k_neg_half = torch.stack((-k_rot[..., 1::2], k_rot[..., 0::2]), dim=-1).flatten(-2)
+            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(1)
+            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(1)
+        q.copy_(torch.cat((q_rot * cos + q_neg_half * sin, q_tail), dim=-1))
+        k.copy_(torch.cat((k_rot * cos + k_neg_half * sin, k_tail), dim=-1))
+        return query, key
+
     def forward(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not query.is_cuda:
+            return self._forward_reference(positions, query, key)
+        self._validate_fused_geometry(query.device)
         self.apply_rope_with_cos_sin_cache_inplace(
             positions=positions,
             query=query,
@@ -84,6 +131,13 @@ class RotaryEmbedding(StateLessOP):
         )
         return query, key
 
+    def _validate_fused_geometry(self, device: torch.device) -> None:
+        if device.type == "cuda" and not self._fused_geometry_supported:
+            raise RuntimeError(
+                f"CUDA fused rotary does not support head_size={self.head_size}; "
+                "the geometry is CPU-reference-only"
+            )
+
 
 def _get_rope(
     head_dim: int,
@@ -92,13 +146,28 @@ def _get_rope(
     base: float,
     rope_scaling: Dict[str, Any] | None = None,
     is_neox: bool = True,
+    allow_reference_geometry: bool = False,
 ) -> RotaryEmbedding:
     if rope_scaling is None:
-        return RotaryEmbedding(head_dim, rotary_dim, max_position, base, is_neox=is_neox)
+        return RotaryEmbedding(
+            head_dim,
+            rotary_dim,
+            max_position,
+            base,
+            is_neox=is_neox,
+            allow_reference_geometry=allow_reference_geometry,
+        )
     # need to test some cases:
     match rope_scaling["rope_type"]:
         case "default":
-            return RotaryEmbedding(head_dim, rotary_dim, max_position, base, is_neox=is_neox)
+            return RotaryEmbedding(
+                head_dim,
+                rotary_dim,
+                max_position,
+                base,
+                is_neox=is_neox,
+                allow_reference_geometry=allow_reference_geometry,
+            )
 
         case "proportional":
             return RotaryEmbedding(
@@ -108,6 +177,7 @@ def _get_rope(
                 base,
                 proportional=True,
                 is_neox=is_neox,
+                allow_reference_geometry=allow_reference_geometry,
             )
 
         case "llama3":
@@ -133,7 +203,13 @@ def _get_rope(
                 return factor * inv_freq
 
             return RotaryEmbedding(
-                head_dim, rotary_dim, max_position, base, post_process, is_neox=is_neox
+                head_dim,
+                rotary_dim,
+                max_position,
+                base,
+                post_process,
+                is_neox=is_neox,
+                allow_reference_geometry=allow_reference_geometry,
             )
 
         case "yarn":
@@ -197,6 +273,7 @@ def _get_rope(
                 post_process,
                 attention_factor=float(attention_factor),
                 is_neox=is_neox,
+                allow_reference_geometry=allow_reference_geometry,
             )
 
     raise ValueError(f"Unsupported {rope_scaling = }")
@@ -218,6 +295,7 @@ def get_rope(
     base: float,
     rope_scaling: Tuple[Tuple[str, Any], ...] | None = None,
     is_neox: bool = True,
+    allow_reference_geometry: bool = False,
 ) -> RotaryEmbedding:
     rope_map = dict(rope_scaling) if rope_scaling is not None else None
     t = torch.tensor([])
@@ -228,8 +306,24 @@ def get_rope(
                 "We cannot use meta device for rope. Please call set_rope_device() first."
             )
         with torch.device(_ROPE_DEVICE):
-            return _get_rope(head_dim, rotary_dim, max_position, base, rope_map, is_neox)
-    return _get_rope(head_dim, rotary_dim, max_position, base, rope_map, is_neox)
+            return _get_rope(
+                head_dim,
+                rotary_dim,
+                max_position,
+                base,
+                rope_map,
+                is_neox,
+                allow_reference_geometry,
+            )
+    return _get_rope(
+        head_dim,
+        rotary_dim,
+        max_position,
+        base,
+        rope_map,
+        is_neox,
+        allow_reference_geometry,
+    )
 
 
 __all__ = ["get_rope", "RotaryEmbedding", "set_rope_device"]

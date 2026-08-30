@@ -134,6 +134,7 @@ class Qwen4ExpAttention(BaseOP):
             max_position=rotary.max_position,
             base=rotary.base,
             rope_scaling=tuple(rotary.scaling.items()) if rotary.scaling else None,
+            allow_reference_geometry=config.reference_only,
         )
         self.indexer = Qwen4ExpIndexer(config, layer_id)
 
@@ -159,12 +160,13 @@ class Qwen4ExpAttention(BaseOP):
 
 
 class TorchDenseQSAReference:
-    """Dense oracle for :class:`QSAAttentionBackend` (fp32 math): attend to every visible token.
+    """CPU-only dense reference for :class:`QSAAttentionBackend` (fp32 math).
 
     QSA is exactly dense while a request sees at most ``index_budget + index_ratio - 1`` tokens
     (every complete block is selected), so this doubles as the equivalence oracle for the sparse backend. It
     keeps its own ``[slot, position]`` KV instead of a paged pool, so it needs no engine wiring;
-    it is a test/reference object and is never registered as an attention backend.
+    it is a test/reference object and is never registered as a production attention backend. It
+    does not claim sparse-kernel, long-context, CUDA, or P4 performance.
     """
 
     def __init__(

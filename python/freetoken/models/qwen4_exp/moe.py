@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn.functional as F
+
 from freetoken.kernel.triton.moe_shared_gate import shared_gate_mul_add, shared_gate_sigmoid
+from freetoken.layers import silu_and_mul
 from freetoken.layers.moe import make_moe_layer
 from freetoken.models.qwen3_5_moe.moe import Qwen3_5MoE
 
@@ -33,10 +37,58 @@ class Qwen4ExpMoE(Qwen3_5MoE):
             weight_format="fp8_block",
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        debug_observer: Callable[[str, dict[str, object]], None] | None = None,
+    ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if not hidden_states.is_cuda:
+            if not all(hasattr(self.experts, name) for name in ("gate_up_proj", "down_proj")):
+                raise RuntimeError(
+                    "Qwen4 CPU reference MoE requires resident gate_up_proj/down_proj; "
+                    "offload and adapter layouts are not supported by this path"
+                )
+            if getattr(self.experts, "weight_format", "bf16") != "bf16":
+                raise RuntimeError(
+                    "Qwen4 CPU reference MoE requires unquantized resident expert weights"
+                )
         router_logits = self.gate.forward(hidden_states)
+        if not hidden_states.is_cuda:
+            # The model's CUDA MoE backends are intentionally not available on a
+            # CPU-only host.  Reuse the model-neutral reference dispatcher for
+            # the tiny text oracle, retaining exactly the same router, shared
+            # gate, and expert tensors as the production layer.
+            from .reference import routed_shared_expert_reference
+
+            shared = self.shared_expert.forward(hidden_states)
+            shared_gate = self.shared_expert_gate.forward(hidden_states)
+            topk_weights, topk_ids = self.experts._route_and_observe(
+                hidden_states, router_logits, debug_observer
+            )
+            gate_up = self.experts.gate_up_proj
+            down = self.experts.down_proj
+
+            def expert_forward(x: torch.Tensor, expert_id: int) -> torch.Tensor:
+                intermediate = silu_and_mul(F.linear(x, gate_up[expert_id]))
+                return F.linear(intermediate, down[expert_id])
+
+            experts = [
+                lambda x, expert_id=expert_id: expert_forward(x, expert_id)
+                for expert_id in range(self.experts.num_experts)
+            ]
+            output, _, _ = routed_shared_expert_reference(
+                hidden_states,
+                router_logits,
+                experts,
+                topk=self.experts.top_k,
+                shared_output=shared,
+                shared_gate=shared_gate,
+                renormalize=self.experts.renormalize,
+                routing=(topk_weights, topk_ids),
+            )
+            return output.view(num_tokens, hidden_dim)
         shared = self.shared_expert.forward(hidden_states)
         gate = shared_gate_sigmoid(hidden_states, self.shared_expert_gate.weight.view(-1))
         routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)

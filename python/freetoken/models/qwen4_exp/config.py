@@ -329,6 +329,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
         # pool.  The old naive-only requirement belonged to the pre-slot-state adapter.
         requires_naive_cache=False,
         supports_cuda_graph=False,
+        reference_only=bool(getattr(hf_config, "reference_only", False)),
         slot_states=ple_slot_states(qwen4_args),
     )
 

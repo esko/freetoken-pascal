@@ -132,7 +132,13 @@ class MoELayer(BaseOP):
             renormalize=self.renormalize,
             # Keep direct/legacy objects (which may bypass __init__) on the
             # constructor's default auto dispatch semantics.
-            router_mode=getattr(self, "router_mode", "auto"),
+            # A CPU/reference execution must never discover and launch a Triton
+            # route merely because this process also has a CUDA installation.
+            router_mode=(
+                "torch-reference"
+                if not hidden_states.is_cuda
+                else getattr(self, "router_mode", "auto")
+            ),
             router_observer=router_observer,
         )
         if observer is not None:
