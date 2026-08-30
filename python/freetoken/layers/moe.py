@@ -130,7 +130,9 @@ class MoELayer(BaseOP):
             gating_output=router_logits,
             topk=self.top_k,
             renormalize=self.renormalize,
-            router_mode=self.router_mode,
+            # Keep direct/legacy objects (which may bypass __init__) on the
+            # constructor's default auto dispatch semantics.
+            router_mode=getattr(self, "router_mode", "auto"),
             router_observer=router_observer,
         )
         if observer is not None:
