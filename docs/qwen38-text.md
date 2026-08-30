@@ -29,6 +29,9 @@ batch metadata separate from graph maximum-batch buffers, and accounts for the r
 128 MiB score tile.
 It does not allocate CUDA memory or alter QSA dispatch, and a later placement owner may consume its
 capacity telemetry as a preflight input.
+The `freetoken.engine.qsa_placement` adapter binds its derived persistent and transient categories
+to a placement plan or canonical profile and rejects arbitrary QSA byte overrides.
+It partitions the active eager or capture high-water exactly across #73's ten buckets, while dual-GPU ownership remains deferred until rank-local geometry is explicit.
 
 ## Correctness controls
 

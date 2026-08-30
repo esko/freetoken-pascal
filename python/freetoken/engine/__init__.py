@@ -40,6 +40,7 @@ __all__ = [
     "PLACEMENT_PROFILE_IDENTITY_SCHEMA_NAME",
     "PLACEMENT_PROFILE_SCHEMA_NAME",
     "PLACEMENT_PROFILE_SCHEMA_VERSION",
+    "QSA_PLACEMENT_CATEGORIES",
     "BackoffDecision",
     "BackoffProfile",
     "BackoffStateMachine",
@@ -55,9 +56,15 @@ __all__ = [
     "PlacementPlannerError",
     "PlacementProfile",
     "PlacementProfileIdentity",
+    "QSAPlacementBinding",
+    "QSAPlacementError",
+    "adapt_qsa_workspace_to_placement",
+    "bind_qsa_workspace",
     "canonical_json_bytes",
+    "derive_qsa_placement_categories",
     "evaluate_canary",
     "plan_placement",
+    "validate_qsa_workspace_placement",
 ]
 
 
@@ -74,4 +81,19 @@ def __getattr__(name: str):
         from .sample import BatchSamplingArgs
 
         return BatchSamplingArgs
+    if name in {
+        "QSA_PLACEMENT_CATEGORIES",
+        "QSAPlacementBinding",
+        "QSAPlacementError",
+        "adapt_qsa_workspace_to_placement",
+        "bind_qsa_workspace",
+        "bind_qsa_workspace_to_placement",
+        "derive_qsa_placement_categories",
+        "qsa_placement_categories",
+        "validate_qsa_workspace_placement",
+    }:
+        import importlib
+
+        qsa_placement = importlib.import_module(".qsa_placement", __name__)
+        return getattr(qsa_placement, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
