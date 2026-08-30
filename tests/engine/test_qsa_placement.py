@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 import sys
 from dataclasses import replace
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 
 import pytest
 from freetoken.engine.placement_plan import (
@@ -299,11 +301,38 @@ def test_direct_binding_rejects_tampering_invalid_digest_and_bad_gpu_set() -> No
         QSAPlacementBinding(workspace, categories, (gpu, replace(gpu, rank=1, gpu_uuid="gpu-1")))
 
 
+def test_binding_accepts_already_loaded_canonical_runtime_qsa_types() -> None:
+    source = Path(__file__).resolve().parents[2] / "python/freetoken/attention/qsa_workspace.py"
+    spec = spec_from_file_location("freetoken.attention.qsa_workspace", source)
+    assert spec is not None and spec.loader is not None
+    runtime_module = module_from_spec(spec)
+    sys.modules[spec.name] = runtime_module
+    spec.loader.exec_module(runtime_module)
+
+    standalone = _inputs()
+    runtime_inputs = runtime_module.QSAWorkspaceInputs(
+        **{name: getattr(standalone, name) for name in standalone.__dataclass_fields__}
+    )
+    runtime_workspace = runtime_module.calculate_qsa_workspace(runtime_inputs)
+    gpu = _gpu(standalone)
+    categories = _qsa_categories(standalone)
+
+    try:
+        assert bind_qsa_workspace(runtime_inputs, gpu).peak_bytes == 1436
+        binding = QSAPlacementBinding(runtime_workspace, categories, (gpu,))
+        assert binding.peak_bytes == 1436
+    finally:
+        del sys.modules[spec.name]
+
+
 def test_qsa_placement_module_imports_without_torch() -> None:
     script = """
+import types
 import sys
+sys.modules['torch'] = types.ModuleType('torch')
 import freetoken.engine.qsa_placement
-assert not any(name == 'torch' or name.startswith('torch.') for name in sys.modules)
+assert not any(name.startswith('freetoken.attention') for name in sys.modules)
+assert [name for name in sys.modules if name == 'torch' or name.startswith('torch.')] == ['torch']
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

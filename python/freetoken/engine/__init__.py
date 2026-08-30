@@ -29,15 +29,6 @@ from .placement_profile import (
     PlacementProfileIdentity,
     canonical_json_bytes,
 )
-from .qsa_placement import (
-    QSA_PLACEMENT_CATEGORIES,
-    QSAPlacementBinding,
-    QSAPlacementError,
-    adapt_qsa_workspace_to_placement,
-    bind_qsa_workspace,
-    derive_qsa_placement_categories,
-    validate_qsa_workspace_placement,
-)
 
 if TYPE_CHECKING:
     from .config import EngineConfig
@@ -90,4 +81,19 @@ def __getattr__(name: str):
         from .sample import BatchSamplingArgs
 
         return BatchSamplingArgs
+    if name in {
+        "QSA_PLACEMENT_CATEGORIES",
+        "QSAPlacementBinding",
+        "QSAPlacementError",
+        "adapt_qsa_workspace_to_placement",
+        "bind_qsa_workspace",
+        "bind_qsa_workspace_to_placement",
+        "derive_qsa_placement_categories",
+        "qsa_placement_categories",
+        "validate_qsa_workspace_placement",
+    }:
+        import importlib
+
+        qsa_placement = importlib.import_module(".qsa_placement", __name__)
+        return getattr(qsa_placement, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -503,14 +503,17 @@ def test_profile_module_is_torch_free() -> None:
     script = """
 import json
 import sys
+import types
 
+sys.modules["torch"] = types.ModuleType("torch")
 before = set(sys.modules)
 import freetoken.engine.placement_profile  # noqa: F401
 added = sorted(
     name for name in set(sys.modules) - before if name == "torch" or name.startswith("torch.")
 )
-print(json.dumps({"torch_modules_added": added}))
-if added:
+attention = sorted(name for name in sys.modules if name.startswith("freetoken.attention"))
+print(json.dumps({"torch_modules_added": added, "attention_modules": attention}))
+if added or attention:
     raise SystemExit(1)
 """
     environment = os.environ.copy()

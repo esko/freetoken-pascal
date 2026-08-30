@@ -34,17 +34,11 @@ class QSAPlacementError(PlacementInputError):
 
 
 def _qsa_workspace_types() -> tuple[type, type, Any, Any]:
-    """Load QSA accounting through the package or its standalone torch-free seam."""
-    try:
-        from freetoken.attention.qsa_workspace import (
-            QSAWorkspaceInputs,
-            QSAWorkspacePlan,
-            calculate_qsa_workspace,
-            qsa_topk_scratch_width,
-        )
-
-        return QSAWorkspaceInputs, QSAWorkspacePlan, calculate_qsa_workspace, qsa_topk_scratch_width
-    except ModuleNotFoundError:
+    """Load QSA accounting without importing the attention package or Torch."""
+    module = sys.modules.get("freetoken.attention.qsa_workspace")
+    if module is None:
+        module = sys.modules.get("freetoken._h0_qsa_workspace")
+    if module is None:
         source = Path(__file__).resolve().parents[1] / "attention" / "qsa_workspace.py"
         spec = importlib.util.spec_from_file_location("freetoken._h0_qsa_workspace", source)
         if spec is None or spec.loader is None:
@@ -52,12 +46,15 @@ def _qsa_workspace_types() -> tuple[type, type, Any, Any]:
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
+    try:
         return (
             module.QSAWorkspaceInputs,
             module.QSAWorkspacePlan,
             module.calculate_qsa_workspace,
             module.qsa_topk_scratch_width,
         )
+    except AttributeError as exc:
+        raise QSAPlacementError("QSA workspace module has an incomplete schema") from exc
 
 
 (
@@ -93,26 +90,86 @@ def _mul(values: tuple[int, ...], label: str) -> int:
 def _workspace_plan(value: QSAWorkspacePlan | QSAWorkspaceInputs) -> QSAWorkspacePlan:
     if isinstance(value, QSAWorkspaceInputs):
         return calculate_qsa_workspace(value)
-    if not isinstance(value, QSAWorkspacePlan):
+    if _is_runtime_inputs(value):
+        return calculate_qsa_workspace(_coerce_workspace_inputs(value))
+    if isinstance(value, QSAWorkspacePlan):
+        request = value.request
+    elif _is_runtime_plan(value):
+        request = _coerce_workspace_inputs(value.request)
+    else:
         raise QSAPlacementError(
             "QSA workspace must be QSAWorkspaceInputs or a calculated QSAWorkspacePlan"
         )
     try:
-        recalculated = calculate_qsa_workspace(value.request)
+        recalculated = calculate_qsa_workspace(request)
     except (TypeError, ValueError) as exc:
         raise QSAPlacementError(f"QSA workspace plan request is invalid: {exc}") from exc
     if (
-        value.inventory != recalculated.inventory
+        _inventory_payload(value.inventory) != _inventory_payload(recalculated.inventory)
         or value.required_bytes != recalculated.required_bytes
         or value.persistent_bytes != recalculated.persistent_bytes
         or value.capture_resident_bytes != recalculated.capture_resident_bytes
         or value.eager_transient_peak_bytes != recalculated.eager_transient_peak_bytes
-        or value.telemetry != recalculated.telemetry
+        or _telemetry_payload(value.telemetry) != _telemetry_payload(recalculated.telemetry)
     ):
         raise QSAPlacementError(
             "QSA workspace plan contains caller-supplied or inconsistent derived bytes"
         )
     return recalculated
+
+
+def _canonical_qsa_module() -> Any | None:
+    return sys.modules.get("freetoken.attention.qsa_workspace")
+
+
+def _is_runtime_plan(value: Any) -> bool:
+    module = _canonical_qsa_module()
+    return module is not None and isinstance(value, getattr(module, "QSAWorkspacePlan", ()))
+
+
+def _is_runtime_inputs(value: Any) -> bool:
+    module = _canonical_qsa_module()
+    return module is not None and isinstance(value, getattr(module, "QSAWorkspaceInputs", ()))
+
+
+def _coerce_workspace_inputs(value: Any) -> QSAWorkspaceInputs:
+    if isinstance(value, QSAWorkspaceInputs):
+        return value
+    module = _canonical_qsa_module()
+    runtime_type = getattr(module, "QSAWorkspaceInputs", ()) if module is not None else ()
+    if runtime_type and isinstance(value, runtime_type):
+        try:
+            return QSAWorkspaceInputs(
+                **{name: getattr(value, name) for name in QSAWorkspaceInputs.__dataclass_fields__}
+            )
+        except (TypeError, ValueError) as exc:
+            raise QSAPlacementError(f"QSA workspace request is invalid: {exc}") from exc
+    raise QSAPlacementError("QSA workspace request must be a calculated QSAWorkspaceInputs")
+
+
+def _inventory_payload(inventory: Any) -> dict[str, Any]:
+    try:
+        names = tuple(inventory)
+        return {
+            name: {
+                "name": inventory[name].name,
+                "bytes": inventory[name].bytes,
+                "components": dict(inventory[name].components),
+                "shapes": {
+                    component: tuple(shape) for component, shape in inventory[name].shapes.items()
+                },
+            }
+            for name in names
+        }
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise QSAPlacementError("QSA workspace inventory is malformed") from exc
+
+
+def _telemetry_payload(telemetry: Any) -> Any:
+    try:
+        return telemetry.as_dict()
+    except AttributeError as exc:
+        raise QSAPlacementError("QSA workspace telemetry is malformed") from exc
 
 
 def _category_totals(
@@ -353,7 +410,9 @@ class QSAPlacementBinding:
     profile_digest: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.workspace, QSAWorkspacePlan):
+        if not isinstance(self.workspace, QSAWorkspacePlan) and not _is_runtime_plan(
+            self.workspace
+        ):
             raise QSAPlacementError("binding workspace must be a QSAWorkspacePlan")
         workspace = _workspace_plan(self.workspace)
         expected = derive_qsa_placement_categories(self.workspace)
