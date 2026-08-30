@@ -38,6 +38,16 @@ class VocabParallelEmbedding(BaseOP):
 
     @nvtx_annotate("Embedding")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Keep a small device-neutral reference seam for CPU model/oracle tests.
+        # The indexing kernel is intentionally CUDA-only; using ``F.embedding``
+        # here does not alter the production dispatch.
+        if not x.is_cuda:
+            if self.tp_size > 1:
+                raise RuntimeError("CPU embedding reference requires tensor parallel size 1")
+            y = F.embedding(x.to(dtype=torch.long), self.weight)
+            if self._embed_scale is not None:
+                y = y * self._embed_scale
+            return y
         from freetoken.kernel import indexing
 
         y = indexing(

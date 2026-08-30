@@ -57,7 +57,8 @@ class RotaryEmbedding(StateLessOP):
         sin = freqs.sin() * attention_factor
         # buffer, so don't load/save
         self._cos_sin_cache = torch.cat((cos, sin), dim=-1)
-        assert self.head_size in [64, 128, 256, 512]
+        if self.head_size <= 0 or self.head_size % 2:
+            raise ValueError("rotary head_size must be a positive even number")
 
         from freetoken.kernel.backend import is_flashinfer_usable
 
@@ -68,12 +69,47 @@ class RotaryEmbedding(StateLessOP):
 
         self.apply_rope_with_cos_sin_cache_inplace = apply_rope_with_cos_sin_cache_inplace
 
+    def _forward_reference(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if query.shape[0] != positions.numel() or key.shape[0] != positions.numel():
+            raise ValueError("rope positions and token dimensions must agree")
+        if query.shape[-1] % self.head_size or key.shape[-1] % self.head_size:
+            raise ValueError("rope query/key dimensions must be whole head counts")
+        if self.rotary_dim > self.head_size:
+            raise ValueError("rotary_dim cannot exceed head_size")
+        cache = self._cos_sin_cache.to(device=query.device)
+        cos, sin = cache[positions.to(device=query.device, dtype=torch.long)].chunk(2, dim=-1)
+        q = query.view(query.shape[0], -1, self.head_size)
+        k = key.view(key.shape[0], -1, self.head_size)
+        q_rot, q_tail = q[..., : self.rotary_dim], q[..., self.rotary_dim :]
+        k_rot, k_tail = k[..., : self.rotary_dim], k[..., self.rotary_dim :]
+        if self.is_neox:
+            half = self.rotary_dim // 2
+            q_neg_half = torch.cat((-q_rot[..., half:], q_rot[..., :half]), dim=-1)
+            k_neg_half = torch.cat((-k_rot[..., half:], k_rot[..., :half]), dim=-1)
+            cos = torch.cat((cos, cos), dim=-1).unsqueeze(1)
+            sin = torch.cat((sin, sin), dim=-1).unsqueeze(1)
+        else:
+            q_neg_half = torch.stack((-q_rot[..., 1::2], q_rot[..., 0::2]), dim=-1).flatten(-2)
+            k_neg_half = torch.stack((-k_rot[..., 1::2], k_rot[..., 0::2]), dim=-1).flatten(-2)
+            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(1)
+            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(1)
+        q.copy_(torch.cat((q_rot * cos + q_neg_half * sin, q_tail), dim=-1))
+        k.copy_(torch.cat((k_rot * cos + k_neg_half * sin, k_tail), dim=-1))
+        return query, key
+
     def forward(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not query.is_cuda:
+            return self._forward_reference(positions, query, key)
         self.apply_rope_with_cos_sin_cache_inplace(
             positions=positions,
             query=query,

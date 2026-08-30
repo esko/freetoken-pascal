@@ -110,9 +110,18 @@ class GemmaPlusOneRMSNorm(BaseOP):
         return x.view(-1, self.size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not x.is_cuda:
+            flat = self._flat(x)
+            variance = flat.float().square().mean(dim=-1, keepdim=True)
+            weight = (1.0 + self.weight.float()).view(1, -1)
+            value = flat.float() * torch.rsqrt(variance + self.eps) * weight
+            return value.to(dtype=x.dtype).view(x.shape)
         return self.gemma_rmsnorm(self._flat(x), self.weight, self.eps).view(x.shape)
 
     def forward_inplace(self, x: torch.Tensor) -> None:
+        if not x.is_cuda:
+            x.copy_(self.forward(x))
+            return
         flat = self._flat(x)
         self.gemma_rmsnorm(flat, self.weight, self.eps, out=flat)
 
