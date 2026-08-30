@@ -44,6 +44,16 @@ class Qwen4ExpMoE(Qwen3_5MoE):
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if not hidden_states.is_cuda:
+            if not all(hasattr(self.experts, name) for name in ("gate_up_proj", "down_proj")):
+                raise RuntimeError(
+                    "Qwen4 CPU reference MoE requires resident gate_up_proj/down_proj; "
+                    "offload and adapter layouts are not supported by this path"
+                )
+            if getattr(self.experts, "weight_format", "bf16") != "bf16":
+                raise RuntimeError(
+                    "Qwen4 CPU reference MoE requires unquantized resident expert weights"
+                )
         router_logits = self.gate.forward(hidden_states)
         if not hidden_states.is_cuda:
             # The model's CUDA MoE backends are intentionally not available on a

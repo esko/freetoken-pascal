@@ -56,6 +56,12 @@ def test_cpu_activation_seam_honors_output_buffer():
     torch.testing.assert_close(result, F.silu(values[..., :4]) * values[..., 4:])
 
 
+def test_cpu_activation_seam_uses_fp32_intermediates_for_bfloat16():
+    values = torch.linspace(-2, 2, 8, dtype=torch.float32).reshape(1, 8).bfloat16()
+    expected = F.silu(values.float()[..., :4]) * values.float()[..., 4:]
+    torch.testing.assert_close(silu_and_mul(values).float(), expected)
+
+
 def test_cpu_embedding_seam_matches_torch_embedding():
     embedding = VocabParallelEmbedding(7, 3, embed_scale=2.0)
     embedding.weight.copy_(torch.arange(21, dtype=torch.float32).view(7, 3))
@@ -73,7 +79,7 @@ def test_cpu_gemma_plus_one_norm_matches_fp32_equation():
 
 
 def test_cpu_rope_seam_is_deterministic_and_preserves_tail_dimensions():
-    rope = RotaryEmbedding(8, 4, 16, 100.0)
+    rope = RotaryEmbedding(8, 4, 16, 100.0, allow_reference_geometry=True)
     query = torch.arange(16, dtype=torch.float32).view(2, 8)
     key = torch.arange(8, dtype=torch.float32).view(1, 8).repeat(2, 1)
     original_tail = query[:, 4:].clone()
@@ -86,4 +92,12 @@ def test_cpu_rope_seam_is_deterministic_and_preserves_tail_dimensions():
 
 def test_cpu_rope_rejects_odd_head_geometry():
     with pytest.raises(ValueError, match="positive even"):
-        RotaryEmbedding(7, 6, 16, 100.0)
+        RotaryEmbedding(7, 6, 16, 100.0, allow_reference_geometry=True)
+
+
+def test_cpu_rope_rejects_unsupported_fused_geometry():
+    with pytest.raises(ValueError, match="one of 64, 128, 256, or 512"):
+        RotaryEmbedding(8, 4, 16, 100.0)
+    rope = RotaryEmbedding(8, 4, 16, 100.0, allow_reference_geometry=True)
+    with pytest.raises(RuntimeError, match="CPU-reference-only"):
+        rope._validate_fused_geometry(torch.device("cuda"))

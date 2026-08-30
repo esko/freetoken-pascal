@@ -44,8 +44,10 @@ The issue #11 tiny composition oracle now drives the registered
 QSA, PLE, router, shared-expert and routed-expert components on CPU/reference
 backends. It checks finite logits, fixed greedy IDs, full versus chunked
 prefill equivalence, slot reset/replay determinism, debug boundary events and
-fail-closed vision input. This is an H0 model-composition oracle only: it does
-not claim Engine, scheduler, API-serving, GGUF/PLE-mmap, CUDA, or P4 evidence.
+fail-closed vision input. The fixed logits, route IDs/weights and zero-table PLE
+state are seeded regression values from the tiny fixture, not independent HF
+equivalence evidence. This is an H0 model-composition oracle only: it does not
+claim Engine, scheduler, API-serving, GGUF/PLE-mmap, CUDA, or P4 evidence.
 
 Issue #18 also provides a bounded host-resource lifecycle observation:
 

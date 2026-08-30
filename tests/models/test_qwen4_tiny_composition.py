@@ -19,6 +19,7 @@ from freetoken.kvcache.linear_state_pool import LinearStatePool
 from freetoken.models.qwen4_exp.attention import TorchDenseQSAReference
 from freetoken.models.qwen4_exp.config import parse_config
 from freetoken.models.qwen4_exp.model import Qwen4ExpForCausalLM
+from freetoken.models.qwen4_exp.moe import Qwen4ExpMoE
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests" / "fixtures" / "qwen4-tiny"
@@ -40,6 +41,7 @@ def _fixture_config():
     # and use an explicit unquantized model config so the tiny CPU oracle does not pretend to
     # exercise block-FP8 kernels whose production dimensions are multiples of 128.
     raw["quantization_config"] = None
+    raw["reference_only"] = True
     return parse_config(SimpleNamespace(**raw))
 
 
@@ -105,6 +107,18 @@ def _run(model, context, batch):
         return model.forward().detach().clone()
 
 
+@pytest.fixture
+def _tiny_model_runtime():
+    config = _fixture_config()
+    model = _new_model(config)
+    context = _new_runtime(config)
+    model.load_host_weights("fixture", dummy=True)
+    try:
+        yield config, model, context
+    finally:
+        model.close_host_resources()
+
+
 @pytest.fixture(autouse=True)
 def _reset_context():
     import freetoken.core as core
@@ -114,11 +128,8 @@ def _reset_context():
     core._GLOBAL_CTX = None
 
 
-def test_tiny_qwen_text_composes_prefill_decode_and_is_deterministic():
-    config = _fixture_config()
-    model = _new_model(config)
-    context = _new_runtime(config)
-    model.load_host_weights("fixture", dummy=True)
+def test_tiny_qwen_text_composes_prefill_decode_and_is_deterministic(_tiny_model_runtime):
+    config, model, context = _tiny_model_runtime
 
     prompt = [3, 4, 5, 6]
     prefill = _batch(prompt, phase="prefill")
@@ -135,6 +146,11 @@ def test_tiny_qwen_text_composes_prefill_decode_and_is_deterministic():
     # logits remain finite and shapes still agree.
     assert int(first.argmax()) == 61
     assert int(decoded.argmax()) == 56
+    # Seeded regression values from this fixture, not an independent HF parity
+    # claim.  The complete vector equality above remains the stronger replay
+    # check; these values make a changed logit scale visible.
+    assert float(first[0, 61]) == pytest.approx(0.8678999, abs=1e-6)
+    assert float(decoded[0, 56]) == pytest.approx(0.6091668, abs=1e-6)
 
     context.linear_state_pool.reset(1)
     context.attn_backend = TorchDenseQSAReference(
@@ -143,14 +159,10 @@ def test_tiny_qwen_text_composes_prefill_decode_and_is_deterministic():
     replay = _run(model, context, _batch(prompt, phase="prefill"))
     assert torch.equal(first, replay)
     assert int(first.argmax()) == int(replay.argmax())
-    model.close_host_resources()
 
 
-def test_tiny_qwen_chunked_prefill_matches_full_prefill_and_reset():
-    config = _fixture_config()
-    model = _new_model(config)
-    context = _new_runtime(config)
-    model.load_host_weights("fixture", dummy=True)
+def test_tiny_qwen_chunked_prefill_matches_full_prefill_and_reset(_tiny_model_runtime):
+    config, model, context = _tiny_model_runtime
     prompt = [3, 4, 5, 6]
 
     full = _run(model, context, _batch(prompt, phase="prefill"))
@@ -169,26 +181,18 @@ def test_tiny_qwen_chunked_prefill_matches_full_prefill_and_reset():
     )
     reset = _run(model, context, _batch(prompt, phase="prefill"))
     assert torch.equal(full, reset)
-    model.close_host_resources()
 
 
-def test_tiny_qwen_vision_input_fails_closed():
-    config = _fixture_config()
-    model = _new_model(config)
-    context = _new_runtime(config)
-    model.load_host_weights("fixture", dummy=True)
+def test_tiny_qwen_vision_input_fails_closed(_tiny_model_runtime):
+    config, model, context = _tiny_model_runtime
     batch = _batch([3], phase="prefill")
     batch.mm_embeds = torch.zeros(1, config.hidden_size)
     with pytest.raises(RuntimeError, match="vision inputs are outside"):
         _run(model, context, batch)
-    model.close_host_resources()
 
 
-def test_tiny_qwen_debug_hook_reports_reference_boundaries():
-    config = _fixture_config()
-    model = _new_model(config)
-    context = _new_runtime(config)
-    model.load_host_weights("fixture", dummy=True)
+def test_tiny_qwen_debug_hook_reports_reference_boundaries(_tiny_model_runtime):
+    config, model, context = _tiny_model_runtime
     records: list[dict[str, object]] = []
     model.set_debug_hook(records.append)
 
@@ -200,8 +204,42 @@ def test_tiny_qwen_debug_hook_reports_reference_boundaries():
     assert len(observations["gdn_backend"]) == 1
     assert len(observations["ple"]) == 1
     assert len(observations["router"]) == config.num_layers
+    assert observations["gdn_backend"][0]["selected_implementation"] == "torch-reference"
+    assert torch.equal(
+        observations["ple"][0]["contribution"],
+        torch.zeros_like(observations["ple"][0]["contribution"]),
+    )
+    assert records[0]["ple_state"] == {0: {}}
     route = observations["router"][0]
     assert route["ids"].shape == (4, config.num_experts_per_tok)
     assert route["weights"].shape == route["ids"].shape
     assert route["valid_token_count"] == 4
-    model.close_host_resources()
+    torch.testing.assert_close(
+        observations["router"][0]["ids"],
+        torch.tensor([[0, 3], [2, 0], [2, 1], [1, 3]], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        observations["router"][0]["weights"],
+        torch.tensor(
+            [
+                [0.5423497, 0.4576504],
+                [0.6755262, 0.3244737],
+                [0.5121318, 0.4878682],
+                [0.5112431, 0.4887569],
+            ]
+        ),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    assert all(
+        event["requested_mode"] == "torch-reference"
+        and event["selected_implementation"] == "torch-reference"
+        for event in observations["router_dispatch"]
+    )
+
+
+def test_qwen4_cpu_reference_rejects_offload_expert_layout():
+    moe = object.__new__(Qwen4ExpMoE)
+    moe.experts = SimpleNamespace(weight_format="bf16")
+    with pytest.raises(RuntimeError, match="resident gate_up_proj/down_proj"):
+        moe.forward(torch.zeros(1, 4))

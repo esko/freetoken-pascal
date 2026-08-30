@@ -14,7 +14,7 @@ def _mul_activation_reference(
     activation: str,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    gate, up = x.chunk(2, dim=-1)
+    gate, up = x.float().chunk(2, dim=-1)
     if activation == "silu":
         value = F.silu(gate) * up
     elif activation == "gelu":
@@ -26,7 +26,7 @@ def _mul_activation_reference(
     if out is not None:
         out.copy_(value)
         return out
-    return value
+    return value.to(dtype=x.dtype)
 
 
 def silu_and_mul(x: torch.Tensor, out: torch.Tensor | None = None):
@@ -81,13 +81,13 @@ def swigluoai_and_mul(
     sigmoid(alpha * gate) * (clamp(up, +-limit) + 1)``. Always the in-repo Triton
     kernel (flashinfer ships no clamped-swiglu *_and_mul)."""
     if not x.is_cuda:
-        gate, up = x.chunk(2, dim=-1)
+        gate, up = x.float().chunk(2, dim=-1)
         value = torch.clamp(gate, max=limit) * torch.sigmoid(alpha * gate)
         value = value * (torch.clamp(up, -limit, limit) + 1)
         if out is not None:
             out.copy_(value)
             return out
-        return value
+        return value.to(dtype=x.dtype)
     from freetoken.kernel.triton.activation import swigluoai_and_mul
 
     return swigluoai_and_mul(x, out=out, alpha=alpha, limit=limit)
