@@ -391,7 +391,7 @@ sources:
       - path: ggml/src/ggml-cuda/delta-net.cuh
         sha: 36c4c89e3f79b04ac84af04e69f6bb946ccd9c61
       - path: ggml/src/ggml-cuda/pxa-deltanet-fuse.cuh
-        sha: f6d1d2bdd8773c919c5b8b8c4c882b48f2f47af9
+        sha: f6d1d2bdd8773c919c5b8c8b4c882b48f2f47af9
       - path: ggml/src/ggml-cuda/ssm-conv.cu
         sha: d48f4435b0738ff34c8cd6784ff36cc66803d49b
       - path: ggml/src/ggml-cuda/ssm-conv.cuh

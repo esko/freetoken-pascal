@@ -15,8 +15,9 @@ and RTX 3090 benchmark artifacts are not part of this downstream slice.
 GDN uses the existing per-request linear state pool. Fresh requests zero their recurrent state;
 chunked requests continue from their assigned slot. PLE owns a dilated-convolution state keyed by
 the same request table slot and replaces it whenever `cached_len == 0`, preventing state leakage
-when a slot is reused. The model forces the naive cache and disables CUDA graphs while the PLE
-reference path performs host work. Issue #13 owns the release PLE mmap/offload representation.
+when a slot is reused. Linear-attention models default to the hybrid-radix cache; CUDA graphs stay
+disabled while the PLE reference path performs host work. Issue #13 owns the release PLE
+mmap/offload representation.
 
 The Qwen4 GDN boundary resolves `FREETOKEN_GDN_MODE` (`auto`, `reference`, or
 `triton-candidate`) at construction, before importing a fused kernel. The mode and package

@@ -29,7 +29,7 @@ The audited PXA blobs at `d34d74e93b95761e67a17a649cf2faf039e7888e` are recorded
 - `ggml/src/ggml-cuda/delta-net.cuh` —
   `36c4c89e3f79b04ac84af04e69f6bb946ccd9c61`
 - `ggml/src/ggml-cuda/pxa-deltanet-fuse.cuh` —
-  `f6d1d2bdd8773c919c5b8b8c4c882b48f2f47af9`
+  `f6d1d2bdd8773c919c5b8c8b4c882b48f2f47af9`
 - `ggml/src/ggml-cuda/ssm-conv.cu` —
   `d48f4435b0738ff34c8cd6784ff36cc66803d49b`
 - `ggml/src/ggml-cuda/ssm-conv.cuh` —
