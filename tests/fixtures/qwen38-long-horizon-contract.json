@@ -9,7 +9,20 @@
       "kind": "multi-turn-coding",
       "steps": [
         {"id": "draft", "expectation": {"kind": "contains", "value": "def normalize"}},
-        {"id": "edit", "expectation": {"kind": "contains", "value": "return result"}},
+        {"id": "inspect", "expectation": {"kind": "contains", "value": "def normalize"}},
+        {"id": "plan", "expectation": {"kind": "contains", "value": "def normalize"}},
+        {"id": "edit-1", "expectation": {"kind": "contains", "value": "return result"}},
+        {"id": "edit-2", "expectation": {"kind": "contains", "value": "return result"}},
+        {"id": "test-1", "expectation": {"kind": "contains", "value": "tests pass"}},
+        {"id": "test-2", "expectation": {"kind": "contains", "value": "tests pass"}},
+        {"id": "review", "expectation": {"kind": "contains", "value": "return result"}},
+        {"id": "fix-1", "expectation": {"kind": "contains", "value": "return result"}},
+        {"id": "fix-2", "expectation": {"kind": "contains", "value": "return result"}},
+        {"id": "typecheck", "expectation": {"kind": "contains", "value": "tests pass"}},
+        {"id": "lint", "expectation": {"kind": "contains", "value": "tests pass"}},
+        {"id": "rerun", "expectation": {"kind": "contains", "value": "tests pass"}},
+        {"id": "checkpoint", "expectation": {"kind": "contains", "value": "return result"}},
+        {"id": "restore", "expectation": {"kind": "contains", "value": "return result"}},
         {"id": "verify", "expectation": {"kind": "contains", "value": "tests pass"}}
       ]
     },
@@ -19,7 +32,20 @@
       "steps": [
         {"id": "lookup-1", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
         {"id": "lookup-2", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
-        {"id": "lookup-3", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}}
+        {"id": "lookup-3", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-4", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-5", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-6", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-7", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-8", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-9", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-10", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-11", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-12", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-13", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-14", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-15", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-16", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}}
       ]
     },
     {
@@ -27,7 +53,20 @@
       "kind": "state-dependent-reasoning",
       "steps": [
         {"id": "establish", "expectation": {"kind": "contains", "value": "state=ready"}},
-        {"id": "continue", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-1", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-2", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-3", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-4", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-5", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-6", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-7", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-8", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-9", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-10", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-11", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-12", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-13", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "continue-14", "expectation": {"kind": "contains", "value": "next=2"}},
         {"id": "restore", "expectation": {"kind": "contains", "value": "state=ready"}}
       ]
     },
@@ -40,7 +79,63 @@
           "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
         },
         {
-          "id": "replay",
+          "id": "replay-1",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-2",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-3",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-4",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-5",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-6",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-7",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-8",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-9",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-10",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-11",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-12",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-13",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-14",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay-15",
           "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
         }
       ]
@@ -50,8 +145,22 @@
       "kind": "long-generation",
       "steps": [
         {"id": "prefill", "expectation": {"kind": "contains", "value": "checkpoint"}},
-        {"id": "suffix", "expectation": {"kind": "contains", "value": "suffix"}},
-        {"id": "complete", "expectation": {"kind": "contains", "value": "done"}}
+        {"id": "suffix-1", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-2", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-3", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-4", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-5", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-6", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-7", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-8", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-9", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-10", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-11", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-12", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-13", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "suffix-14", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "complete-1", "expectation": {"kind": "contains", "value": "done"}},
+        {"id": "complete-2", "expectation": {"kind": "contains", "value": "done"}}
       ]
     }
   ],
@@ -67,7 +176,9 @@
   },
   "sensitive_control": {
     "tensor_class": "gdn_in_proj_a",
-    "fixture": "tests/fixtures/sensitive/gdn-control-perturbed.json",
+    "fixture": "sensitive/gdn-control-perturbed.json",
+    "tensor_identity": "blk.0.ssm_alpha.weight",
+    "candidate_field": "perturbation",
     "required_observation": "gdn_state"
   }
 }

@@ -23,6 +23,7 @@ from freetoken.reference_correctness import (
     read_observation_bundle,
     validate_probe_output,
 )
+from freetoken.sensitive_census import evaluate_sensitive_tensor_fixture
 
 _PROBE_ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _CONTRACT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -40,6 +41,7 @@ _OBSERVATION_NAMES = frozenset(
     {"continuation_tokens", "router_ids", "semantic_output_tokens", "gdn_state"}
 )
 _COMPARISONS = frozenset({"exact", "numeric"})
+_PERTURBATION_FIELDS = frozenset({"perturbation", "scale_mutation"})
 _TYPE_NAMES = {
     "string": str,
     "integer": int,
@@ -128,8 +130,11 @@ def _validate_contract(document: Any) -> dict[str, Any]:
             raise ValueError(f"long-horizon probe {probe_id} kind is unsupported: {kind!r}")
         probe_kinds.add(kind)
         steps = probe["steps"]
-        if not isinstance(steps, list) or len(steps) < 2:
-            raise ValueError(f"long-horizon probe {probe_id} needs at least two steps")
+        if not isinstance(steps, list) or len(steps) < minimum_steps:
+            raise ValueError(
+                f"long-horizon probe {probe_id} needs at least the minimum horizon "
+                f"of {minimum_steps} steps"
+            )
         step_ids: set[str] = set()
         for step_index, step in enumerate(steps):
             if not isinstance(step, dict) or set(step) != {"id", "expectation"}:
@@ -194,6 +199,8 @@ def _validate_contract(document: Any) -> dict[str, Any]:
     if not isinstance(sensitive_control, dict) or set(sensitive_control) != {
         "tensor_class",
         "fixture",
+        "tensor_identity",
+        "candidate_field",
         "required_observation",
     }:
         raise ValueError("long-horizon sensitive_control fields are invalid")
@@ -203,6 +210,20 @@ def _validate_contract(document: Any) -> dict[str, Any]:
         raise ValueError("long-horizon sensitive_control tensor_class must be a GDN class")
     if not isinstance(sensitive_control["fixture"], str) or not sensitive_control["fixture"]:
         raise ValueError("long-horizon sensitive_control fixture must be non-empty")
+    if (
+        not isinstance(sensitive_control["tensor_identity"], str)
+        or not sensitive_control["tensor_identity"]
+    ):
+        raise ValueError("long-horizon sensitive_control tensor_identity must be non-empty")
+    if (
+        not isinstance(sensitive_control["candidate_field"], str)
+        or not sensitive_control["candidate_field"]
+    ):
+        raise ValueError("long-horizon sensitive_control candidate_field must be non-empty")
+    if sensitive_control["candidate_field"] not in _PERTURBATION_FIELDS:
+        raise ValueError(
+            "long-horizon sensitive_control candidate_field must identify a declared perturbation"
+        )
     required_observation = sensitive_control["required_observation"]
     if (
         required_observation not in observations
@@ -214,18 +235,98 @@ def _validate_contract(document: Any) -> dict[str, Any]:
     return document
 
 
+def _sensitive_fixture_candidates(
+    fixture: str, *, contract_path: str | Path | None = None
+) -> tuple[Path, ...]:
+    declared = Path(fixture)
+    candidates: list[Path] = []
+    if declared.is_absolute():
+        candidates.append(declared)
+    else:
+        if contract_path is not None:
+            candidates.append(Path(contract_path).resolve().parent / declared)
+        repository_root = Path(__file__).resolve().parents[2]
+        candidates.extend(
+            [
+                Path.cwd() / declared,
+                repository_root / declared,
+                repository_root / "tests" / "fixtures" / declared,
+            ]
+        )
+    unique: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved not in unique:
+            unique.append(resolved)
+    return tuple(unique)
+
+
+def _load_sensitive_fixture(
+    document: Mapping[str, Any], *, contract_path: str | Path | None = None
+) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    control = document["sensitive_control"]
+    candidates = _sensitive_fixture_candidates(control["fixture"], contract_path=contract_path)
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            fixture = _strict_json_loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            raise ValueError(
+                f"unable to load long-horizon sensitive fixture {path}: {error}"
+            ) from error
+        if not isinstance(fixture, dict):
+            raise ValueError(f"long-horizon sensitive fixture {path} must be an object")
+        try:
+            result = evaluate_sensitive_tensor_fixture(fixture)
+        except ValueError as error:
+            raise ValueError(f"invalid long-horizon sensitive fixture {path}: {error}") from error
+        if result["tensor_identity"] != control["tensor_identity"]:
+            raise ValueError(
+                "long-horizon sensitive fixture tensor identity disagrees: "
+                f"{result['tensor_identity']!r} != {control['tensor_identity']!r}"
+            )
+        if result["tensor_class"] != control["tensor_class"]:
+            raise ValueError(
+                "long-horizon sensitive fixture tensor class disagrees: "
+                f"{result['tensor_class']!r} != {control['tensor_class']!r}"
+            )
+        candidate = fixture.get("candidate")
+        field = control["candidate_field"]
+        if (
+            not isinstance(candidate, Mapping)
+            or field not in candidate
+            or candidate[field] is None
+            or candidate[field] == ""
+        ):
+            raise ValueError(
+                "long-horizon sensitive fixture lacks declared candidate perturbation field "
+                f"{field!r}"
+            )
+        if result["expected_rejected"] is not True or result["rejected"] is not True:
+            raise ValueError("long-horizon sensitive fixture must be a rejected positive control")
+        return fixture, result, path
+    raise ValueError(
+        f"long-horizon sensitive fixture could not be resolved: {control['fixture']!r}"
+    )
+
+
 def load_long_horizon_contract(path: str | Path) -> dict[str, Any]:
     """Load and fail closed on a versioned long-horizon H0 contract."""
     try:
         document = _strict_json_loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError) as error:
         raise ValueError(f"unable to load long-horizon contract: {error}") from error
-    return _validate_contract(document)
+    checked = _validate_contract(document)
+    _load_sensitive_fixture(checked, contract_path=path)
+    return checked
 
 
 def _contract_document(contract: str | Path | Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(contract, Mapping):
-        return _validate_contract(dict(contract))
+        document = _validate_contract(dict(contract))
+        _load_sensitive_fixture(document)
+        return document
     return load_long_horizon_contract(contract)
 
 
@@ -314,6 +415,8 @@ def compare_long_horizon_bundles(
     reference_path: str | Path,
     *,
     contract: str | Path | Mapping[str, Any],
+    subject_outputs: Mapping[str, Sequence[str]],
+    reference_outputs: Mapping[str, Sequence[str]],
     require_independent: bool = True,
     evidence_status: str = "synthetic",
 ) -> dict[str, Any]:
@@ -323,6 +426,31 @@ def compare_long_horizon_bundles(
     _reference_identity, reference = read_observation_bundle(reference_path)
     _validate_observation_horizon(subject, document, label="subject")
     _validate_observation_horizon(reference, document, label="reference")
+    subject_semantic = validate_long_horizon_outputs(document, subject_outputs)
+    reference_semantic = validate_long_horizon_outputs(document, reference_outputs)
+    semantic_comparisons: list[dict[str, Any]] = []
+    for probe in document["probes"]:
+        subject_steps = subject_outputs[probe["id"]]
+        reference_steps = reference_outputs[probe["id"]]
+        for step, actual, expected in zip(
+            probe["steps"], subject_steps, reference_steps, strict=False
+        ):
+            passed = isinstance(actual, str) and actual == expected
+            semantic_comparisons.append(
+                {
+                    "probe": probe["id"],
+                    "step": step["id"],
+                    "metric": "text_exact",
+                    "observed": passed,
+                    "limit": True,
+                    "passed": passed,
+                }
+            )
+    semantic_passed = (
+        subject_semantic["passed"]
+        and reference_semantic["passed"]
+        and all(item["passed"] for item in semantic_comparisons)
+    )
     exact_observations = {
         name
         for name, descriptor in document["observations"].items()
@@ -341,12 +469,30 @@ def compare_long_horizon_bundles(
         require_independent=require_independent,
         evidence_status=evidence_status,
     )
+    sensitive_fixture, sensitive_result, sensitive_path = _load_sensitive_fixture(document)
     evidence["long_horizon"] = {
         "contract_id": document["contract_id"],
         "minimum_steps": document["minimum_steps"],
         "probe_kinds": sorted({probe["kind"] for probe in document["probes"]}),
-        "sensitive_control": dict(document["sensitive_control"]),
+        "semantic": {
+            "subject": subject_semantic,
+            "reference": reference_semantic,
+            "comparisons": semantic_comparisons,
+            "passed": semantic_passed,
+        },
+        "sensitive_control": {
+            **dict(document["sensitive_control"]),
+            "resolved_fixture": str(sensitive_path),
+            "fixture_tensor_identity": sensitive_fixture["tensor_identity"],
+            "fixture_tensor_class": sensitive_fixture["tensor_class"],
+            "declared_perturbation": sensitive_fixture["candidate"][
+                document["sensitive_control"]["candidate_field"]
+            ],
+            "fixture_rejected": sensitive_result["rejected"],
+            "fixture_expected_rejected": sensitive_result["expected_rejected"],
+        },
     }
+    evidence["passed"] = bool(evidence["passed"] and semantic_passed)
     return evidence
 
 

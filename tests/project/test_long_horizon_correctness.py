@@ -62,10 +62,23 @@ def _observations(*, degraded: bool = False) -> dict[str, np.ndarray]:
     }
 
 
+def _outputs(contract: dict[str, object]) -> dict[str, list[str]]:
+    return {
+        probe["id"]: [
+            step["expectation"]["value"]
+            if step["expectation"]["kind"] in {"contains", "exact"}
+            else '{"path":"a.py","line":7}'
+            for step in probe["steps"]
+        ]
+        for probe in contract["probes"]
+    }
+
+
 def test_long_horizon_contract_declares_required_probe_families() -> None:
     contract = load_long_horizon_contract(CONTRACT)
 
     assert contract["minimum_steps"] == 16
+    assert all(len(probe["steps"]) >= contract["minimum_steps"] for probe in contract["probes"])
     assert {probe["kind"] for probe in contract["probes"]} >= {
         "multi-turn-coding",
         "repeated-tool-calls",
@@ -75,22 +88,14 @@ def test_long_horizon_contract_declares_required_probe_families() -> None:
     }
     assert contract["sensitive_control"]["required_observation"] == "gdn_state"
 
-    sensitive_fixture = ROOT / contract["sensitive_control"]["fixture"]
+    sensitive_fixture = CONTRACT.parent / contract["sensitive_control"]["fixture"]
     report = assert_sensitive_tensor_fixture_rejected(sensitive_fixture)
     assert report["tensor_class"] == contract["sensitive_control"]["tensor_class"]
 
 
 def test_long_horizon_output_validator_checks_every_turn() -> None:
     contract = load_long_horizon_contract(CONTRACT)
-    outputs = {
-        probe["id"]: [
-            expectation["value"]
-            if expectation["kind"] in {"contains", "exact"}
-            else '{"path":"a.py","line":7}'
-            for expectation in (step["expectation"] for step in probe["steps"])
-        ]
-        for probe in contract["probes"]
-    }
+    outputs = _outputs(contract)
 
     report = validate_long_horizon_outputs(contract, outputs)
 
@@ -113,7 +118,13 @@ def test_long_horizon_bundle_requires_minimum_state_horizon(tmp_path: Path) -> N
     write_observation_bundle(reference, _identity("independent"), short)
 
     with pytest.raises(ValueError, match="minimum horizon"):
-        compare_long_horizon_bundles(subject, reference, contract=CONTRACT)
+        compare_long_horizon_bundles(
+            subject,
+            reference,
+            contract=CONTRACT,
+            subject_outputs=_outputs(load_long_horizon_contract(CONTRACT)),
+            reference_outputs=_outputs(load_long_horizon_contract(CONTRACT)),
+        )
 
 
 def test_degraded_gdn_control_fails_long_horizon_state_gate(tmp_path: Path) -> None:
@@ -121,12 +132,25 @@ def test_degraded_gdn_control_fails_long_horizon_state_gate(tmp_path: Path) -> N
     reference = tmp_path / "reference.ftobs"
     write_observation_bundle(subject, _identity("freetoken"), _observations(degraded=True))
     write_observation_bundle(reference, _identity("independent"), _observations())
+    contract = load_long_horizon_contract(CONTRACT)
+    outputs = _outputs(contract)
 
-    evidence = compare_long_horizon_bundles(subject, reference, contract=CONTRACT)
+    evidence = compare_long_horizon_bundles(
+        subject,
+        reference,
+        contract=contract,
+        subject_outputs=outputs,
+        reference_outputs=outputs,
+    )
 
     assert evidence["passed"] is False
     assert evidence["long_horizon"]["minimum_steps"] == 16
     assert evidence["long_horizon"]["sensitive_control"]["tensor_class"] == "gdn_in_proj_a"
+    assert evidence["long_horizon"]["sensitive_control"]["declared_perturbation"] == {
+        "index": 1,
+        "delta": 0.07,
+    }
+    assert evidence["long_horizon"]["semantic"]["passed"] is True
     state_comparisons = [
         item for item in evidence["comparisons"] if item["observation"] == "gdn_state"
     ]
@@ -158,4 +182,66 @@ def test_long_horizon_contract_rejects_malformed_documents(
     path.write_text(json.dumps(document), encoding="utf-8")
 
     with pytest.raises(ValueError, match=message):
+        load_long_horizon_contract(path)
+
+
+def test_long_horizon_contract_rejects_short_semantic_probe(tmp_path: Path) -> None:
+    document = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    document["probes"][0]["steps"] = document["probes"][0]["steps"][:8]
+    path = tmp_path / "short-probe.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="minimum horizon"):
+        load_long_horizon_contract(path)
+
+
+def test_long_horizon_contract_requires_declared_perturbation_field(tmp_path: Path) -> None:
+    document = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    document["sensitive_control"]["candidate_field"] = "dtype"
+    path = tmp_path / "wrong-perturbation-field.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"candidate_field.*perturbation"):
+        load_long_horizon_contract(path)
+
+
+def test_long_horizon_gate_fails_semantic_output_even_when_state_matches(tmp_path: Path) -> None:
+    subject = tmp_path / "subject.ftobs"
+    reference = tmp_path / "reference.ftobs"
+    observations = _observations()
+    write_observation_bundle(subject, _identity("freetoken"), observations)
+    write_observation_bundle(reference, _identity("independent"), observations)
+    contract = load_long_horizon_contract(CONTRACT)
+    subject_outputs = _outputs(contract)
+    reference_outputs = _outputs(contract)
+    # Both strings satisfy the declared contains probe, but deterministic A/B
+    # evidence still requires the subject/reference semantic trajectory to match.
+    subject_outputs["multi-turn-coding"][15] = "tests pass; subject variant"
+
+    evidence = compare_long_horizon_bundles(
+        subject,
+        reference,
+        contract=contract,
+        subject_outputs=subject_outputs,
+        reference_outputs=reference_outputs,
+    )
+
+    assert evidence["passed"] is False
+    assert evidence["long_horizon"]["semantic"]["passed"] is False
+    assert evidence["long_horizon"]["semantic"]["subject"]["passed"] is True
+    assert evidence["long_horizon"]["semantic"]["reference"]["passed"] is True
+    assert any(
+        item["passed"] is False
+        for item in evidence["long_horizon"]["semantic"]["comparisons"]
+        if item["probe"] == "multi-turn-coding" and item["step"] == "verify"
+    )
+
+
+def test_long_horizon_gate_rejects_fixture_class_substitution(tmp_path: Path) -> None:
+    document = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    document["sensitive_control"]["tensor_class"] = "gdn_control"
+    path = tmp_path / "wrong-class.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="tensor class disagrees"):
         load_long_horizon_contract(path)
