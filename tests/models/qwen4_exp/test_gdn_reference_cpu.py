@@ -235,41 +235,50 @@ def test_reference_recurrent_matches_oracle_for_ragged_gqa_requests():
         offset += length
 
 
-def test_chunk_rule_matches_tokenwise_decode_from_nonzero_state():
-    """The shipping chunk oracle and recurrent decode oracle preserve one state contract."""
+def test_chunk_rule_matches_shipping_tokenwise_decode_from_nonzero_pool_state():
+    """The independent chunk oracle agrees with the stateful model reference seam."""
     torch.manual_seed(19)
-    batch, tokens, heads, key_dim, value_dim = 2, 9, 3, 4, 5
-    q = torch.randn(batch, tokens, heads, key_dim)
+    tokens, key_heads, value_heads, dim = 9, 1, 3, 4
+    op = _op(
+        num_k_heads=key_heads,
+        num_v_heads=value_heads,
+        head_dim=dim,
+        conv_dim=1,
+        kernel=2,
+    )
+    pool = _Pool(slots=1, conv_dim=1, state_len=1, heads=value_heads, dim=dim)
+    pool.recurrent_states.copy_(torch.randn_like(pool.recurrent_states))
+    initial = pool.recurrent_states[0, 0].clone()
+    q = torch.randn(1, tokens, key_heads, dim)
     k = torch.randn_like(q)
-    v = torch.randn(batch, tokens, heads, value_dim)
-    g = -torch.rand(batch, tokens, heads)
-    beta = torch.sigmoid(torch.randn(batch, tokens, heads))
-    initial = torch.randn(batch, heads, key_dim, value_dim)
+    v = torch.randn(1, tokens, value_heads, dim)
+    g = -torch.rand(1, tokens, value_heads)
+    beta = torch.sigmoid(torch.randn(1, tokens, value_heads))
 
     chunk_out, chunk_state = chunk_gated_delta_rule(
-        q,
-        k,
+        q.repeat_interleave(value_heads // key_heads, dim=2),
+        k.repeat_interleave(value_heads // key_heads, dim=2),
         v,
         g,
         beta,
         chunk_size=4,
-        initial_state=initial.clone(),
+        initial_state=initial.unsqueeze(0),
     )
-    decode_state = initial.clone()
     decode_outputs = []
     for token in range(tokens):
-        output, decode_state = recurrent_gated_delta_rule(
+        output = op._reference_recurrent(
             q[:, token : token + 1],
             k[:, token : token + 1],
             v[:, token : token + 1],
             g[:, token : token + 1],
             beta[:, token : token + 1],
-            initial_state=decode_state,
+            pool.recurrent_states[0],
+            _fla([1], [0]),
         )
         decode_outputs.append(output)
 
     torch.testing.assert_close(chunk_out, torch.cat(decode_outputs, dim=1), rtol=2e-5, atol=2e-5)
-    torch.testing.assert_close(chunk_state, decode_state, rtol=2e-5, atol=2e-5)
+    torch.testing.assert_close(chunk_state[0], pool.recurrent_states[0, 0], rtol=2e-5, atol=2e-5)
 
 
 def test_reference_checkpoint_restore_and_reset_replay_suffix_exactly():
