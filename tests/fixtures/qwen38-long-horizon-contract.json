@@ -168,6 +168,7 @@
     "continuation_tokens": {"comparison": "exact", "minimum_steps": 16},
     "router_ids": {"comparison": "exact", "minimum_steps": 16},
     "semantic_output_tokens": {"comparison": "exact", "minimum_steps": 16},
+    "sensitive_control_input": {"comparison": "control_input", "minimum_steps": 16},
     "gdn_state": {
       "comparison": "numeric",
       "minimum_steps": 16,
@@ -179,6 +180,7 @@
     "fixture": "sensitive/gdn-control-perturbed.json",
     "tensor_identity": "blk.0.ssm_alpha.weight",
     "candidate_field": "perturbation",
-    "required_observation": "gdn_state"
+    "required_observation": "gdn_state",
+    "input_observation": "sensitive_control_input"
   }
 }

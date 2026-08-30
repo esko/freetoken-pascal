@@ -16,6 +16,7 @@ from freetoken.sensitive_census import assert_sensitive_tensor_fixture_rejected
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = ROOT / "tests/fixtures/qwen38-long-horizon-contract.json"
+CONTROL_FIXTURE = ROOT / "tests/fixtures/sensitive/gdn-control-perturbed.json"
 
 
 def _identity(implementation: str) -> dict[str, object]:
@@ -38,7 +39,7 @@ def _identity(implementation: str) -> dict[str, object]:
     }
 
 
-def _observations(*, degraded: bool = False) -> dict[str, np.ndarray]:
+def _observations(*, degraded: bool = False, control: str = "candidate") -> dict[str, np.ndarray]:
     steps = 16
     continuation = np.arange(100, 100 + steps, dtype=np.int32)
     router_ids = np.stack(
@@ -54,11 +55,14 @@ def _observations(*, degraded: bool = False) -> dict[str, np.ndarray]:
         if degraded and step >= 7:
             current = current + np.array([0.002, 0.0], dtype=np.float32)
         states.append(current.copy())
+    control_values = json.loads(CONTROL_FIXTURE.read_text(encoding="utf-8"))[control]["values"]
+    control_input = np.asarray(control_values, dtype=np.float32)
     return {
         "continuation_tokens": continuation,
         "router_ids": router_ids,
         "semantic_output_tokens": semantic,
         "gdn_state": np.stack(states),
+        "sensitive_control_input": np.repeat(control_input[None, :], steps, axis=0),
     }
 
 
@@ -87,6 +91,7 @@ def test_long_horizon_contract_declares_required_probe_families() -> None:
         "long-generation",
     }
     assert contract["sensitive_control"]["required_observation"] == "gdn_state"
+    assert contract["sensitive_control"]["input_observation"] == "sensitive_control_input"
 
     sensitive_fixture = CONTRACT.parent / contract["sensitive_control"]["fixture"]
     report = assert_sensitive_tensor_fixture_rejected(sensitive_fixture)
@@ -131,7 +136,9 @@ def test_degraded_gdn_control_fails_long_horizon_state_gate(tmp_path: Path) -> N
     subject = tmp_path / "subject.ftobs"
     reference = tmp_path / "reference.ftobs"
     write_observation_bundle(subject, _identity("freetoken"), _observations(degraded=True))
-    write_observation_bundle(reference, _identity("independent"), _observations())
+    write_observation_bundle(
+        reference, _identity("independent"), _observations(control="reference")
+    )
     contract = load_long_horizon_contract(CONTRACT)
     outputs = _outputs(contract)
 
@@ -150,6 +157,11 @@ def test_degraded_gdn_control_fails_long_horizon_state_gate(tmp_path: Path) -> N
         "index": 1,
         "delta": 0.07,
     }
+    assert evidence["long_horizon"]["sensitive_control"]["control_input"]["passed"] is True
+    assert (
+        evidence["long_horizon"]["sensitive_control"]["control_input"]["subject_matches_candidate"]
+        is True
+    )
     assert evidence["long_horizon"]["semantic"]["passed"] is True
     state_comparisons = [
         item for item in evidence["comparisons"] if item["observation"] == "gdn_state"
@@ -160,6 +172,9 @@ def test_degraded_gdn_control_fails_long_horizon_state_gate(tmp_path: Path) -> N
     # positive control; only accumulated state drift should fail the gate.
     assert all(
         item["passed"] for item in evidence["comparisons"] if item["observation"] != "gdn_state"
+    )
+    assert not any(
+        item["observation"] == "sensitive_control_input" for item in evidence["comparisons"]
     )
 
 
@@ -210,7 +225,9 @@ def test_long_horizon_gate_fails_semantic_output_even_when_state_matches(tmp_pat
     reference = tmp_path / "reference.ftobs"
     observations = _observations()
     write_observation_bundle(subject, _identity("freetoken"), observations)
-    write_observation_bundle(reference, _identity("independent"), observations)
+    write_observation_bundle(
+        reference, _identity("independent"), _observations(control="reference")
+    )
     contract = load_long_horizon_contract(CONTRACT)
     subject_outputs = _outputs(contract)
     reference_outputs = _outputs(contract)
@@ -245,3 +262,55 @@ def test_long_horizon_gate_rejects_fixture_class_substitution(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="tensor class disagrees"):
         load_long_horizon_contract(path)
+
+
+def test_long_horizon_gate_rejects_clean_identical_control_inputs(tmp_path: Path) -> None:
+    subject = tmp_path / "subject.ftobs"
+    reference = tmp_path / "reference.ftobs"
+    write_observation_bundle(subject, _identity("freetoken"), _observations(control="reference"))
+    write_observation_bundle(
+        reference, _identity("independent"), _observations(control="reference")
+    )
+    contract = load_long_horizon_contract(CONTRACT)
+    outputs = _outputs(contract)
+
+    evidence = compare_long_horizon_bundles(
+        subject,
+        reference,
+        contract=contract,
+        subject_outputs=outputs,
+        reference_outputs=outputs,
+    )
+
+    assert evidence["passed"] is False
+    control_report = evidence["long_horizon"]["sensitive_control"]["control_input"]
+    assert control_report["passed"] is False
+    assert control_report["subject_matches_candidate"] is False
+    assert control_report["reference_matches_reference"] is True
+
+
+def test_long_horizon_gate_rejects_wrong_control_input_row(tmp_path: Path) -> None:
+    subject = tmp_path / "subject.ftobs"
+    reference = tmp_path / "reference.ftobs"
+    subject_observations = _observations()
+    subject_observations["sensitive_control_input"][4, 1] += np.float32(0.01)
+    write_observation_bundle(subject, _identity("freetoken"), subject_observations)
+    write_observation_bundle(
+        reference, _identity("independent"), _observations(control="reference")
+    )
+    contract = load_long_horizon_contract(CONTRACT)
+    outputs = _outputs(contract)
+
+    evidence = compare_long_horizon_bundles(
+        subject,
+        reference,
+        contract=contract,
+        subject_outputs=outputs,
+        reference_outputs=outputs,
+    )
+
+    assert evidence["passed"] is False
+    control_report = evidence["long_horizon"]["sensitive_control"]["control_input"]
+    assert control_report["passed"] is False
+    assert control_report["subject_matches_candidate"] is False
+    assert control_report["reference_matches_reference"] is True

@@ -359,8 +359,14 @@ def compare_observation_bundles(
     exact_observations: set[str],
     require_independent: bool = True,
     evidence_status: str = "synthetic",
+    ignored_observations: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Compare the same model/quant/workload without permitting substitution."""
+    """Compare the same model/quant/workload without permitting substitution.
+
+    ``ignored_observations`` is limited to caller-validated expected differences, such as a
+    positive-control input; those arrays must still be present in both bundles but are not
+    classified by the ordinary exact/numeric comparison contract.
+    """
     subject_identity, subject = read_observation_bundle(subject_path)
     reference_identity, reference = read_observation_bundle(reference_path)
     for key in _WORKLOAD_FIELDS:
@@ -386,6 +392,14 @@ def compare_observation_bundles(
         raise ValueError(
             f"subject/reference observation sets differ: {sorted(subject)} != {sorted(reference)}"
         )
+    ignored = set() if ignored_observations is None else set(ignored_observations)
+    if not ignored <= set(subject):
+        raise ValueError(
+            "ignored observations are not present in both bundles: "
+            f"{sorted(ignored - set(subject))}"
+        )
+    subject = {name: value for name, value in subject.items() if name not in ignored}
+    reference = {name: value for name, value in reference.items() if name not in ignored}
     contracted = set(tolerances) | set(exact_observations)
     if set(subject) != contracted:
         raise ValueError(

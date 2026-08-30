@@ -210,7 +210,12 @@ the deferred gate executable without model weights. It requires multi-turn codin
 tool calls/results, state-dependent reasoning, structured transformation, and long-generation
 probe families, validates every declared turn across the full 16-step minimum horizon, and
 requires at least 16 aligned steps of
-continuation-token, router-ID, semantic-output-token, and GDN-state evidence. The
+continuation-token, router-ID, semantic-output-token, sensitive-control-input, and
+GDN-state evidence. The sensitive-control-input rows are bound to the linked fixture:
+subject rows must carry its candidate values and independent-reference rows its
+reference values for every step. This intentionally different input is excluded from
+the ordinary observation comparator, while the declared `gdn_state` numeric comparison
+still gates the positive control. The
 `compare_long_horizon_bundles` requires subject and independent-reference outputs, validates
 every declared turn, compares the semantic trajectories exactly, and then reuses the independent
 identity and tensor A/B checks above. Contract loading resolves the linked sensitive fixture and

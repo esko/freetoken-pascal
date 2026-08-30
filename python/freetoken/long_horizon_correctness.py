@@ -38,9 +38,15 @@ _PROBE_KINDS = frozenset(
 )
 _REQUIRED_PROBE_KINDS = frozenset(_PROBE_KINDS)
 _OBSERVATION_NAMES = frozenset(
-    {"continuation_tokens", "router_ids", "semantic_output_tokens", "gdn_state"}
+    {
+        "continuation_tokens",
+        "router_ids",
+        "semantic_output_tokens",
+        "gdn_state",
+        "sensitive_control_input",
+    }
 )
-_COMPARISONS = frozenset({"exact", "numeric"})
+_COMPARISONS = frozenset({"exact", "numeric", "control_input"})
 _PERTURBATION_FIELDS = frozenset({"perturbation", "scale_mutation"})
 _TYPE_NAMES = {
     "string": str,
@@ -170,9 +176,9 @@ def _validate_contract(document: Any) -> dict[str, Any]:
             raise ValueError(
                 f"long-horizon observation {name} minimum_steps must be >= contract minimum"
             )
-        if comparison == "exact":
+        if comparison in {"exact", "control_input"}:
             if set(descriptor) != {"comparison", "minimum_steps"}:
-                raise ValueError(f"long-horizon exact observation {name} has extra fields")
+                raise ValueError(f"long-horizon {comparison} observation {name} has extra fields")
             continue
         if set(descriptor) != {"comparison", "minimum_steps", "tolerance"}:
             raise ValueError(f"long-horizon numeric observation {name} lacks tolerance")
@@ -202,6 +208,7 @@ def _validate_contract(document: Any) -> dict[str, Any]:
         "tensor_identity",
         "candidate_field",
         "required_observation",
+        "input_observation",
     }:
         raise ValueError("long-horizon sensitive_control fields are invalid")
     if not isinstance(sensitive_control["tensor_class"], str) or not sensitive_control[
@@ -231,6 +238,16 @@ def _validate_contract(document: Any) -> dict[str, Any]:
     ):
         raise ValueError(
             "long-horizon sensitive_control required_observation must be a numeric observation"
+        )
+    input_observation = sensitive_control["input_observation"]
+    if (
+        input_observation not in observations
+        or observations[input_observation]["comparison"] != "control_input"
+        or input_observation == required_observation
+    ):
+        raise ValueError(
+            "long-horizon sensitive_control input_observation must be a distinct "
+            "control_input observation"
         )
     return document
 
@@ -408,6 +425,47 @@ def _validate_observation_horizon(
             raise ValueError(f"{label} exact observation {name} must use integer values")
         if descriptor["comparison"] == "numeric" and array.dtype.kind not in "fiu":
             raise ValueError(f"{label} numeric observation {name} has unsupported dtype")
+        if descriptor["comparison"] == "control_input":
+            if array.ndim != 2 or array.dtype.kind != "f":
+                raise ValueError(
+                    f"{label} control_input observation {name} must be a 2-D float array"
+                )
+
+
+def _control_values(section: Any, *, label: str) -> np.ndarray:
+    if not isinstance(section, Mapping) or not isinstance(section.get("values"), list):
+        raise ValueError(f"long-horizon sensitive fixture {label} must contain values")
+    values = np.asarray(section["values"], dtype=np.float32)
+    if values.ndim != 1 or values.size == 0 or not np.isfinite(values).all():
+        raise ValueError(f"long-horizon sensitive fixture {label} values are invalid")
+    return values
+
+
+def _compare_sensitive_control_input(
+    document: Mapping[str, Any],
+    subject: Mapping[str, np.ndarray],
+    reference: Mapping[str, np.ndarray],
+    fixture: Mapping[str, Any],
+) -> dict[str, Any]:
+    control = document["sensitive_control"]
+    observation = control["input_observation"]
+    subject_array = subject[observation]
+    reference_array = reference[observation]
+    candidate = _control_values(fixture.get("candidate"), label="candidate")
+    authoritative = _control_values(fixture.get("reference"), label="reference")
+    if subject_array.shape[1] != candidate.size or reference_array.shape[1] != authoritative.size:
+        raise ValueError("long-horizon sensitive control input width disagrees with fixture values")
+    subject_expected = np.broadcast_to(candidate, subject_array.shape)
+    reference_expected = np.broadcast_to(authoritative, reference_array.shape)
+    subject_matches = bool(np.array_equal(subject_array, subject_expected))
+    reference_matches = bool(np.array_equal(reference_array, reference_expected))
+    return {
+        "observation": observation,
+        "comparison": "control_input",
+        "subject_matches_candidate": subject_matches,
+        "reference_matches_reference": reference_matches,
+        "passed": subject_matches and reference_matches,
+    }
 
 
 def compare_long_horizon_bundles(
@@ -468,8 +526,12 @@ def compare_long_horizon_bundles(
         exact_observations=exact_observations,
         require_independent=require_independent,
         evidence_status=evidence_status,
+        ignored_observations={document["sensitive_control"]["input_observation"]},
     )
     sensitive_fixture, sensitive_result, sensitive_path = _load_sensitive_fixture(document)
+    control_input = _compare_sensitive_control_input(
+        document, subject, reference, sensitive_fixture
+    )
     evidence["long_horizon"] = {
         "contract_id": document["contract_id"],
         "minimum_steps": document["minimum_steps"],
@@ -490,9 +552,10 @@ def compare_long_horizon_bundles(
             ],
             "fixture_rejected": sensitive_result["rejected"],
             "fixture_expected_rejected": sensitive_result["expected_rejected"],
+            "control_input": control_input,
         },
     }
-    evidence["passed"] = bool(evidence["passed"] and semantic_passed)
+    evidence["passed"] = bool(evidence["passed"] and semantic_passed and control_input["passed"])
     return evidence
 
 
