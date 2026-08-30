@@ -83,7 +83,7 @@ The standalone `GGUFCpuEagerBridge` is an explicit experimental H0/H1 wrapper ar
 
 ### H0 exit gate
 
-For each shipping quant and shape, CPU expert output passes error tolerances against dequantize-plus-reference matmul. Every profile has a complete sensitive-tensor census and explicit precision/scale provenance, shared-gate/control scale/dequant parity passes, and deliberately mis-scaled shared-gate and degraded GDN-control fixtures fail the quality harness. The loaded, pre-faulted DDR4 expert bank is the sole steady-state CPU/cache-fill source and PLE page-cache accounting is recorded. End-to-end cache-zero ordinary decode remains correct, and Q4/Q3/AP identities and conversion evidence are complete; no Q3 or component precision choice is a release default yet.
+For each shipping quant and shape, CPU expert output passes error tolerances against dequantize-plus-reference matmul. Every profile has a complete sensitive-tensor census and explicit precision/scale provenance, shared-gate/control scale/dequant parity passes, and deliberately mis-scaled shared-gate and degraded GDN-control fixtures fail the quality harness. The loaded, pre-faulted DDR4 expert bank is the sole steady-state CPU/cache-fill source and PLE page-cache accounting is recorded. The cache-zero CPU reference path and tiny-model composition tests remain correct, and Q4/Q3/AP identities and conversion evidence are complete; no Q3 or component precision choice is a release default yet.
 
 ### Deferred H2/H3 qualification
 
@@ -162,7 +162,7 @@ Issue #74 may add exact context-derived n-gram speculation after ordinary state 
 - component-level Q5/Q8 and shipping CPU/GPU format comparison, plus the ADR 0011 PLE codec experiment matrix;
 - benchmark comparison with merged llama.cpp/PXQ;
 - independently measured cold-cache, warm-cache, major-page-fault, physical-read/amplification and steady-state PLE behavior for both storage backends;
-- cache-zero, static-hot, static, dynamic and current-step-hybrid controls;
+- cache-zero, static-hot, static-cache, dynamic and current-step-hybrid controls;
 - soak and fault injection;
 - v1 release artifact, image, docs and known limitations;
 - optional `coding-ngram` profile only when its separate evidence passes.
