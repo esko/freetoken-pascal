@@ -794,9 +794,7 @@ def _validate_prefetch_config(max_rows: int, chunk_rows: int) -> None:
 
 
 class MappedPLETable:
-    _MODES = frozenset(
-        {"cold", "page-cache-warm", "targeted", "full-model-warm", "full-ple-warm"}
-    )
+    _MODES = frozenset({"cold", "page-cache-warm", "targeted", "full-model-warm", "full-ple-warm"})
 
     def __init__(
         self,
@@ -964,8 +962,13 @@ class MappedPLETable:
         mapping = None
         if backend == "mmap":
             mapping = MappedFileRange(
-                str(payload), offset=0, length=tensor_bytes, rows=rows, row_bytes=row_bytes,
-                expected_file_sha256=manifest["sha256"], verify_file_sha256=True,
+                str(payload),
+                offset=0,
+                length=tensor_bytes,
+                rows=rows,
+                row_bytes=row_bytes,
+                expected_file_sha256=manifest["sha256"],
+                verify_file_sha256=True,
             )
         table = cls(
             descriptor,
@@ -1092,9 +1095,7 @@ class MappedPLETable:
                 future = Future()
             handle = PLEPrefetchHandle(row_ids, requested_rows, future, cancel_event)
             self._prefetch_active = handle
-            future.add_done_callback(
-                lambda completed: self._finish_prefetch(handle, completed)
-            )
+            future.add_done_callback(lambda completed: self._finish_prefetch(handle, completed))
             if not row_ids:
                 future.set_result(0)
             return handle

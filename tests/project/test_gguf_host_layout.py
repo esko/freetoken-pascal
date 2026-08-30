@@ -337,9 +337,7 @@ def test_ple_prefetch_is_bounded_and_rejects_a_second_active_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
-    with MappedPLETable.open_from_artifact(
-        artifact, backend="pread", prefetch_max_rows=2
-    ) as table:
+    with MappedPLETable.open_from_artifact(artifact, backend="pread", prefetch_max_rows=2) as table:
         with pytest.raises(ValueError, match=r"prefetch.*2 rows"):
             table.prefetch(np.array([0, 1, 2]))
         assert table.telemetry()["prefetch_submitted"] == 0
