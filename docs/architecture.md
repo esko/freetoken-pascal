@@ -102,6 +102,7 @@ Its required high-water is non-QSA demand plus QSA persistent bytes plus QSA tra
 The planner and canary evaluator are immutable, versioned, allocation-free accounting only; they do not claim runtime placement or hardware qualification.
 Canary observations compare allocator allocated bytes with the live non-QSA plus persistent-QSA demand and allocator high-water with the live plus transient-QSA peak, while keeping driver total/free and allocator reserved bytes separate.
 They reject unavailable or inconsistent samples before readiness.
+Each child telemetry record carries the aggregate tolerance and a passing record independently enforces category, live-allocation, and peak high-water agreement within that bound.
 The bounded backoff remains pending until both profile-bound post-load and post-first-large-prefill results pass in order; a failure resets checkpoint evidence before advancing, stale-profile results are rejected, and readiness is never inferred from a boolean.
 
 The exact ordinary-tensor placement is measured. The architecture requires the routed expert bank to remain complete in DDR4 even when a subset is cached in VRAM.

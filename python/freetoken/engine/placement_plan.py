@@ -643,6 +643,7 @@ class GPUCanaryTelemetry:
     planned_categories: Mapping[str, int]
     observed_categories: Mapping[str, int]
     reasons: tuple[str, ...] = ()
+    tolerance_bytes: int = 0
 
     def __post_init__(self) -> None:
         if isinstance(self.rank, bool) or not isinstance(self.rank, int) or self.rank < 0:
@@ -690,6 +691,9 @@ class GPUCanaryTelemetry:
             if normalized[name] != value:
                 raise PlacementInputError(f"canary {name} does not match planned categories")
         reserve = planned["safety_reserve"]
+        tolerance = _int(self.tolerance_bytes, "tolerance_bytes")
+        if tolerance > reserve:
+            raise PlacementInputError("tolerance_bytes must not exceed planned safety reserve")
         if normalized["available_bytes"] != normalized["driver_free_bytes"]:
             raise PlacementInputError("canary available_bytes must equal driver_free_bytes")
         if headroom != normalized["driver_free_bytes"] - reserve:
@@ -720,6 +724,22 @@ class GPUCanaryTelemetry:
             or normalized["required_bytes"] > normalized["driver_total_bytes"]
         ):
             raise PlacementInputError("passing canary telemetry is not capacity-safe")
+        if self.status == "pass":
+            live = _add(non_qsa, persistent, label="canary live required bytes")
+            peak = _add(live, transient, label="canary peak required bytes")
+            if abs(normalized["allocator_allocated_bytes"] - live) > tolerance:
+                raise PlacementInputError(
+                    "passing canary telemetry allocator live bytes exceed tolerance"
+                )
+            if abs(normalized["allocator_high_water_bytes"] - peak) > tolerance:
+                raise PlacementInputError(
+                    "passing canary telemetry allocator high-water bytes exceed tolerance"
+                )
+            for category in PLACEMENT_CATEGORIES:
+                if abs(observed[category] - planned[category]) > tolerance:
+                    raise PlacementInputError(
+                        "passing canary telemetry category delta exceeds tolerance"
+                    )
         if (self.status == "pass") != (not reasons):
             raise PlacementInputError("canary status must agree with reasons")
 
@@ -731,6 +751,7 @@ class GPUCanaryTelemetry:
         object.__setattr__(self, "planned_categories", planned)
         object.__setattr__(self, "observed_categories", observed)
         object.__setattr__(self, "reasons", reasons)
+        object.__setattr__(self, "tolerance_bytes", tolerance)
 
     @property
     def key(self) -> str:
@@ -761,6 +782,7 @@ class GPUCanaryTelemetry:
             "planned_categories": dict(self.planned_categories),
             "observed_categories": dict(self.observed_categories),
             "reasons": list(self.reasons),
+            "tolerance_bytes": self.tolerance_bytes,
         }
 
     @property
@@ -811,6 +833,8 @@ class CanaryResult:
             raise PlacementInputError("canary result requires telemetry for exactly 1 or 2 GPUs")
         if any(not isinstance(item, GPUCanaryTelemetry) for item in gpus):
             raise PlacementInputError("canary result telemetry must be GPUCanaryTelemetry values")
+        if any(item.tolerance_bytes != tolerance for item in gpus):
+            raise PlacementInputError("canary telemetry tolerance must match result tolerance")
         if tuple(item.rank for item in gpus) != tuple(range(len(gpus))):
             raise PlacementInputError("canary telemetry ranks must be contiguous and start at zero")
         if len({item.key for item in gpus}) != len(gpus):
@@ -992,6 +1016,7 @@ def evaluate_canary(
             expected.categories,
             observed.categories,
             tuple(reasons),
+            tolerance_bytes=tolerance,
         )
         telemetry.append(item)
         all_reasons.extend(f"gpu{expected.rank}:{reason}" for reason in reasons)

@@ -247,6 +247,7 @@ def test_canary_accepts_bounded_category_drift_and_reports_checkpoint() -> None:
     assert result.gpus[0].headroom_bytes == observed.driver_free_bytes - plan.safety_reserve_bytes
     assert result.gpus[0].allocator_allocated_bytes == plan.gpus[0].live_required_bytes
     assert result.gpus[0].allocator_high_water_bytes == observed.allocator_high_water_bytes
+    assert result.gpus[0].tolerance_bytes == result.tolerance_bytes == 2
     assert result.as_dict()["checkpoint"] == "post-first-large-prefill"
 
 
@@ -346,7 +347,12 @@ def test_canary_telemetry_and_result_schema_fail_closed() -> None:
         observations=(_observation(plan),),
     )
     telemetry = result.gpus[0]
+    assert telemetry.tolerance_bytes == result.tolerance_bytes
 
+    with pytest.raises(PlacementPlannerError, match="tolerance"):
+        replace(telemetry, tolerance_bytes=-1)
+    with pytest.raises(PlacementPlannerError, match="tolerance"):
+        replace(telemetry, tolerance_bytes=51)
     with pytest.raises(PlacementPlannerError, match="rank"):
         replace(telemetry, rank=True)
     with pytest.raises(PlacementPlannerError, match="driver_free_bytes"):
@@ -427,6 +433,27 @@ def test_canary_telemetry_rejects_forged_pass_and_invalid_allocator_counters() -
     with pytest.raises(PlacementPlannerError, match="capacity-safe"):
         replace(
             telemetry, available_bytes=0, driver_free_bytes=0, headroom_bytes=-50, deficit_bytes=50
+        )
+    with pytest.raises(PlacementPlannerError, match="live bytes"):
+        replace(telemetry, allocator_allocated_bytes=telemetry.live_required_bytes - 1)
+    with pytest.raises(PlacementPlannerError, match="high-water bytes"):
+        replace(telemetry, allocator_high_water_bytes=telemetry.peak_required_bytes - 1)
+    with pytest.raises(PlacementPlannerError, match="category delta"):
+        replace(
+            telemetry,
+            observed_categories={
+                **telemetry.observed_categories,
+                "qsa_persistent_score": telemetry.observed_categories["qsa_persistent_score"] + 1,
+            },
+        )
+    child_with_different_tolerance = replace(telemetry, tolerance_bytes=1)
+    with pytest.raises(PlacementPlannerError, match="tolerance"):
+        CanaryResult(
+            "post-load",
+            "full-cache",
+            "pass",
+            (child_with_different_tolerance,),
+            tolerance_bytes=0,
         )
 
 

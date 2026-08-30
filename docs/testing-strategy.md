@@ -167,7 +167,7 @@ Test the #73 planner and canary with synthetic and real categories:
 
 Missing categories fail closed. Forced overcommit must trigger backoff or fail readiness, never a nominally healthy slow profile. Model output remains unchanged across safe backoff steps. Stale placement profiles are rejected on any model, quant, context, binary, driver or topology change.
 
-The H0 placement fixture uses `freetoken.engine.placement_plan` with exact versioned categories, explicit unique GPU identities, positive-capacity/zero-free inputs, asymmetric one- and two-GPU capacities, cache-zero profiles, profile-bound synthetic post-load and post-first-large-prefill observations in order, separate driver/allocator counters, allocator consistency checks, absolute live/peak agreement, reserve-bounded tolerance, and deterministic monotonic backoff that requires both readiness checkpoints.
+The H0 placement fixture uses `freetoken.engine.placement_plan` with exact versioned categories, explicit unique GPU identities, positive-capacity/zero-free inputs, asymmetric one- and two-GPU capacities, cache-zero profiles, profile-bound synthetic post-load and post-first-large-prefill observations in order, separate driver/allocator counters, allocator consistency checks, absolute live/peak agreement, child/aggregate tolerance matching bounded by reserve, and deterministic monotonic backoff that requires both readiness checkpoints.
 
 ### Model graph
 
