@@ -1468,37 +1468,55 @@ class MappedPLETable:
             data_offset=0,
             codec=codec_descriptor,
         )
-        mapping = None
-        if backend == "mmap":
-            mapping = MappedFileRange(
-                str(payload),
-                offset=0,
-                length=tensor_bytes,
-                rows=rows,
-                row_bytes=row_bytes,
-                expected_file_sha256=manifest["sha256"],
-                verify_file_sha256=True,
-            )
-        table = cls(
-            descriptor,
-            mapping,
-            model_shard_paths=(str(payload),),
-            prefetch_max_rows=prefetch_max_rows,
-            prefetch_chunk_rows=prefetch_chunk_rows,
-            planner_config=resolved_planner,
-        )
-        table.source_kind = "dedicated-artifact"
+        mapping: MappedFileRange | None = None
+        table: MappedPLETable | None = None
+        pread_fd: int | None = None
         try:
+            if backend == "mmap":
+                mapping = MappedFileRange(
+                    str(payload),
+                    offset=0,
+                    length=tensor_bytes,
+                    rows=rows,
+                    row_bytes=row_bytes,
+                    expected_file_sha256=manifest["sha256"],
+                    verify_file_sha256=True,
+                )
+            else:
+                pread_fd = _open_validated_pread_fd(payload, offset=0, length=tensor_bytes)
+            table = cls(
+                descriptor,
+                mapping,
+                model_shard_paths=(str(payload),),
+                prefetch_max_rows=prefetch_max_rows,
+                prefetch_chunk_rows=prefetch_chunk_rows,
+                planner_config=resolved_planner,
+            )
+            table.source_kind = "dedicated-artifact"
             table.backend = backend
-            if backend == "pread":
-                table._pread_fd = os.open(payload, os.O_RDONLY)
+            table._pread_fd = pread_fd
             table._apply_random_advice()
             if warm_mode == "full-model-warm":
                 raise ValueError("artifact warm mode is full-ple-warm")
             table.set_warm_mode(warm_mode)
         except BaseException:
-            table.close()
+            if table is not None:
+                try:
+                    table.close()
+                except BaseException:
+                    pass
+            elif mapping is not None:
+                try:
+                    mapping.close()
+                except BaseException:
+                    pass
+            if table is None and pread_fd is not None:
+                try:
+                    os.close(pread_fd)
+                except BaseException:
+                    pass
             raise
+        assert table is not None
         return table
 
     def _prefetch_rows(

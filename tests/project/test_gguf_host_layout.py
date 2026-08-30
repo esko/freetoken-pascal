@@ -462,6 +462,108 @@ def test_dedicated_ple_artifact_round_trip_and_manifest(tmp_path: Path) -> None:
         assert table.lookup(np.array([0, 31])).shape == (2, 160)
 
 
+@pytest.mark.parametrize("backend", ["mmap", "pread"])
+def test_dedicated_ple_artifact_constructor_failure_rolls_back_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+) -> None:
+    artifact = tmp_path / backend
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+
+    def fail_table_setup(self: MappedPLETable, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("injected artifact table setup failure")
+
+    def open_fd_count() -> int:
+        return len(list(Path("/proc/self/fd").iterdir()))
+
+    before = open_fd_count()
+    monkeypatch.setattr(MappedPLETable, "__init__", fail_table_setup)
+    with pytest.raises(RuntimeError, match="artifact table setup failure"):
+        MappedPLETable.open_from_artifact(artifact, backend=backend)
+    assert open_fd_count() == before
+
+
+def test_dedicated_ple_artifact_constructor_failure_closes_fake_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "ple"
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+
+    class FakeMapping:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise OSError("injected mapping close failure")
+
+    mapping = FakeMapping()
+
+    def fail_table_setup(self: MappedPLETable, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("injected artifact constructor failure")
+
+    monkeypatch.setattr("freetoken.gguf_host.MappedFileRange", lambda *_args, **_kwargs: mapping)
+    monkeypatch.setattr(MappedPLETable, "__init__", fail_table_setup)
+    with pytest.raises(RuntimeError, match="artifact constructor failure"):
+        MappedPLETable.open_from_artifact(artifact)
+    assert mapping.close_calls == 1
+
+
+@pytest.mark.parametrize("backend", ["mmap", "pread"])
+@pytest.mark.parametrize("failure_method", ["_apply_random_advice", "set_warm_mode"])
+def test_dedicated_ple_artifact_setup_failure_rolls_back_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    failure_method: str,
+) -> None:
+    artifact = tmp_path / f"{backend}-{failure_method}"
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+
+    def fail_setup(self: MappedPLETable, *args: object, **kwargs: object) -> None:
+        raise RuntimeError(f"injected artifact {failure_method} failure")
+
+    def open_fd_count() -> int:
+        return len(list(Path("/proc/self/fd").iterdir()))
+
+    before = open_fd_count()
+    monkeypatch.setattr(MappedPLETable, failure_method, fail_setup)
+    with pytest.raises(RuntimeError, match=f"artifact {failure_method} failure"):
+        MappedPLETable.open_from_artifact(artifact, backend=backend)
+    assert open_fd_count() == before
+
+
+def test_dedicated_ple_artifact_setup_failure_closes_fake_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "ple"
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+
+    class FakeMapping:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def advise(self, _advice: int) -> None:
+            pass
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    mapping = FakeMapping()
+
+    def fail_setup(self: MappedPLETable, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("injected artifact warm setup failure")
+
+    monkeypatch.setattr("freetoken.gguf_host.MappedFileRange", lambda *_args, **_kwargs: mapping)
+    monkeypatch.setattr(MappedPLETable, "set_warm_mode", fail_setup)
+    with pytest.raises(RuntimeError, match="artifact warm setup failure"):
+        MappedPLETable.open_from_artifact(artifact)
+    assert mapping.close_calls == 1
+
+
 def test_dedicated_ple_artifact_rejects_tampering_and_bad_geometry(tmp_path: Path) -> None:
     artifact = tmp_path / "ple"
     convert_gguf_ple_to_artifact(FIXTURE, artifact)
