@@ -246,6 +246,7 @@ sources:
           - retain downstream GGUF parsing and quantized host layouts
           - retain dedicated NVMe PLE mapping and bounded host-table adapters
           - retain Pascal fallbacks, CPU expert execution, placement safety and evidence contracts
+          - issue #38 adds explicit auto/torch-reference/triton-candidate router dispatch, preserving the full-FP32 oracle and device-resident token limits
           - isolate pre-sync QSA and PLE helpers as reference-only test paths
         license: Apache-2.0
         header_policy: preserved by history

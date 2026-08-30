@@ -251,7 +251,6 @@ def test_fused_experts_decode_activation_and_router_weight_modes(
     cache_size = 19
     hidden_size = 32
     intermediate_size = 24
-    top_k = 4
     dtype = torch.float16
     torch.manual_seed(123)
 
@@ -356,6 +355,26 @@ def test_fused_topk_softmax_ties_pick_the_lowest_expert_id():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_fused_topk_softmax_nonfinite_values_match_reference():
+    from freetoken.kernel.triton.moe_router import fused_topk_softmax
+    from freetoken.moe.fused import _torch_fused_topk
+
+    gating = torch.tensor(
+        [
+            [float("nan"), float("-inf"), 0.0, float("inf"), float("inf")],
+            [float("-inf"), float("-inf"), float("-inf"), float("-inf"), float("-inf")],
+        ],
+        device="cuda",
+    )
+
+    weights, ids = fused_topk_softmax(gating, 3, False)
+    expected_weights, expected_ids = _torch_fused_topk(gating, 3, False, None)
+
+    assert torch.equal(ids, expected_ids)
+    torch.testing.assert_close(weights, expected_weights, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("limit_dtype", [torch.int32, torch.int64])
 def test_fused_topk_softmax_masks_padded_rows(limit_dtype):
     from freetoken.kernel.triton.moe_router import fused_topk_softmax
@@ -375,7 +394,7 @@ def test_fused_topk_softmax_masks_padded_rows(limit_dtype):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_fused_topk_softmax_is_cuda_graph_capturable():
-    """The padded-row limit must come off the device tensor, not a host read baked into the graph."""
+    """The padded-row limit must stay device-side for CUDA graph capture."""
     from freetoken.kernel.triton.moe_router import fused_topk_softmax
 
     gen = torch.Generator(device="cuda").manual_seed(11)

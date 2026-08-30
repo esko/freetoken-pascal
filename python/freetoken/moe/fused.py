@@ -18,7 +18,7 @@ from freetoken.utils import div_ceil, init_logger
 
 logger = init_logger(__name__)
 
-_warned_torch_topk = False
+_warned_torch_decisions: set[RouterDispatchDecision] = set()
 DebugObserver = Callable[[str, dict[str, object]], None]
 RouterObserver = Callable[[RouterDispatchDecision], None]
 
@@ -197,12 +197,6 @@ def fused_topk(
         from freetoken.kernel.backend import is_triton_kernels_usable
 
         triton_kernels_available = is_triton_kernels_usable()
-    # Exceptional-value validation is needed only for the explicitly requested
-    # candidate. Avoid a device-to-host reduction on the permanent auto/reference
-    # path, where the candidate is not eligible anyway.
-    candidate_inputs_supported = True
-    if router_mode == "triton-candidate":
-        candidate_inputs_supported = bool(torch.isfinite(gating_output.float()).all().item())
     decision = resolve_router_dispatch(
         requested_mode=router_mode,
         topk=topk,
@@ -211,15 +205,13 @@ def fused_topk(
         has_token_limit=num_token_non_padded is not None,
         triton_candidate_available=triton_candidate_available,
         triton_kernels_available=triton_kernels_available,
-        candidate_inputs_supported=candidate_inputs_supported,
     )
     if router_observer is not None:
         router_observer(decision)
 
     if decision.selected_implementation == "torch-reference":
-        global _warned_torch_topk
-        if decision.fallback_reason and not _warned_torch_topk:
-            _warned_torch_topk = True
+        if decision.fallback_reason and decision not in _warned_torch_decisions:
+            _warned_torch_decisions.add(decision)
             logger.warning_rank0(
                 f"fused_topk: {decision.fallback_reason} -> pure-torch router fallback."
             )

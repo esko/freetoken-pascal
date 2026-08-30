@@ -183,6 +183,30 @@ def test_auto_qwen_router_stays_reference_with_candidate_reason():
     assert observed[0].fallback_reason == "candidate-not-qualified"
 
 
+def test_fallback_warning_suppression_is_keyed_by_full_decision(monkeypatch):
+    import freetoken.moe.fused as fused_module
+
+    warnings = []
+    previous = set(fused_module._warned_torch_decisions)
+    fused_module._warned_torch_decisions.clear()
+    monkeypatch.setattr(fused_module.logger, "warning_rank0", warnings.append)
+    try:
+        for renormalize in (False, True, False):
+            fused_topk(
+                torch.zeros((1, 8)),
+                torch.zeros((1, 512)),
+                10,
+                renormalize,
+                router_mode="auto",
+                triton_kernels_available=False,
+            )
+    finally:
+        fused_module._warned_torch_decisions.clear()
+        fused_module._warned_torch_decisions.update(previous)
+
+    assert len(warnings) == 2
+
+
 def test_auto_qualified_power_of_two_preserves_external_triton_choice():
     decision = resolve_router_dispatch(
         requested_mode="auto",
@@ -239,20 +263,26 @@ def test_explicit_candidate_dispatches_injected_implementation(monkeypatch):
     assert observed[0].fallback_reason is None
 
 
-def test_explicit_candidate_rejects_exceptional_logits_before_launch(monkeypatch):
+def test_explicit_candidate_dispatches_exceptional_logits_without_host_probe(monkeypatch):
     import freetoken.moe.fused as fused_module
+
+    called = []
+
+    def fake_candidate(gating_output, topk, renormalize, num_token_non_padded):
+        called.append((gating_output, topk, renormalize, num_token_non_padded))
+        return torch.zeros((1, topk)), torch.zeros((1, topk), dtype=torch.int32)
 
     monkeypatch.setattr(
         fused_module,
         "_run_triton_candidate",
-        lambda *args: pytest.fail("candidate must not launch for non-finite logits"),
+        fake_candidate,
     )
-    with pytest.raises(RouterDispatchError, match="exceptional-input"):
-        fused_module.fused_topk(
-            torch.zeros((1, 8)),
-            torch.tensor([[float("nan"), 0.0, 0.0, 0.0]]),
-            2,
-            False,
-            router_mode="triton-candidate",
-            triton_candidate_available=True,
-        )
+    fused_module.fused_topk(
+        torch.zeros((1, 8)),
+        torch.tensor([[float("nan"), 0.0, 0.0, 0.0]]),
+        2,
+        False,
+        router_mode="triton-candidate",
+        triton_candidate_available=True,
+    )
+    assert len(called) == 1
