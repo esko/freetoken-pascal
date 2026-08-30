@@ -117,10 +117,89 @@
           "row_bytes": {"type": "integer", "minimum": 1}
         }
       }
+    },
+    "sensitive_tensors": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sensitive_tensor"}
+    },
+    "sensitive_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_name", "schema_version", "profile", "expert_rule",
+        "sensitive_rule", "baseline", "allowed_formats", "sub8_default", "q8_promotion",
+        "serving_qualification",
+        "long_horizon_semantic_gate"
+      ],
+      "properties": {
+        "schema_name": {"const": "sensitive-tensor-precision-policy"},
+        "schema_version": {"const": 1},
+        "profile": {"type": "string", "minLength": 1},
+        "expert_rule": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scope", "match", "sensitive_exclusion"],
+          "properties": {
+            "scope": {"const": "routed-expert-tensors-only"},
+            "match": {"type": "string", "minLength": 1},
+            "sensitive_exclusion": {"const": true}
+          }
+        },
+        "sensitive_rule": {"const": "exact-identity-only"},
+        "baseline": {"type": "string", "minLength": 1},
+        "allowed_formats": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "sub8_default": {"const": "reject"},
+        "q8_promotion": {"const": "per-class-evidence-required"},
+        "serving_qualification": {"const": "blocked-until-sensitive-evidence"},
+        "long_horizon_semantic_gate": {"const": "deferred"}
+      }
     }
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "shape": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}}
+    "shape": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}},
+    "sensitive_tensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity", "name", "class", "dtype", "quant_format", "dtype_or_quant",
+        "scale_representation", "conversion_provenance", "selected_precision", "rationale",
+        "promotion_status", "promotion_evidence"
+      ],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "class": {
+          "enum": [
+            "moe_router", "shared_expert_gate", "shared_expert_gate_scale",
+            "gdn_in_proj_a", "gdn_in_proj_b", "gdn_control", "gdn_output_gate",
+            "residual_write_gate", "norm", "reference_control"
+          ]
+        },
+        "dtype": {"type": ["string", "null"]},
+        "quant_format": {"type": "string", "minLength": 1},
+        "dtype_or_quant": {"type": "string", "minLength": 1},
+        "scale_representation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "location", "required"],
+          "properties": {
+            "kind": {"type": "string", "minLength": 1},
+            "location": {"type": "string", "minLength": 1},
+            "dtype": {"type": "string", "minLength": 1},
+            "required": {"type": "boolean"}
+          }
+        },
+        "conversion_provenance": {"type": "string", "minLength": 1},
+        "selected_precision": {"type": "string", "minLength": 1},
+        "promotion_status": {"enum": ["baseline", "unqualified", "qualified", "passed"]},
+        "promotion_evidence": {"type": ["string", "null"]},
+        "rationale": {"type": "string", "minLength": 1},
+        "shape": {"$ref": "#/$defs/shape"}
+      }
+    }
   }
 }

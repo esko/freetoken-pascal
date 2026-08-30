@@ -29,6 +29,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifact-manifest", type=Path)
     parser.add_argument("--variant")
     parser.add_argument(
+        "--profile",
+        default="unassigned",
+        help="precision-policy profile identity to embed (for example reference-q4)",
+    )
+    parser.add_argument(
+        "--conversion-provenance",
+        default="gguf_census:direct-tensor-metadata",
+        help="immutable source/converter provenance recorded in sensitive records",
+    )
+    parser.add_argument(
         "--trust-declared-sha256",
         action="store_true",
         help="do not hash payloads; output is explicitly artifact-metadata evidence",
@@ -47,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         args.gguf,
         declared_shards=declared,
         verify_sha256=not args.trust_declared_sha256,
+        profile=args.profile,
+        conversion_provenance=args.conversion_provenance,
     )
     rendered = json.dumps(census, indent=2, sort_keys=True) + "\n"
     if args.output is None:

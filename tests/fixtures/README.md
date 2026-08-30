@@ -17,5 +17,8 @@ prompts and deterministic long-context templates.
   rendered chat-template prompt, and verifies each long-context needle; metadata alone is never
   treated as measured evidence.
 - `kernels/` contains arithmetic values checked against simple independent scalar formulas.
+- `sensitive/` contains deterministic tensor-level positive controls for a mis-scaled
+  shared-expert gate and a perturbed GDN control. These prove H0 rejection sensitivity;
+  they are not long-horizon model-quality evidence.
 - `results/` contains schema-valid synthetic evidence. The `evidence_status` field prevents these
   examples from being confused with measured release results.

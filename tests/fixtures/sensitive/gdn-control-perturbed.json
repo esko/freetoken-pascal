@@ -1,0 +1,22 @@
+{
+  "schema_name": "sensitive-tensor-ablation",
+  "schema_version": 1,
+  "tensor_identity": "blk.0.ssm_alpha.weight",
+  "tensor_class": "gdn_in_proj_a",
+  "seed": 23,
+  "reference": {
+    "values": [0.0625, -0.125, 0.1875, -0.25],
+    "dtype": "float32"
+  },
+  "candidate": {
+    "values": [0.0625, -0.055, 0.1875, -0.25],
+    "dtype": "float32",
+    "perturbation": {"index": 1, "delta": 0.07}
+  },
+  "tolerance": {
+    "max_abs": 0.000001,
+    "relative_rms": 0.000001,
+    "min_cosine": 0.999999
+  },
+  "expected_rejected": true
+}
