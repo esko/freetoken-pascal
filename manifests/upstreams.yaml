@@ -386,6 +386,16 @@ sources:
     responsible_issue: 19
     notice_required: false
     imports: []
+  - id: sglang-fla-gdn-audit
+    repository: https://github.com/sgl-project/sglang
+    upstream_ref: refs/heads/main
+    ref: a6e402136872653a1eed5efc133fe37382c09e85
+    license: Apache-2.0
+    role: FLA indexed-state GDN donor audit for issue #93
+    usage: reference
+    responsible_issue: 93
+    notice_required: false
+    imports: []
   - id: vllm-qwen38-pr53896
     repository: https://github.com/vllm-project/vllm
     pull_request: 53896

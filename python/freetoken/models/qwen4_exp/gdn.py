@@ -1,15 +1,54 @@
 from __future__ import annotations
 
+import importlib.util
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
+
 from freetoken.core import get_global_ctx
 from freetoken.kernel.causal_conv1d import causal_conv1d_decode, causal_conv1d_varlen
-from freetoken.layers import BaseOP, LinearColParallelMerged
-
 from freetoken.kernel.triton.fp8_block_linear import Fp8BlockColMerged
 from freetoken.kernel.triton.fp8_pertensor_linear import Fp8PerTensorColMerged
-from freetoken.models.qwen3_5_moe.gdn_kernels import gdn_decode_fla, gdn_prefill_chunk_fla
+from freetoken.layers import BaseOP, LinearColParallelMerged
 from freetoken.models.quant_linear import make_replicated_quant
+from freetoken.utils import init_logger
+
+from .gdn_contract import (
+    GdnDispatchDecision,
+    GdnDispatchError,
+    gdn_mode_from_env,
+    parse_gdn_mode,
+    resolve_gdn_dispatch,
+)
+
+logger = init_logger(__name__)
+GdnObserver = Callable[[GdnDispatchDecision], None]
+_warned_reference_decisions: set[GdnDispatchDecision] = set()
+
+
+def _probe_fla_available() -> bool:
+    """Check the currently qualified in-tree FLA dependency without importing it."""
+
+    try:
+        return (
+            importlib.util.find_spec("triton") is not None
+            and importlib.util.find_spec("freetoken.kernel.fla") is not None
+        )
+    except Exception:
+        return False
+
+
+def _probe_triton_candidate_available() -> bool:
+    """The issue-93 candidate is unavailable until its donor is audited/imported."""
+
+    return False
+
+
+def _device_capability(device: torch.device) -> tuple[int, int]:
+    if device.type != "cuda":
+        return (0, 0)
+    return tuple(int(part) for part in torch.cuda.get_device_capability(device))
 
 
 _GATE_ACTIVATIONS = ("silu", "swish", "sigmoid")
@@ -37,13 +76,26 @@ class _GatedRMSNorm(BaseOP):
         self.eps = eps
         self.activation = activation
 
-    def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-        from freetoken.kernel.fla import rms_norm_gated
+    def forward(self, x: torch.Tensor, z: torch.Tensor, *, use_fla: bool = True) -> torch.Tensor:
+        if use_fla:
+            from freetoken.kernel.fla import rms_norm_gated
 
-        return rms_norm_gated(
-            x=x, weight=self.weight, bias=None, z=z, eps=self.eps,
-            is_rms_norm=True, norm_before_gate=True, activation=self.activation,
-        )
+            return rms_norm_gated(
+                x=x,
+                weight=self.weight,
+                bias=None,
+                z=z,
+                eps=self.eps,
+                is_rms_norm=True,
+                norm_before_gate=True,
+                activation=self.activation,
+            )
+        x_dtype = x.dtype
+        x = x.float()
+        x = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        x = x * self.weight.float()
+        activation = torch.sigmoid if self.activation == "sigmoid" else F.silu
+        return (x * activation(z.float())).to(x_dtype)
 
 
 class Qwen4ExpGatedDeltaNet(BaseOP):
@@ -60,11 +112,30 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
     """
 
     def __init__(
-        self, hidden_size, num_k_heads, num_v_heads, head_k_dim, head_v_dim,
-        conv_kernel_size, rms_norm_eps, layer_id, output_gate: str = "sigmoid",
-        expert_quant: str = "none", attn_quant: str = "none",
+        self,
+        hidden_size,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_kernel_size,
+        rms_norm_eps,
+        layer_id,
+        output_gate: str = "sigmoid",
+        expert_quant: str = "none",
+        attn_quant: str = "none",
+        gdn_mode: str | None = None,
+        gdn_observer: GdnObserver | None = None,
+        gdn_fla_available: bool | None = None,
+        gdn_candidate_available: bool | None = None,
     ):
         self.layer_id = layer_id
+        self._gdn_mode = None if gdn_mode is None else parse_gdn_mode(gdn_mode)
+        if gdn_observer is not None and not callable(gdn_observer):
+            raise TypeError("gdn_observer must be callable")
+        self._gdn_observer = gdn_observer
+        self._gdn_fla_available = gdn_fla_available
+        self._gdn_candidate_available = gdn_candidate_available
         # The fla chunk/decode kernels read+write the recurrent state and the per-chunk h as
         # [V, K] while the LinearStatePool declares it [K, V]; these coincide (and the
         # hybrid-radix snapshot scatter h[h_row]->slot is a plain copy) only when the two head
@@ -122,14 +193,22 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
     def _conv_weight(self) -> torch.Tensor:
         return self.conv1d.weight.squeeze(1)  # [conv_dim, kernel] for the fused kernel
 
-    def _conv_prefill(self, conv_in, pool, cu_seqlens, cache_indices, has_initial_state) -> torch.Tensor:
+    def _conv_prefill(
+        self, conv_in, pool, cu_seqlens, cache_indices, has_initial_state
+    ) -> torch.Tensor:
         """Varlen causal conv (fused sgl_kernel) with silu; reads/updates each request's
         conv state in place by ``cache_indices`` slot. ``conv_in`` [total, conv_dim].
         ``cu_seqlens`` / ``cache_indices`` / ``has_initial_state`` come from FLAMetadata."""
         li = pool.local_index(self.layer_id)
         x = conv_in.transpose(0, 1).contiguous()  # [conv_dim, total]
-        out = causal_conv1d_varlen(x, self._conv_weight(), pool.conv_states[li],
-                                   cu_seqlens, cache_indices, has_initial_state)
+        out = causal_conv1d_varlen(
+            x,
+            self._conv_weight(),
+            pool.conv_states[li],
+            cu_seqlens,
+            cache_indices,
+            has_initial_state,
+        )
         return out.transpose(0, 1)  # [total, conv_dim]
 
     def _conv_decode(self, conv_in: torch.Tensor, table_idx: torch.Tensor, pool) -> torch.Tensor:
@@ -139,8 +218,119 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         li = pool.local_index(self.layer_id)
         return causal_conv1d_decode(conv_in, pool.conv_states[li], self._conv_weight(), table_idx)
 
-    def _write_track_snapshot(self, pool, li: int, conv_in: torch.Tensor,
-                              h: torch.Tensor, fla) -> None:
+    def _reference_conv_prefill(self, conv_in: torch.Tensor, pool, fla) -> torch.Tensor:
+        """Device-neutral causal depthwise convolution for the reference GDN path."""
+        li = pool.local_index(self.layer_id)
+        state_len = pool.conv_states.shape[-1]
+        weight = self._conv_weight().unsqueeze(1)
+        starts = fla.cu_seqlens.detach().cpu().tolist()
+        slots = fla.cache_indices.detach().cpu().tolist()
+        result = torch.empty_like(conv_in)
+        for index, slot in enumerate(slots):
+            start, end = int(starts[index]), int(starts[index + 1])
+            sequence = conv_in[start:end].transpose(0, 1)
+            previous = pool.conv_states[li, int(slot)]
+            context = torch.cat((previous, sequence), dim=-1).unsqueeze(0)
+            mixed = F.conv1d(context, weight, groups=self.conv_dim).squeeze(0).transpose(0, 1)
+            result[start:end] = F.silu(mixed)
+            if state_len:
+                pool.conv_states[li, int(slot)].copy_(context[0, :, -state_len:])
+        return result
+
+    def _reference_conv_decode(
+        self, conv_in: torch.Tensor, table_idx: torch.Tensor, pool
+    ) -> torch.Tensor:
+        """Single-token causal depthwise convolution without sgl_kernel/Triton imports."""
+        li = pool.local_index(self.layer_id)
+        state_len = pool.conv_states.shape[-1]
+        indices = table_idx.to(dtype=torch.long)
+        previous = pool.conv_states[li].index_select(0, indices)
+        context = torch.cat((previous, conv_in.unsqueeze(-1)), dim=-1)
+        mixed = F.conv1d(
+            context,
+            self._conv_weight().unsqueeze(1),
+            groups=self.conv_dim,
+        ).squeeze(-1)
+        if state_len:
+            pool.conv_states[li].index_copy_(0, indices, context[..., -state_len:])
+        return F.silu(mixed)
+
+    def _reference_recurrent(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        state_source: torch.Tensor,
+        fla,
+    ) -> torch.Tensor:
+        """Run the exact sequential delta rule while preserving indexed pool state.
+
+        This intentionally favors transparent FP32 arithmetic and a small Python loop over
+        launch overhead.  It is the correctness/fallback path; the FLA path remains unchanged
+        for a qualified modern GPU.
+        """
+        q = q.float()
+        k = k.float()
+        v = v.float()
+        g = g.float()
+        beta = beta.float()
+        q = q * torch.rsqrt(q.pow(2).sum(dim=-1, keepdim=True) + 1e-6)
+        k = k * torch.rsqrt(k.pow(2).sum(dim=-1, keepdim=True) + 1e-6)
+        repeat = self.num_v_heads // self.num_k_heads
+        if repeat > 1:
+            q = q.repeat_interleave(repeat, dim=2)
+            k = k.repeat_interleave(repeat, dim=2)
+
+        starts = fla.cu_seqlens.detach().cpu().tolist()
+        slots = fla.cache_indices.detach().cpu().tolist()
+        output = torch.empty_like(v)
+        track_boundaries = {}
+        if fla.track_boundary_row is not None:
+            boundaries = fla.track_boundary_row.detach().cpu().tolist()
+            destinations = fla.track_dst.detach().cpu().tolist()
+            for track_index, boundary in enumerate(boundaries):
+                track_boundaries[int(boundary)] = (int(destinations[track_index]), track_index)
+        tracked: list[tuple[int, torch.Tensor]] = []
+        state_dtype = state_source.dtype
+
+        for request_index, slot in enumerate(slots):
+            start, end = int(starts[request_index]), int(starts[request_index + 1])
+            state = state_source[int(slot)].float().clone()
+            for row in range(start, end):
+                state = state * g[0, row].exp()[:, None, None]
+                kv_memory = (state * k[0, row, :, :, None]).sum(dim=-2)
+                delta = (v[0, row] - kv_memory) * beta[0, row, :, None]
+                state = state + k[0, row, :, :, None] * delta[:, None, :]
+                output[0, row] = (state * q[0, row, :, :, None]).sum(dim=-2)
+                boundary = row + 1
+                if boundary in track_boundaries:
+                    destination, _track_index = track_boundaries[boundary]
+                    tracked.append((destination, state.clone()))
+            state_source[int(slot)].copy_(state.to(state_dtype))
+
+        if tracked:
+            destinations = torch.tensor(
+                [destination for destination, _state in tracked],
+                dtype=torch.long,
+                device=state_source.device,
+            )
+            states = torch.stack([state for _destination, state in tracked]).to(state_dtype)
+            state_source.index_copy_(0, destinations, states)
+        return output.to(v.dtype)
+
+    def _write_reference_track_snapshot(self, pool, li: int, conv_in, fla) -> None:
+        """Copy raw convolution context for the reference path's tracked boundary."""
+        if fla.track_dst is None:
+            return
+        destinations = fla.track_dst.to(dtype=torch.long)
+        conv_win = conv_in[fla.track_conv_src].transpose(-1, -2).contiguous()
+        pool.conv_states[li].index_copy_(0, destinations, conv_win.to(pool.conv_states.dtype))
+
+    def _write_track_snapshot(
+        self, pool, li: int, conv_in: torch.Tensor, h: torch.Tensor, fla
+    ) -> None:
         """Snapshot this layer's recurrent + conv state at the chunk-aligned track boundary
         into a donatable pool slot, on the forward stream (hybrid-radix extra_buffer path).
         SSM: ``recurrent_states[li, dst] = h[0, h_row]`` -- a DIRECT copy (h is [V,K], the
@@ -153,12 +343,52 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         conv_win = conv_in[fla.track_conv_src].transpose(-1, -2).contiguous()  # [nt, conv_dim, K-1]
         cv.index_copy_(0, fla.track_dst, conv_win.to(cv.dtype))
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        debug_observer: Callable[[str, dict[str, object]], None] | None = None,
+    ) -> torch.Tensor:
         ctx = get_global_ctx()
         batch = ctx.batch
         pool = ctx.linear_state_pool
         total = hidden_states.shape[0]
         dtype = hidden_states.dtype
+
+        requested_mode = self._gdn_mode or gdn_mode_from_env()
+        fla_available = (
+            _probe_fla_available() if self._gdn_fla_available is None else self._gdn_fla_available
+        )
+        candidate_available = (
+            _probe_triton_candidate_available()
+            if self._gdn_candidate_available is None
+            else self._gdn_candidate_available
+        )
+        decision = resolve_gdn_dispatch(
+            requested_mode=requested_mode,
+            capability=_device_capability(hidden_states.device),
+            dtype=str(dtype),
+            fla_available=fla_available,
+            triton_candidate_available=candidate_available,
+        )
+        if self._gdn_observer is not None:
+            self._gdn_observer(decision)
+        if debug_observer is not None:
+            debug_observer("gdn_backend", decision.as_dict())
+        if decision.fallback_reason and decision not in _warned_reference_decisions:
+            _warned_reference_decisions.add(decision)
+            logger.warning_rank0(
+                "Qwen4 GDN: "
+                f"{decision.fallback_reason} for capability=sm_{decision.capability[0]}"
+                f"{decision.capability[1]}, dtype={decision.dtype}; "
+                "using torch-reference fallback."
+            )
+        if decision.selected_implementation == "triton-candidate":
+            # The issue-93 donor candidate is deliberately not wired until H1/H2 audit and
+            # parity evidence are complete.  An affirmative injected probe may exercise the
+            # contract, but it must never silently run the qualified FLA implementation.
+            raise GdnDispatchError(
+                "triton-candidate selected but no Qwen4 GDN candidate implementation is registered"
+            )
 
         # Per-forward GDN metadata (cu_seqlens / cache_indices / continuation flags),
         # built once and shared by all GDN layers. The scheduler/graph set it; build it
@@ -182,23 +412,54 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         li = pool.local_index(self.layer_id)
 
         if batch.is_decode:
-            # Fused fla decode kernel: gating + in-kernel l2norm + recurrent update +
-            # per-request state read/write-by-index, all in one kernel (no gather/scatter,
-            # no clone, no external l2norm). q/k stay at num_k_heads (kernel handles GQA).
-            mixed = self._conv_decode(conv_in, fla.cache_indices, pool)  # [B, conv_dim]
+            if decision.selected_implementation == "torch-reference":
+                mixed = self._reference_conv_decode(conv_in, fla.cache_indices, pool)
+            else:
+                # Fused fla decode kernel: gating + in-kernel l2norm + recurrent update +
+                # per-request state read/write-by-index, all in one kernel (no gather/scatter,
+                # no clone, no external l2norm). q/k stay at num_k_heads (kernel handles GQA).
+                from freetoken.models.qwen3_5_moe.gdn_kernels import gdn_decode_fla
+
+                mixed = self._conv_decode(conv_in, fla.cache_indices, pool)  # [B, conv_dim]
             B = mixed.shape[0]
             qf, kf, vf = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
             q = qf.reshape(1, B, self.num_k_heads, self.head_k_dim).to(dtype)
             k = kf.reshape(1, B, self.num_k_heads, self.head_k_dim).to(dtype)
             v = vf.reshape(1, B, self.num_v_heads, self.head_v_dim).to(dtype)
-            core_out = gdn_decode_fla(
-                q, k, v, a, b, A_log=self.A_log, dt_bias=self.dt_bias,
-                state_source=pool.recurrent_states[li], indices=fla.cache_indices,
-                cu_seqlens=fla.cu_seqlens, scale=self.head_k_dim ** -0.5,
-            )
+            if decision.selected_implementation == "torch-reference":
+                g, beta = self._gate_params(a, b)
+                core_out = self._reference_recurrent(
+                    q,
+                    k,
+                    v,
+                    g.reshape(1, B, self.num_v_heads),
+                    beta.float().reshape(1, B, self.num_v_heads),
+                    pool.recurrent_states[li],
+                    fla,
+                )
+            else:
+                core_out = gdn_decode_fla(
+                    q,
+                    k,
+                    v,
+                    a,
+                    b,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    state_source=pool.recurrent_states[li],
+                    indices=fla.cache_indices,
+                    cu_seqlens=fla.cu_seqlens,
+                    scale=self.head_k_dim**-0.5,
+                )
         else:
-            mixed = self._conv_prefill(
-                conv_in, pool, fla.cu_seqlens, fla.cache_indices, fla.has_initial_state)
+            if decision.selected_implementation == "torch-reference":
+                mixed = self._reference_conv_prefill(conv_in, pool, fla)
+            else:
+                from freetoken.models.qwen3_5_moe.gdn_kernels import gdn_prefill_chunk_fla
+
+                mixed = self._conv_prefill(
+                    conv_in, pool, fla.cu_seqlens, fla.cache_indices, fla.has_initial_state
+                )
             # fla chunk handles GQA in-kernel: q/k stay at num_k_heads, v at num_v_heads.
             qf, kf, vf = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
             q = qf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
@@ -211,22 +472,42 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             # fresh sequences (cached_len==0) must start from a zeroed slot.
             if fla.fresh_state_indices is not None:
                 pool.recurrent_states[li].index_fill_(0, fla.fresh_state_indices, 0.0)
-            track = fla.track_dst is not None
-            result = gdn_prefill_chunk_fla(
-                q, k, v, g, beta,
-                state_source=pool.recurrent_states[li], indices=fla.cache_indices,
-                cu_seqlens=fla.cu_seqlens, scale=self.head_k_dim ** -0.5,
-                return_h=track,
-            )
-            if track:
-                core_out, h = result
-                self._write_track_snapshot(pool, li, conv_in, h, fla)
+            if decision.selected_implementation == "torch-reference":
+                core_out = self._reference_recurrent(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    pool.recurrent_states[li],
+                    fla,
+                )
+                self._write_reference_track_snapshot(pool, li, conv_in, fla)
             else:
-                core_out = result
+                track = fla.track_dst is not None
+                result = gdn_prefill_chunk_fla(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    state_source=pool.recurrent_states[li],
+                    indices=fla.cache_indices,
+                    cu_seqlens=fla.cu_seqlens,
+                    scale=self.head_k_dim**-0.5,
+                    return_h=track,
+                )
+                if track:
+                    core_out, h = result
+                    self._write_track_snapshot(pool, li, conv_in, h, fla)
+                else:
+                    core_out = result
 
         core_out = core_out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
-        out = self.norm.forward(core_out, z).reshape(total, -1)
+        out = self.norm.forward(
+            core_out, z, use_fla=decision.selected_implementation == "fla"
+        ).reshape(total, -1)
         return self.out_proj.forward(out)
 
 

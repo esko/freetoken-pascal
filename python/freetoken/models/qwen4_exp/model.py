@@ -267,7 +267,7 @@ class Qwen4ExpDecoderLayer(BaseOP):
             hidden = hidden + contribution
         block_input, inject = self.attn_hyper_connection.mix(hidden)
         if self._is_linear:
-            block_output = self.linear_attn.forward(block_input)
+            block_output = self.linear_attn.forward(block_input, debug_observer)
         else:
             block_output = self.self_attn.forward(block_input, batch)
         assert inject is not None

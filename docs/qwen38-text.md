@@ -18,6 +18,13 @@ the same request table slot and replaces it whenever `cached_len == 0`, preventi
 when a slot is reused. The model forces the naive cache and disables CUDA graphs while the PLE
 reference path performs host work. Issue #13 owns the release PLE mmap/offload representation.
 
+The Qwen4 GDN boundary resolves `FREETOKEN_GDN_MODE` (`auto`, `reference`, or
+`triton-candidate`) before importing a fused kernel. `auto` selects the qualified in-tree FLA
+implementation only on supported modern-GPU inputs; `sm_61`, unsupported dtypes, or unavailable
+packages select the stateful `torch-reference` fallback and expose the reason through the debug
+observer. `triton-candidate` is explicit-only and fails closed until its donor and H1/H2 parity
+gates are complete. The immutable decision contract is Torch-free so this policy is testable in H0.
+
 QSA retains full-resolution K/V and stores one compressed index key per configured token group.
 Before the token budget is reached, selection is dense-equivalent. Beyond it, the indexer selects
 compressed groups, expands them to original logical rows, includes the visible incomplete tail,
