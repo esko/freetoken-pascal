@@ -60,6 +60,20 @@ PLE mappings remain pageable by default so the OS can consume spare RAM dynamica
 
 Pascal DP4A integer kernels and format-specific tuning are prioritized over FP16, BF16, and FP8 paths until actual P4 measurements justify otherwise.
 
+### QSA workspace contract
+
+`freetoken.attention.qsa_workspace` is the Torch-free H0 accounting boundary for the merged QSA implementation from FreeToken commit `bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40` and its current tip `58f4b9ec0e166205c4dfd0c6ec184ea83b5957e6`.
+`QSAWorkspaceInputs` accepts the concrete context, ragged token-row, compressed-block, head, dtype, attention-split, page, ring, and layer dimensions.
+`calculate_qsa_workspace()` inventories the score, top-k, expand-gather, attention, and state categories from those dimensions and returns component shapes, byte totals, and a checked aggregate without importing CUDA or allocating memory.
+The score category includes the index query, FP32 logits, and visible-block vectors.
+The top-k category includes block IDs and the candidate scratch required by the upstream split path.
+The expand-gather category includes the selected logical-index rows, including the incomplete causal-group tail.
+The attention category includes the output and, when split attention is selected, FP32 partial output and log-sum-exp buffers.
+The state category includes the compressed slab, pending ring, pooled rows, and first-position rows used by `QSAKVCache` and index compression.
+`QSAWorkspacePlan.validate_capacity()` is a pure preflight accounting primitive for a future placement/launch owner and reports structured `ready` or `insufficient-capacity` telemetry.
+Negative, zero-invalid, incomplete-category, shape-inconsistent, and checked 64-bit arithmetic inputs fail closed with a controlled `ValueError` subtype.
+This H0 contract makes no kernel, throughput, or Tesla P4 claim and does not change QSA selection, token budget, or dispatch defaults.
+
 The exact ordinary-tensor placement is measured. The architecture requires the routed expert bank to remain complete in DDR4 even when a subset is cached in VRAM.
 The PLE file or shard set has a separate ownership and accounting boundary so model-weight mappings cannot be accidentally paged, prefetched, or pinned with it.
 

@@ -22,6 +22,10 @@ QSA retains full-resolution K/V and stores one compressed index key per configur
 Before the token budget is reached, selection is dense-equivalent. Beyond it, the indexer selects
 compressed groups, expands them to original logical rows, includes the visible incomplete tail,
 and runs exact sparse GQA over the original K/V values.
+The Torch-free `freetoken.attention.qsa_workspace` planner is an H0 accounting primitive for the
+concrete score, top-k, expand-gather, attention, and state allocations.
+It does not allocate CUDA memory or alter QSA dispatch, and a later placement owner may consume its
+capacity telemetry as a preflight input.
 
 ## Correctness controls
 
