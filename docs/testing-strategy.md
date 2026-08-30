@@ -158,7 +158,8 @@ Test the #73 planner and canary with synthetic and real categories:
 
 - ordinary resident tensors;
 - shared experts;
-- GDN/QSA/KV state;
+- GDN/KV recurrent state;
+- explicit persistent/transient QSA state and workspaces;
 - CUDA context and workspaces;
 - transfer/partial buffers;
 - static/dynamic cache slots;
@@ -166,7 +167,7 @@ Test the #73 planner and canary with synthetic and real categories:
 
 Missing categories fail closed. Forced overcommit must trigger backoff or fail readiness, never a nominally healthy slow profile. Model output remains unchanged across safe backoff steps. Stale placement profiles are rejected on any model, quant, context, binary, driver or topology change.
 
-The H0 placement fixture uses `freetoken.engine.placement_plan` with exact versioned categories, asymmetric one- and two-GPU capacities, cache-zero profiles, synthetic post-load and post-first-large-prefill observations, separate driver/allocator counters, allocator consistency checks, bounded category tolerance, and deterministic monotonic backoff.
+The H0 placement fixture uses `freetoken.engine.placement_plan` with exact versioned categories, asymmetric one- and two-GPU capacities, cache-zero profiles, synthetic post-load and post-first-large-prefill observations, separate driver/allocator counters, allocator consistency checks, absolute live/peak agreement, reserve-bounded tolerance, and deterministic monotonic backoff.
 
 ### Model graph
 

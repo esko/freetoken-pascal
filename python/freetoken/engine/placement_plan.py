@@ -18,13 +18,13 @@ from typing import Any
 MAX_PLACEMENT_BYTES = (1 << 63) - 1
 PLACEMENT_SCHEMA_VERSION = 1
 
-# Keep every release-visible bucket explicit.  In particular, the QSA phase and workspace
-# names are intentionally not collapsed into generic_workspaces: post-prefill growth in one
-# phase must be attributable to the planned phase.
+# Keep every release-visible bucket explicit.  In particular, the GDN/KV recurrent state is
+# distinct from QSA state, and QSA phase/workspace names are not collapsed into generic_workspaces:
+# post-prefill growth in one phase must be attributable to the planned phase.
 PLACEMENT_CATEGORIES = (
     "dense_resident_weights",
     "shared_experts",
-    "gdn_qsa_kv_state",
+    "gdn_kv_recurrent_state",
     "qsa_persistent_score",
     "qsa_persistent_top_k",
     "qsa_persistent_expand_gather",
@@ -123,6 +123,18 @@ def _strict_bool(value: Any, name: str) -> bool:
     return value
 
 
+def _signed_int(value: Any, name: str) -> int:
+    if isinstance(value, bool):
+        raise PlacementInputError(f"{name} must be an integer")
+    try:
+        result = operator.index(value)
+    except TypeError as exc:
+        raise PlacementInputError(f"{name} must be an integer") from exc
+    if result < -MAX_PLACEMENT_BYTES or result > MAX_PLACEMENT_BYTES:
+        raise PlacementInputError(f"{name} exceeds the supported integer range")
+    return result
+
+
 def _categories(value: Mapping[str, int], *, name: str = "categories") -> Mapping[str, int]:
     if not isinstance(value, Mapping):
         raise PlacementInputError(f"{name} must be a mapping")
@@ -193,8 +205,10 @@ class PlacementPlanInput:
         categories = _categories(self.categories)
         if not isinstance(self.gpu_uuid, str) or not self.gpu_uuid.strip():
             raise PlacementInputError("gpu_uuid must be a non-empty string")
-        available = capacity if self.available_bytes is None else _int(
-            self.available_bytes, "available_bytes"
+        available = (
+            capacity
+            if self.available_bytes is None
+            else _int(self.available_bytes, "available_bytes")
         )
         if available > capacity:
             raise PlacementInputError(
@@ -424,8 +438,8 @@ def plan_placement(
         raise PlacementInputError("gpus must be an iterable of one or two GPU inputs") from exc
     if len(inputs) not in {1, 2}:
         raise PlacementInputError("placement planner supports 1 or 2 GPUs")
-    reserve = None if safety_reserve_bytes is None else _int(
-        safety_reserve_bytes, "safety_reserve_bytes"
+    reserve = (
+        None if safety_reserve_bytes is None else _int(safety_reserve_bytes, "safety_reserve_bytes")
     )
     result: list[GPUPlacementPlan] = []
     for rank, item in enumerate(inputs):
@@ -504,9 +518,7 @@ class PlacementObservation:
             _strict_bool(getattr(self, name), name)
         retries = _int(self.allocation_retries, "allocation_retries")
         failures = _int(self.allocation_failures, "allocation_failures")
-        growth = _int(
-            self.retained_workspace_growth_bytes, "retained_workspace_growth_bytes"
-        )
+        growth = _int(self.retained_workspace_growth_bytes, "retained_workspace_growth_bytes")
         object.__setattr__(self, "gpu_uuid", self.gpu_uuid.strip())
         object.__setattr__(self, "driver_total_bytes", driver_total)
         object.__setattr__(self, "driver_free_bytes", driver_free)
@@ -601,17 +613,73 @@ class GPUCanaryTelemetry:
     reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.status not in {"pass", "fail"}:
+        if isinstance(self.rank, bool) or not isinstance(self.rank, int) or self.rank < 0:
+            raise PlacementInputError("rank must be a non-negative integer")
+        if not isinstance(self.status, str) or self.status not in {"pass", "fail"}:
             raise PlacementInputError(f"unknown canary status {self.status!r}")
-        if not isinstance(self.gpu_uuid, str) or not self.gpu_uuid:
+        if not isinstance(self.gpu_uuid, str) or not self.gpu_uuid.strip():
             raise PlacementInputError("gpu_uuid must be a non-empty string")
-        object.__setattr__(
-            self, "planned_categories", MappingProxyType(dict(self.planned_categories))
+        planned = _categories(self.planned_categories, name="planned categories")
+        observed = _categories(self.observed_categories, name="observed categories")
+        non_qsa, persistent, transient, qsa_required, required = _required_totals(
+            planned, label="planned"
         )
-        object.__setattr__(
-            self, "observed_categories", MappingProxyType(dict(self.observed_categories))
-        )
-        object.__setattr__(self, "reasons", tuple(self.reasons))
+        counters = {
+            "required_bytes": self.required_bytes,
+            "non_qsa_required_bytes": self.non_qsa_required_bytes,
+            "qsa_persistent_bytes": self.qsa_persistent_bytes,
+            "qsa_transient_high_water_bytes": self.qsa_transient_high_water_bytes,
+            "qsa_required_bytes": self.qsa_required_bytes,
+            "available_bytes": self.available_bytes,
+            "deficit_bytes": self.deficit_bytes,
+            "driver_total_bytes": self.driver_total_bytes,
+            "driver_free_bytes": self.driver_free_bytes,
+            "allocator_allocated_bytes": self.allocator_allocated_bytes,
+            "allocator_reserved_bytes": self.allocator_reserved_bytes,
+            "allocator_high_water_bytes": self.allocator_high_water_bytes,
+        }
+        normalized = {name: _int(value, name) for name, value in counters.items()}
+        headroom = _signed_int(self.headroom_bytes, "headroom_bytes")
+        try:
+            reasons = tuple(self.reasons)
+        except TypeError as exc:
+            raise PlacementInputError("canary reasons must be an iterable") from exc
+        if any(not isinstance(reason, str) for reason in reasons):
+            raise PlacementInputError("canary reasons must be strings")
+
+        if normalized["required_bytes"] != required:
+            raise PlacementInputError("canary required_bytes does not match planned categories")
+        expected = {
+            "non_qsa_required_bytes": non_qsa,
+            "qsa_persistent_bytes": persistent,
+            "qsa_transient_high_water_bytes": transient,
+            "qsa_required_bytes": qsa_required,
+        }
+        for name, value in expected.items():
+            if normalized[name] != value:
+                raise PlacementInputError(f"canary {name} does not match planned categories")
+        reserve = planned["safety_reserve"]
+        if normalized["available_bytes"] != normalized["driver_free_bytes"]:
+            raise PlacementInputError("canary available_bytes must equal driver_free_bytes")
+        if headroom != normalized["driver_free_bytes"] - reserve:
+            raise PlacementInputError("canary headroom_bytes does not match driver free/reserve")
+        if normalized["deficit_bytes"] != max(0, -headroom):
+            raise PlacementInputError("canary deficit_bytes does not match headroom")
+        if (self.status == "pass") != (not reasons):
+            raise PlacementInputError("canary status must agree with reasons")
+
+        object.__setattr__(self, "rank", self.rank)
+        object.__setattr__(self, "gpu_uuid", self.gpu_uuid.strip())
+        for name, value in normalized.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "headroom_bytes", headroom)
+        object.__setattr__(self, "planned_categories", planned)
+        object.__setattr__(self, "observed_categories", observed)
+        object.__setattr__(self, "reasons", reasons)
+
+    @property
+    def key(self) -> str:
+        return f"{self.gpu_uuid}:{self.rank}"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -670,15 +738,37 @@ class CanaryResult:
     tolerance_bytes: int = 0
 
     def __post_init__(self) -> None:
-        if self.checkpoint not in _CHECKPOINTS:
+        if not isinstance(self.checkpoint, str) or self.checkpoint not in _CHECKPOINTS:
             raise PlacementInputError(
                 f"unknown checkpoint {self.checkpoint!r}; expected one of {PLACEMENT_CHECKPOINTS}"
             )
-        if self.status not in {"pass", "fail"}:
+        if not isinstance(self.status, str) or self.status not in {"pass", "fail"}:
             raise PlacementInputError(f"unknown canary status {self.status!r}")
         tolerance = _int(self.tolerance_bytes, "tolerance_bytes")
-        object.__setattr__(self, "gpus", tuple(self.gpus))
-        object.__setattr__(self, "reasons", tuple(self.reasons))
+        try:
+            gpus = tuple(self.gpus)
+        except TypeError as exc:
+            raise PlacementInputError("canary result telemetry must be iterable") from exc
+        if len(gpus) not in {1, 2}:
+            raise PlacementInputError("canary result requires telemetry for exactly 1 or 2 GPUs")
+        if any(not isinstance(item, GPUCanaryTelemetry) for item in gpus):
+            raise PlacementInputError("canary result telemetry must be GPUCanaryTelemetry values")
+        if tuple(item.rank for item in gpus) != tuple(range(len(gpus))):
+            raise PlacementInputError("canary telemetry ranks must be contiguous and start at zero")
+        if len({item.key for item in gpus}) != len(gpus):
+            raise PlacementInputError("canary telemetry GPU identities must be unique")
+        if any(item.status != self.status for item in gpus):
+            raise PlacementInputError("canary telemetry status must match result status")
+        try:
+            reasons = tuple(self.reasons)
+        except TypeError as exc:
+            raise PlacementInputError("canary result reasons must be iterable") from exc
+        if any(not isinstance(reason, str) for reason in reasons):
+            raise PlacementInputError("canary result reasons must be strings")
+        if (self.status == "pass") != (not reasons):
+            raise PlacementInputError("canary result status must agree with reasons")
+        object.__setattr__(self, "gpus", gpus)
+        object.__setattr__(self, "reasons", reasons)
         object.__setattr__(self, "tolerance_bytes", tolerance)
 
     def as_dict(self) -> dict[str, Any]:
@@ -705,9 +795,9 @@ def evaluate_canary(
 
     The comparison is deterministic and allocation-free.  Allocator ``allocated`` is compared
     with the live resident demand (non-QSA plus persistent QSA), while allocator high-water is
-    compared with live demand plus the transient QSA peak.  Live allocation has an upper-bound
-    safety rule (it must not exceed live demand plus tolerance), while high-water must agree
-    within tolerance because it is the capacity-cliff measurement.
+    compared with live demand plus the transient QSA peak.  Both counters require bounded
+    absolute agreement: under-materialized live state is unsafe just as over-materialized state
+    is, while high-water includes the transient QSA peak.
     Reserved bytes remain a separate allocator-consistency signal and are not treated as live
     demand.  ``tolerance_bytes`` applies per category and to those two comparisons; reserve,
     allocator consistency, and explicit fallback/spill signals are always enforced regardless
@@ -720,6 +810,8 @@ def evaluate_canary(
             f"unknown checkpoint {checkpoint!r}; expected one of {PLACEMENT_CHECKPOINTS}"
         )
     tolerance = _int(tolerance_bytes, "tolerance_bytes")
+    if tolerance > plan.safety_reserve_bytes:
+        raise PlacementInputError("tolerance_bytes must not exceed plan safety reserve")
     values = tuple(observations)
     by_rank: dict[int, PlacementObservation] = {}
     for observation in values:
@@ -766,14 +858,15 @@ def evaluate_canary(
             reasons.append("allocator-high-water-exceeds-capacity")
         if (
             observed.allocator_reserved_bytes + observed.driver_free_bytes
-            > observed.driver_total_bytes + tolerance
+            > observed.driver_total_bytes
         ):
             reasons.append("allocation-reserved-free-inconsistency")
         expected_live = expected.live_required_bytes
         expected_peak = expected.peak_required_bytes
-        if observed.allocator_allocated_bytes > expected_live + tolerance:
+        if abs(observed.allocator_allocated_bytes - expected_live) > tolerance:
+            relation = "exceeds" if observed.allocator_allocated_bytes > expected_live else "below"
             reasons.append(
-                "allocator-live-exceeds-planned "
+                f"allocator-live-{relation}-planned "
                 f"planned={expected_live} observed={observed.allocator_allocated_bytes} "
                 f"tolerance={tolerance}"
             )
@@ -960,7 +1053,9 @@ class BackoffStateMachine:
         Safe is checkpoint-local rather than terminal: a later failed checkpoint returns to
         pending and advances, which is required when post-load passes but large-prefill fails.
         """
-        passed = result if isinstance(result, bool) else result.status == "pass"
+        if type(result) is not bool and not isinstance(result, CanaryResult):
+            raise PlacementInputError("result must be a boolean or CanaryResult")
+        passed = result if type(result) is bool else result.status == "pass"
         if passed and self._status != "fail-readiness":
             self._status = "safe"
             return BackoffDecision("safe", self.profile, self._index, "canary-pass")

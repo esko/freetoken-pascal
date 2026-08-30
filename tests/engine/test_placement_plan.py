@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from freetoken.engine.placement_plan import (
     PLACEMENT_CATEGORIES,
     BackoffProfile,
     BackoffStateMachine,
+    CanaryResult,
     PlacementObservation,
     PlacementPlanInput,
     PlacementPlannerError,
@@ -21,7 +24,7 @@ def _categories(**overrides: int) -> dict[str, int]:
         {
             "dense_resident_weights": 100,
             "shared_experts": 20,
-            "gdn_qsa_kv_state": 30,
+            "gdn_kv_recurrent_state": 30,
             "qsa_persistent_score": 5,
             "qsa_persistent_top_k": 6,
             "qsa_persistent_expand_gather": 7,
@@ -56,9 +59,7 @@ def _observation(plan, *, rank: int = 0, **overrides):
     categories = dict(plan.gpus[rank].categories)
     categories.update(overrides.pop("categories", {}))
     transient = sum(
-        categories[name]
-        for name in PLACEMENT_CATEGORIES
-        if name.startswith("qsa_transient_")
+        categories[name] for name in PLACEMENT_CATEGORIES if name.startswith("qsa_transient_")
     )
     peak = sum(categories.values()) - categories["safety_reserve"]
     allocated = peak - transient
@@ -148,9 +149,7 @@ def test_qsa_lifetimes_and_gpu_identity_are_explicit() -> None:
     assert item.as_dict()["qsa_required_bytes"] == (
         item.qsa_persistent_bytes + item.qsa_transient_high_water_bytes
     )
-    assert item.live_required_bytes == (
-        item.non_qsa_required_bytes + item.qsa_persistent_bytes
-    )
+    assert item.live_required_bytes == (item.non_qsa_required_bytes + item.qsa_persistent_bytes)
     assert item.peak_required_bytes == item.nonreserve_required_bytes
 
 
@@ -163,6 +162,10 @@ def test_input_categories_and_integer_values_fail_closed() -> None:
         )
     with pytest.raises(PlacementPlannerError, match="unknown"):
         PlacementPlanInput(capacity_bytes=500, categories={**complete, "other": 1})
+    legacy = {key: value for key, value in complete.items() if key != "gdn_kv_recurrent_state"}
+    legacy["gdn_qsa_kv_state"] = 30
+    with pytest.raises(PlacementPlannerError, match=r"missing|unknown"):
+        PlacementPlanInput(capacity_bytes=500, categories=legacy)
 
     for field, value in (("capacity_bytes", True), ("capacity_bytes", -1)):
         with pytest.raises(PlacementPlannerError, match=field):
@@ -255,6 +258,53 @@ def test_canary_rejects_allocator_inconsistency_missing_categories_and_low_reser
     assert any("reserve" in item for item in result.reasons)
 
 
+def test_canary_bounds_tolerance_and_requires_exact_driver_allocator_consistency() -> None:
+    plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
+    with pytest.raises(PlacementPlannerError, match=r"tolerance.*reserve"):
+        evaluate_canary(
+            plan,
+            checkpoint="post-load",
+            observations=(_observation(plan),),
+            tolerance_bytes=51,
+        )
+
+    inconsistent = _observation(plan, driver_free_bytes=171)
+    result = evaluate_canary(
+        plan,
+        checkpoint="post-load",
+        observations=(inconsistent,),
+        tolerance_bytes=50,
+    )
+    assert result.status == "fail"
+    assert any("consistency" in reason for reason in result.reasons)
+
+
+def test_canary_telemetry_and_result_schema_fail_closed() -> None:
+    plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
+    result = evaluate_canary(
+        plan,
+        checkpoint="post-load",
+        observations=(_observation(plan),),
+    )
+    telemetry = result.gpus[0]
+
+    with pytest.raises(PlacementPlannerError, match="rank"):
+        replace(telemetry, rank=True)
+    with pytest.raises(PlacementPlannerError, match="driver_free_bytes"):
+        replace(telemetry, driver_free_bytes=-1)
+    with pytest.raises(PlacementPlannerError, match=r"missing|unknown"):
+        replace(telemetry, planned_categories={"dense_resident_weights": 1})
+    with pytest.raises(PlacementPlannerError, match=r"status.*reasons"):
+        replace(telemetry, status="pass", reasons=("unexpected",))
+
+    with pytest.raises(PlacementPlannerError, match="exactly 1 or 2"):
+        CanaryResult("post-load", "pass", ())
+    with pytest.raises(PlacementPlannerError, match="status"):
+        CanaryResult("post-load", "pass", (replace(telemetry, status="fail", reasons=("bad",)),))
+    with pytest.raises(PlacementPlannerError, match="exactly 1 or 2"):
+        CanaryResult("post-load", "fail", (telemetry, telemetry, telemetry))
+
+
 def test_canary_requires_exact_checkpoint_and_rejects_unavailable_high_water() -> None:
     plan = plan_placement((_gpu(),), safety_reserve_bytes=50)
     with pytest.raises(PlacementPlannerError, match="unknown checkpoint"):
@@ -298,11 +348,22 @@ def test_canary_distinguishes_live_allocation_from_qsa_transient_peak() -> None:
         allocator_allocated_bytes=live - 1,
         allocator_high_water_bytes=peak,
     )
-    assert evaluate_canary(
-        plan,
-        checkpoint="post-first-large-prefill",
-        observations=(under_materialized,),
-    ).status == "pass"
+    assert (
+        evaluate_canary(
+            plan,
+            checkpoint="post-first-large-prefill",
+            observations=(under_materialized,),
+        ).status
+        == "fail"
+    )
+    assert any(
+        "live" in reason
+        for reason in evaluate_canary(
+            plan,
+            checkpoint="post-first-large-prefill",
+            observations=(under_materialized,),
+        ).reasons
+    )
 
     conflated = _observation(plan, allocator_allocated_bytes=peak, allocator_high_water_bytes=peak)
     result = evaluate_canary(
@@ -322,11 +383,14 @@ def test_synthetic_observation_factory_keeps_resident_and_peak_distinct() -> Non
     assert observation.allocator_allocated_bytes == plan.gpus[0].live_required_bytes
     assert observation.allocator_reserved_bytes == plan.gpus[0].peak_required_bytes
     assert observation.allocator_high_water_bytes == plan.gpus[0].peak_required_bytes
-    assert evaluate_canary(
-        plan,
-        checkpoint="post-load",
-        observations=(observation,),
-    ).status == "pass"
+    assert (
+        evaluate_canary(
+            plan,
+            checkpoint="post-load",
+            observations=(observation,),
+        ).status
+        == "pass"
+    )
 
 
 def test_backoff_starts_pending_and_becomes_safe_only_after_a_pass() -> None:
@@ -378,6 +442,15 @@ def test_backoff_rejects_identical_resource_profiles() -> None:
                 BackoffProfile("b", cache_slots=2, context_tokens=1024, batch_size=1),
             )
         )
+
+    machine = BackoffStateMachine(
+        (
+            BackoffProfile("a", cache_slots=2, context_tokens=1024, batch_size=1),
+            BackoffProfile("b", cache_slots=1, context_tokens=1024, batch_size=1),
+        )
+    )
+    with pytest.raises(PlacementPlannerError, match="boolean or CanaryResult"):
+        machine.observe(1)
 
 
 def test_backoff_profiles_are_ordered_and_never_oscillate() -> None:
