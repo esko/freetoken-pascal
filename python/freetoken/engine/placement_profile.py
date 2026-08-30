@@ -14,7 +14,7 @@ import operator
 import re
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -92,6 +92,19 @@ def _integer(value: Any, name: str, *, positive: bool = False) -> int:
 def _serialized_integer(value: Any, name: str) -> int:
     """Validate an integer that came from a serialized profile document."""
     return _integer(value, name)
+
+
+def _serialized_signed_integer(value: Any, name: str) -> int:
+    """Validate a bounded signed integer that came from a serialized profile document."""
+    if isinstance(value, bool):
+        raise PlacementInputError(f"{name} must be an integer, not a boolean")
+    try:
+        result = operator.index(value)
+    except TypeError as exc:
+        raise PlacementInputError(f"{name} must be an integer") from exc
+    if result < -MAX_PLACEMENT_BYTES or result > MAX_PLACEMENT_BYTES:
+        raise PlacementInputError(f"{name} is outside the supported integer range")
+    return result
 
 
 def _text(value: Any, name: str) -> str:
@@ -552,7 +565,10 @@ def _gpu_plan_from_dict(value: Any) -> GPUPlacementPlan:
         "headroom_bytes",
         "deficit_bytes",
     ):
-        _serialized_integer(fields[field], f"placement GPU.{field}")
+        if field == "headroom_bytes":
+            _serialized_signed_integer(fields[field], f"placement GPU.{field}")
+        else:
+            _serialized_integer(fields[field], f"placement GPU.{field}")
     if fields["schema_version"] != PLACEMENT_SCHEMA_VERSION:
         raise PlacementInputError("unsupported placement GPU schema version")
     try:
@@ -670,10 +686,8 @@ class PlacementProfile:
             raise PlacementInputError("profile backoff_profile must be a BackoffProfile")
         normalized_name = _text(self.backoff_profile.name, "backoff_profile.name")
         if normalized_name != self.backoff_profile.name:
-            object.__setattr__(
-                self,
-                "backoff_profile",
-                replace(self.backoff_profile, name=normalized_name),
+            raise PlacementInputError(
+                "backoff_profile.name must use canonical surrounding whitespace"
             )
         topology = self.identity.topology
         if len(topology) != self.plan.gpu_count:

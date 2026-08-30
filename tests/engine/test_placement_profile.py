@@ -143,8 +143,8 @@ def _identity(*, topology: tuple[GPUProfileTopology, ...] | None = None, **overr
     return PlacementProfileIdentity(**values)
 
 
-def _profile(*, two_gpus: bool = False):
-    plan = _plan(two_gpus=two_gpus)
+def _profile(*, two_gpus: bool = False, capacity: int = 500):
+    plan = _plan(two_gpus=two_gpus, capacity=capacity)
     topology = tuple(
         GPUProfileTopology(
             rank=item.rank,
@@ -362,21 +362,33 @@ def test_profile_parser_rejects_numeric_aliases_without_mutating_original(mutati
     assert profile.digest == original_digest
 
 
-def test_profile_normalizes_backoff_name_and_rejects_placeholders() -> None:
+def test_profile_rejects_noncanonical_backoff_names_and_placeholders() -> None:
     profile = _profile()
-    normalized = replace(
-        profile,
-        backoff_profile=replace(profile.backoff_profile, name="  cache-zero  "),
-    )
-    assert normalized.profile_name == "cache-zero"
-    assert normalized.as_dict()["backoff_profile"]["name"] == "cache-zero"
+    with pytest.raises(PlacementPlannerError, match="canonical"):
+        replace(
+            profile,
+            backoff_profile=replace(profile.backoff_profile, name="  cache-zero  "),
+        )
     roundtrip = profile.as_dict()
     roundtrip["backoff_profile"]["name"] = " cache-zero "
-    assert PlacementProfile.from_dict(roundtrip) == profile
+    with pytest.raises(PlacementPlannerError, match="canonical"):
+        PlacementProfile.from_dict(roundtrip)
     document = profile.as_dict()
     document["backoff_profile"]["name"] = " unknown "
     document["digest"] = profile.digest
     with pytest.raises(PlacementPlannerError, match="placeholder"):
+        PlacementProfile.from_dict(document)
+
+
+def test_overcommitted_plan_profile_roundtrips_and_rejects_tampered_headroom() -> None:
+    profile = _profile(capacity=200)
+    assert profile.plan.gpus[0].status == "insufficient-capacity"
+    assert profile.plan.gpus[0].headroom_bytes < 0
+    assert PlacementProfile.from_dict(profile.as_dict()) == profile
+
+    document = profile.as_dict()
+    document["placement_plan"]["gpus"][0]["headroom_bytes"] = 0
+    with pytest.raises(PlacementPlannerError):
         PlacementProfile.from_dict(document)
 
 
