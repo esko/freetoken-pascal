@@ -33,9 +33,13 @@ def _write_block_device(
     sectors_read: int = 10,
     logical_block_size: int = 512,
     virtual: bool = False,
+    device_dir: str | None = None,
 ) -> Path:
     target_root = "virtual" if virtual else "pci"
-    target = sysfs / "devices" / target_root / "block" / name
+    target_base = sysfs / "devices" / target_root
+    if device_dir is not None:
+        target_base /= device_dir
+    target = target_base / "block" / name
     target.mkdir(parents=True)
     (target / "dev").write_text(f"{major}:{minor}\n", encoding="ascii")
     (target / "stat").write_text(
@@ -76,19 +80,17 @@ def test_probe_resolves_payload_device_and_converts_sectors(tmp_path: Path) -> N
 
     counters = probe.sample()
 
-    assert counters.physical_block_device_bytes == 17 * 4096
-    assert counters.device_identity == "nvme0n1"
+    assert counters.physical_block_device_bytes == 17 * 512
+    assert counters.device_identity == "259:0/nvme0n1"
     assert counters.physical_source == "sysfs-block-stat"
-    assert counters.physical_source_detail is not None
-    assert "sectors-read" in counters.physical_source_detail
-    assert "logical-block-size=4096" in counters.physical_source_detail
+    assert counters.physical_source_detail == (
+        "259:0/nvme0n1:field=3(sectors-read):sector-size=512"
+    )
     assert counters.major_faults == 2
     assert counters.logical_packed_bytes == 100
 
 
-def test_probe_accepts_explicit_sector_size_when_queue_metadata_is_unavailable(
-    tmp_path: Path,
-) -> None:
+def test_probe_uses_fixed_abi_sector_size_without_queue_metadata(tmp_path: Path) -> None:
     payload = tmp_path / "ple.bin"
     payload.write_bytes(b"payload")
     sysfs = tmp_path / "sys"
@@ -98,12 +100,13 @@ def test_probe_accepts_explicit_sector_size_when_queue_metadata_is_unavailable(
     probe = LinuxPLEBlockCounterProbe(
         payload,
         sysfs_root=sysfs,
-        sector_size=1024,
         counter_source=lambda: _base(),
         stat_fn=lambda path: _payload_stat(Path(path), major=8, minor=1),
     )
 
-    assert probe.sample().physical_block_device_bytes == 3 * 1024
+    counters = probe.sample()
+    assert counters.physical_block_device_bytes == 3 * 512
+    assert counters.physical_source_detail == "8:1/nvme0n1:field=3(sectors-read):sector-size=512"
 
 
 def test_probe_follows_partition_parent_and_single_slave(tmp_path: Path) -> None:
@@ -114,6 +117,7 @@ def test_probe_follows_partition_parent_and_single_slave(tmp_path: Path) -> None
     partition = parent / "nvme0n1p1"
     partition.mkdir()
     (partition / "dev").write_text("259:1\n", encoding="ascii")
+    (partition / "stat").write_text("8 2 7 4 5 6 7 8 9 10 11\n", encoding="ascii")
     (partition / "partition").write_text("1\n", encoding="ascii")
     (sysfs / "dev" / "block" / "259:1").symlink_to(partition)
 
@@ -123,13 +127,13 @@ def test_probe_follows_partition_parent_and_single_slave(tmp_path: Path) -> None
         counter_source=lambda: _base(),
         stat_fn=lambda path: _payload_stat(Path(path), major=259, minor=1),
     )
-    assert probe.sample().device_identity == "nvme0n1"
-    assert probe.sample().physical_block_device_bytes == 23 * 512
+    assert probe.sample().device_identity == "259:1/nvme0n1p1"
+    assert probe.sample().physical_block_device_bytes == 7 * 512
 
     dm = _write_block_device(sysfs, major=253, minor=0, name="dm-0", sectors_read=1)
     slaves = dm / "slaves"
     slaves.mkdir()
-    (slaves / "nvme0n1").symlink_to(parent)
+    (slaves / "nvme0n1p1").symlink_to(partition)
     (sysfs / "dev" / "block" / "253:0").unlink()
     (sysfs / "dev" / "block" / "253:0").symlink_to(dm)
     dm_probe = LinuxPLEBlockCounterProbe(
@@ -138,17 +142,15 @@ def test_probe_follows_partition_parent_and_single_slave(tmp_path: Path) -> None
         counter_source=lambda: _base(),
         stat_fn=lambda path: _payload_stat(Path(path), major=253, minor=0),
     )
-    assert dm_probe.sample().device_identity == "nvme0n1"
-    assert dm_probe.sample().physical_block_device_bytes == 23 * 512
+    assert dm_probe.sample().device_identity == "259:1/nvme0n1p1"
+    assert dm_probe.sample().physical_block_device_bytes == 7 * 512
 
 
 @pytest.mark.parametrize(
     "mutator",
     [
         lambda sysfs, target: (target / "stat").write_text("8 2 nope 4\n", encoding="ascii"),
-        lambda sysfs, target: (target / "queue" / "logical_block_size").write_text(
-            "0\n", encoding="ascii"
-        ),
+        lambda sysfs, target: (target / "stat").write_text("8 2 -1 4\n", encoding="ascii"),
     ],
 )
 def test_probe_rejects_malformed_sysfs_counters(tmp_path: Path, mutator) -> None:
@@ -198,6 +200,44 @@ def test_probe_rejects_missing_or_ambiguous_slaves(tmp_path: Path, count: int) -
     else:
         with pytest.raises(PLEBlockProbeError, match="ambiguous"):
             probe.sample()
+
+
+def test_probe_rejects_virtual_device_without_slaves_directory(tmp_path: Path) -> None:
+    payload = tmp_path / "ple.bin"
+    payload.write_bytes(b"payload")
+    sysfs = tmp_path / "sys"
+    _write_block_device(sysfs, major=253, minor=0, name="dm-0", virtual=True)
+    probe = LinuxPLEBlockCounterProbe(
+        payload,
+        sysfs_root=sysfs,
+        counter_source=lambda: _base(),
+        stat_fn=lambda path: _payload_stat(Path(path), major=253, minor=0),
+    )
+
+    with pytest.raises(PLEBlockProbeError, match="backing"):
+        probe.sample()
+
+
+def test_probe_identity_distinguishes_same_named_devices(tmp_path: Path) -> None:
+    payload = tmp_path / "ple.bin"
+    payload.write_bytes(b"payload")
+    sysfs = tmp_path / "sys"
+    _write_block_device(sysfs, major=8, minor=1, name="sda", sectors_read=2)
+    _write_block_device(sysfs, major=8, minor=2, name="sda", sectors_read=3, device_dir="pci2")
+
+    def probe_for(minor: int) -> LinuxPLEBlockCounterProbe:
+        return LinuxPLEBlockCounterProbe(
+            payload,
+            sysfs_root=sysfs,
+            counter_source=lambda: _base(),
+            stat_fn=lambda path: _payload_stat(Path(path), major=8, minor=minor),
+        )
+
+    first = probe_for(1).sample()
+    second = probe_for(2).sample()
+    assert first.device_identity == "8:1/sda"
+    assert second.device_identity == "8:2/sda"
+    assert first.device_identity != second.device_identity
 
 
 def test_probe_rejects_cycle_and_missing_mapping(tmp_path: Path) -> None:

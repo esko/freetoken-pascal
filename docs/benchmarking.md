@@ -118,15 +118,16 @@ counter source to every phase result.
 
 On Linux, `LinuxPLEBlockCounterProbe` is the reference external-counter adapter for
 an explicit dedicated PLE payload file. It calls `os.stat(payload).st_dev`, resolves
-`/sys/dev/block/<major>:<minor>`, follows a partition's parent and a single sysfs
-`slaves` entry, and rejects missing, cyclic, virtual, or multi-device mappings.
-It reads field 3 of the terminal `/sys/.../stat` line (the documented cumulative
-`sectors read` field, one-based) and converts sectors to bytes using
-`queue/logical_block_size`; tests may inject a validated sector size. The returned
-`PLEIOCounters` carries `physical_source=sysfs-block-stat`, the terminal device name,
-and stable stat-field/sector-size detail. A process counter provider may be injected
-for the other snapshot fields, but `/proc/self/io` is never consulted or promoted by
-this probe. For example:
+`/sys/dev/block/<major>:<minor>`, treats a partition as terminal, follows a single
+sysfs `slaves` entry for non-partition mappings, and rejects missing, cyclic,
+virtual, or multi-device mappings. It reads field 3 of the terminal `/sys/.../stat`
+line (the documented cumulative `sectors read` field, one-based) and converts each
+sector using the Linux ABI's fixed 512-byte unit, independently of
+`queue/logical_block_size`. The returned `PLEIOCounters` carries
+`physical_source=sysfs-block-stat`, a terminal identity in `major:minor/name` form,
+and stable `field=3(sectors-read):sector-size=512` detail. A process counter
+provider may be injected for the other snapshot fields, but `/proc/self/io` is
+never consulted or promoted by this probe. For example:
 
 ```python
 probe = LinuxPLEBlockCounterProbe("/srv/freetoken-pascal/ple/table.bin")
@@ -134,8 +135,8 @@ recorder = PLEIOEvidenceRecorder(probe.sample)
 ```
 
 The probe is read-only and does not drop caches. An overlay/tmpfs payload, a
-non-regular payload, an unavailable sysfs mapping, malformed stat or logical-block
-size, and any ambiguous backing device fail closed before evidence is emitted.
+non-regular payload, an unavailable sysfs mapping, malformed stat or partition
+marker, and any ambiguous backing device fail closed before evidence is emitted.
 
 ## Placement-cliff benchmark contract
 

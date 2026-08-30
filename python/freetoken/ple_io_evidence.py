@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Any
 
 PLE_IO_PHASES = frozenset({"cold", "warm", "steady"})
+# Linux documents /sys/block/<dev>/stat sector counters in 512-byte units,
+# independently of the device's logical block size.
+LINUX_SYSFS_STAT_SECTOR_BYTES = 512
 PLE_IO_PHYSICAL_SOURCE_KINDS = frozenset(
     {
         "blktrace",
@@ -69,7 +72,6 @@ class PLEBlockDevice:
     minor: int
     sysfs_path: str
     stat_path: str
-    sector_size: int
 
 
 def _read_sysfs_text(path: str | os.PathLike[str]) -> str:
@@ -77,12 +79,6 @@ def _read_sysfs_text(path: str | os.PathLike[str]) -> str:
         return Path(path).read_text(encoding="ascii")
     except (OSError, UnicodeError) as error:
         raise PLEBlockProbeError(f"cannot read Linux sysfs path {path}: {error}") from error
-
-
-def _validate_sector_size(value: object, *, source: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise PLEBlockProbeError(f"{source} logical block size must be a positive integer")
-    return value
 
 
 def _parse_device_number(value: object, *, label: str) -> tuple[int, int]:
@@ -104,10 +100,13 @@ class LinuxPLEBlockCounterProbe:
     """Sample physical PLE bytes from one Linux sysfs block-device counter.
 
     The payload path is deliberately explicit: its ``st_dev`` is mapped through
-    ``sysfs_root/dev/block/<major>:<minor>`` and then reduced through a partition
-    parent and/or a single ``slaves`` entry.  A multiple-slave graph is rejected
-    because combining devices would make read amplification unreviewable.  The
-    probe does not inspect process I/O and does not mutate page caches.
+    ``sysfs_root/dev/block/<major>:<minor>`` and then reduced through a single
+    ``slaves`` entry when the mapping is not already a partition.  A partition is
+    a terminal device: its own stat is the correct filesystem-partition counter,
+    and it must not be replaced with its whole-disk parent.  A multiple-slave
+    graph is rejected because combining devices would make read amplification
+    unreviewable.  The probe does not inspect process I/O and does not mutate page
+    caches.
 
     ``counter_source`` can provide the non-physical fields required by
     :class:`PLEIOCounters` (for example, a separately collected process snapshot).
@@ -120,7 +119,6 @@ class LinuxPLEBlockCounterProbe:
         payload_path: str | os.PathLike[str],
         *,
         sysfs_root: str | os.PathLike[str] = "/sys",
-        sector_size: int | None = None,
         counter_source: Callable[[], PLEIOCounters | Mapping[str, Any]] | None = None,
         stat_fn: Callable[[str | os.PathLike[str]], object] | None = None,
         read_text_fn: Callable[[str | os.PathLike[str]], str] | None = None,
@@ -131,8 +129,6 @@ class LinuxPLEBlockCounterProbe:
             raise PLEBlockProbeError(
                 f"Linux sysfs block probing is unsupported on {selected_system!r}"
             )
-        if sector_size is not None:
-            _validate_sector_size(sector_size, source="injected")
         if counter_source is not None and not callable(counter_source):
             raise TypeError("counter_source must be callable")
         if stat_fn is not None and not callable(stat_fn):
@@ -141,7 +137,6 @@ class LinuxPLEBlockCounterProbe:
             raise TypeError("read_text_fn must be callable")
         self.payload_path = Path(payload_path)
         self.sysfs_root = Path(sysfs_root)
-        self.sector_size = sector_size
         self.counter_source = counter_source
         self._stat_fn = os.stat if stat_fn is None else stat_fn
         self._read_text_fn = _read_sysfs_text if read_text_fn is None else read_text_fn
@@ -234,12 +229,16 @@ class LinuxPLEBlockCounterProbe:
                 raise PLEBlockProbeError(f"malformed partition marker: {partition}") from error
             if partition_number <= 0:
                 raise PLEBlockProbeError(f"invalid partition marker: {partition}")
-            parent = path.parent
-            self._validate_block_path(parent)
-            return parent
+            # /sys/block/<dev>/stat is already scoped to this partition.  Walking
+            # to the parent disk would combine unrelated filesystem partitions.
+            return None
 
         slaves = path / "slaves"
         if not (slaves.exists() or slaves.is_symlink()):
+            if "virtual" in path.parts:
+                raise PLEBlockProbeError(
+                    f"virtual block device {path.name} has no discoverable physical backing"
+                )
             return None
         if not slaves.is_dir():
             raise PLEBlockProbeError(f"Linux sysfs slaves path is not a directory: {slaves}")
@@ -262,7 +261,11 @@ class LinuxPLEBlockCounterProbe:
             return None
         try:
             target = entries[0].resolve(strict=True)
-        except (OSError, RuntimeError) as error:
+        except RuntimeError as error:
+            raise PLEBlockProbeError(
+                f"cycle in Linux sysfs slave target {entries[0]}"
+            ) from error
+        except OSError as error:
             raise PLEBlockProbeError(
                 f"missing Linux sysfs slave target {entries[0]}"
             ) from error
@@ -276,7 +279,7 @@ class LinuxPLEBlockCounterProbe:
         return target
 
     def resolve(self) -> PLEBlockDevice:
-        """Resolve the payload's unique terminal block device and sector size."""
+        """Resolve the payload's unique terminal block device."""
         major, minor = self._payload_device_number()
         current = self._resolve_target(major, minor)
         visited: set[Path] = set()
@@ -291,18 +294,6 @@ class LinuxPLEBlockCounterProbe:
                 break
             current = next_path
 
-        queue_size = current / "queue" / "logical_block_size"
-        if self.sector_size is None:
-            text = self._read_text(queue_size).strip()
-            if not text or len(text.split()) != 1:
-                raise PLEBlockProbeError(f"malformed logical block size: {queue_size}")
-            try:
-                sector_size = int(text, 10)
-            except ValueError as error:
-                raise PLEBlockProbeError(f"malformed logical block size: {queue_size}") from error
-            sector_size = _validate_sector_size(sector_size, source=str(queue_size))
-        else:
-            sector_size = self.sector_size
         stat_path = current / "stat"
         if not stat_path.is_file():
             raise PLEBlockProbeError(f"Linux block stat is missing: {stat_path}")
@@ -312,7 +303,6 @@ class LinuxPLEBlockCounterProbe:
             minor=terminal_device[1],
             sysfs_path=str(current),
             stat_path=str(stat_path),
-            sector_size=sector_size,
         )
 
     def _read_sectors(self, device: PLEBlockDevice) -> int:
@@ -343,14 +333,15 @@ class LinuxPLEBlockCounterProbe:
             )
         base = _coerce_counters(counters)
         device = self.resolve()
-        physical_bytes = self._read_sectors(device) * device.sector_size
+        physical_bytes = self._read_sectors(device) * LINUX_SYSFS_STAT_SECTOR_BYTES
         detail = (
-            f"{device.stat_path}:field=3(sectors-read):logical-block-size={device.sector_size}"
+            f"{device.major}:{device.minor}/{device.name}:"
+            f"field=3(sectors-read):sector-size={LINUX_SYSFS_STAT_SECTOR_BYTES}"
         )
         return replace(
             base,
             physical_block_device_bytes=physical_bytes,
-            device_identity=device.name,
+            device_identity=f"{device.major}:{device.minor}/{device.name}",
             physical_source="sysfs-block-stat",
             physical_source_detail=detail,
         )
@@ -363,7 +354,6 @@ def probe_linux_ple_io_counters(
     payload_path: str | os.PathLike[str],
     *,
     sysfs_root: str | os.PathLike[str] = "/sys",
-    sector_size: int | None = None,
     counters: PLEIOCounters | Mapping[str, Any] | None = None,
     counter_source: Callable[[], PLEIOCounters | Mapping[str, Any]] | None = None,
     stat_fn: Callable[[str | os.PathLike[str]], object] | None = None,
@@ -374,7 +364,6 @@ def probe_linux_ple_io_counters(
     return LinuxPLEBlockCounterProbe(
         payload_path,
         sysfs_root=sysfs_root,
-        sector_size=sector_size,
         counter_source=counter_source,
         stat_fn=stat_fn,
         read_text_fn=read_text_fn,
@@ -689,6 +678,7 @@ class PLEIOEvidenceRecorder:
 
 
 __all__ = [
+    "LINUX_SYSFS_STAT_SECTOR_BYTES",
     "PLE_IO_PHASES",
     "PLE_IO_PHYSICAL_SOURCE_KINDS",
     "LinuxPLEBlockCounterProbe",
