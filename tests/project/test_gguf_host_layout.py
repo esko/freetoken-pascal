@@ -771,6 +771,7 @@ def test_dedicated_pread_batch_retains_partial_io_after_later_short_read(
 ) -> None:
     artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
     with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        row_bytes = table.descriptor.row_bytes
         real_pread = os.pread
         calls = 0
 
@@ -789,8 +790,8 @@ def test_dedicated_pread_batch_retains_partial_io_after_later_short_read(
     assert telemetry["short_reads"] == 1
     assert telemetry["batch_positional_reads"] == 2
     assert telemetry["application_reads"] == 2
-    assert telemetry["batch_bytes_read"] == 90 + len(b"partial")
-    assert telemetry["application_bytes_read"] == 90 + len(b"partial")
+    assert telemetry["batch_bytes_read"] == row_bytes + len(b"partial")
+    assert telemetry["application_bytes_read"] == row_bytes + len(b"partial")
     assert telemetry["batch_calls"] == 0
     assert telemetry["lookup_calls"] == 0
 
@@ -800,6 +801,7 @@ def test_dedicated_pread_batch_retains_partial_io_after_later_exception(
 ) -> None:
     artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
     with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        row_bytes = table.descriptor.row_bytes
         real_pread = os.pread
         calls = 0
 
@@ -818,8 +820,8 @@ def test_dedicated_pread_batch_retains_partial_io_after_later_exception(
     assert telemetry["short_reads"] == 0
     assert telemetry["batch_positional_reads"] == 2
     assert telemetry["application_reads"] == 2
-    assert telemetry["batch_bytes_read"] == 90
-    assert telemetry["application_bytes_read"] == 90
+    assert telemetry["batch_bytes_read"] == row_bytes
+    assert telemetry["application_bytes_read"] == row_bytes
     assert telemetry["batch_calls"] == 0
     assert telemetry["lookup_calls"] == 0
 
