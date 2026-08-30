@@ -320,6 +320,8 @@ def test_source_ple_pread_targeted_warm_failure_does_not_claim_unwarmed_rows(
 
 def test_source_ple_pread_targeted_warm_without_fd_fails_without_claiming_rows() -> None:
     table = _open_source_ple_pread_table()
+    opened_fd = table._pread_fd
+    assert opened_fd is not None
     table._pread_fd = None
     try:
         with pytest.raises(RuntimeError, match="positional warm backend is unavailable"):
@@ -327,6 +329,7 @@ def test_source_ple_pread_targeted_warm_without_fd_fails_without_claiming_rows()
         telemetry = table.telemetry()
     finally:
         table.close()
+        os.close(opened_fd)
 
     assert telemetry["targeted_warm_rows"] == 0
     assert telemetry["targeted_positional_warm_reads"] == 0
