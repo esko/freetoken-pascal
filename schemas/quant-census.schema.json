@@ -201,8 +201,8 @@
         },
         "conversion_provenance": {"type": "string", "minLength": 1},
         "selected_precision": {"type": "string", "minLength": 1},
-        "promotion_status": {"enum": ["baseline", "unqualified", "qualified", "passed"]},
-        "promotion_evidence": {"type": ["string", "null"]},
+        "promotion_status": {"enum": ["baseline", "unqualified"]},
+        "promotion_evidence": {"type": "null"},
         "rationale": {"type": "string", "minLength": 1},
         "shape": {"$ref": "#/$defs/shape"}
       }

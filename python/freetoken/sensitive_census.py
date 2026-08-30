@@ -11,6 +11,8 @@ scale metadata; it does not claim the later long-horizon model-quality gate.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import math
 import re
@@ -136,7 +138,11 @@ def classify_sensitive_tensor(
         return "gdn_in_proj_a"
     if _ends_with_any(name, (".ssm_beta.weight", ".in_proj_b.weight")):
         return "gdn_in_proj_b"
-    if _ends_with_any(name, (".attn_qkv.weight", ".linear_attn.in_proj_qkv.weight")):
+    if re.fullmatch(
+        r"(?:blk\.\d+\.(?:in_proj_z|in_proj|in_proj_qkv|in_proj_qkvz)|"
+        r"model\.layers\.\d+\.linear_attn\.(?:in_proj_z|in_proj|in_proj_qkv|in_proj_qkvz))\.weight",
+        name,
+    ) or _ends_with_any(name, (".attn_qkv.weight", ".linear_attn.in_proj_qkv.weight")):
         return "gdn_state_projection"
     if _ends_with_any(
         name,
@@ -372,16 +378,20 @@ def build_sensitive_tensor_census(
                 raise ValueError(f"{name}: Q8 promotion evidence must be an object")
             else:
                 promotion_status = evidence.get("status")
-                promotion_id = evidence.get("evidence_id")
-                if (
-                    promotion_status not in {"qualified", "passed"}
-                    or not isinstance(promotion_id, str)
-                    or not promotion_id
-                ):
+                if promotion_status not in {"baseline", "unqualified"}:
                     raise ValueError(
-                        f"{name}: Q8 promotion evidence must have status qualified/passed "
-                        "and a non-empty evidence_id"
+                        f"{name}: promotion status {promotion_status!r} is not accepted by "
+                        "the census-only boundary; only baseline/unqualified are allowed"
                     )
+                # A census record must not treat an arbitrary artifact ID as qualification
+                # evidence.  This slice intentionally preserves the blocked state until a
+                # later evidence-gated implementation defines and verifies that artifact.
+                if evidence.get("evidence_id") not in {None, ""}:
+                    raise ValueError(
+                        f"{name}: census-only promotion metadata cannot carry qualification "
+                        "evidence"
+                    )
+                promotion_status = "unqualified"
         source_dtype = quant_format if quant_format in {"F32", "F16", "BF16"} else None
         record: dict[str, Any] = {
             "identity": name,
@@ -484,27 +494,21 @@ def validate_sensitive_tensor_census(
             raise ValueError(f"{name}: unsupported sensitive quantization {quant_format}")
         _validate_scale_representation(record["scale_representation"], quant_format, name)
         selected = _normalise_format(record["selected_precision"])
+        if selected not in _ALLOWED_SENSITIVE_FORMATS:
+            raise ValueError(f"{name}: unsupported selected sensitive precision {selected}")
+        if selected != quant_format and quant_format not in _LOSSLESS_FORMATS:
+            raise ValueError(
+                f"{name}: lossy source {quant_format} cannot be relabeled or promoted to "
+                f"{selected} without authoritative source bytes"
+            )
         quant_changed = selected != quant_format
         needs_evidence = quant_changed or selected in {"Q8_0", "Q8_K", "Q8_K_XL"}
         if needs_evidence:
-            if (
-                record["promotion_status"]
-                not in {
-                    "unqualified",
-                    "qualified",
-                    "passed",
-                }
-                or (
-                    record["promotion_status"] in {"qualified", "passed"}
-                    and (
-                        not isinstance(record["promotion_evidence"], str)
-                        or not record["promotion_evidence"]
-                    )
-                )
-                or (
-                    record["promotion_status"] == "unqualified"
-                    and record["promotion_evidence"] is not None
-                )
+            if record["promotion_status"] not in {
+                "unqualified",
+            } or (
+                record["promotion_status"] == "unqualified"
+                and record["promotion_evidence"] is not None
             ):
                 raise ValueError(
                     f"{name}: selected precision requires explicit per-class promotion evidence "
@@ -659,6 +663,133 @@ def evaluate_sensitive_tensor_fixture(
     }
 
 
+def evaluate_q8_0_packed_scale_parity(
+    fixture: str | Path | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Decode a packed Q8_0 control block through the GGML reference path.
+
+    The fixture carries the actual 34-byte GGML block (including its little-endian
+    FP16 scale), rather than only a floating-point approximation.  This keeps the
+    scale representation in the sensitive census tied to the bytes the runtime
+    will consume.  It is a tensor-level parity check, not model-quality evidence.
+    """
+    document = _fixture_document(fixture)
+    expected_keys = {
+        "schema_name",
+        "schema_version",
+        "tensor_identity",
+        "tensor_class",
+        "quant_format",
+        "scale_representation",
+        "packed_base64",
+        "packed_sha256",
+        "reference_f32_sha256",
+        "expected_values",
+        "tolerance",
+    }
+    if set(document) != expected_keys:
+        raise ValueError(
+            f"Q8_0 parity fixture fields disagree: expected={sorted(expected_keys)}, "
+            f"actual={sorted(document)}"
+        )
+    if document["schema_name"] != "sensitive-q8-0-packed-parity" or document["schema_version"] != 1:
+        raise ValueError("unsupported sensitive Q8_0 parity fixture schema")
+    identity = document["tensor_identity"]
+    tensor_class = document["tensor_class"]
+    if classify_sensitive_tensor(identity) != tensor_class:
+        raise ValueError("Q8_0 parity fixture identity/class is not a sensitive tensor")
+    quant_format = _normalise_format(document["quant_format"])
+    if quant_format != "Q8_0":
+        raise ValueError(f"Q8_0 parity fixture must declare Q8_0, got {quant_format}")
+    scale = _validate_scale_representation(document["scale_representation"], quant_format, identity)
+    if scale != default_scale_representation("Q8_0"):
+        raise ValueError(
+            f"{identity}: Q8_0 scale representation must be the inline GGML FP16 block scale"
+        )
+    encoded = document["packed_base64"]
+    if not isinstance(encoded, str) or not encoded:
+        raise ValueError("Q8_0 parity packed_base64 must be a non-empty string")
+    try:
+        packed_bytes = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as error:
+        raise ValueError(f"Q8_0 parity packed_base64 is invalid: {error}") from error
+    from freetoken.moe.ggml_reference import Q8_0_BLOCK_BYTES, dequantize_q8_0
+
+    packed_hash = hashlib.sha256(packed_bytes).hexdigest()
+    if packed_hash != document["packed_sha256"]:
+        raise ValueError(
+            f"{identity}: packed Q8_0 SHA256 mismatch; expected {document['packed_sha256']}, "
+            f"got {packed_hash}"
+        )
+    if len(packed_bytes) == 0 or len(packed_bytes) % Q8_0_BLOCK_BYTES:
+        raise ValueError(
+            f"{identity}: packed Q8_0 bytes must contain complete {Q8_0_BLOCK_BYTES}-byte blocks"
+        )
+    packed = np.frombuffer(packed_bytes, dtype=np.uint8)
+    decoded = dequantize_q8_0(packed)
+    expected_values = document["expected_values"]
+    if not isinstance(expected_values, list) or not expected_values:
+        raise ValueError("Q8_0 parity expected_values must be a non-empty array")
+    expected = np.asarray(expected_values, dtype=np.float32)
+    if expected.ndim != 1 or expected.size != decoded.size or not np.isfinite(expected).all():
+        raise ValueError(f"{identity}: Q8_0 parity expected_values shape or values are invalid")
+    expected_hash = hashlib.sha256(expected.astype("<f4", copy=False).tobytes()).hexdigest()
+    if expected_hash != document["reference_f32_sha256"]:
+        raise ValueError(
+            f"{identity}: expected Q8_0 reference SHA256 mismatch; expected "
+            f"{document['reference_f32_sha256']}, got {expected_hash}"
+        )
+    decoded_hash = hashlib.sha256(decoded.astype("<f4", copy=False).tobytes()).hexdigest()
+    tolerance = document["tolerance"]
+    if not isinstance(tolerance, Mapping) or set(tolerance) != {
+        "max_abs",
+        "relative_rms",
+        "min_cosine",
+    }:
+        raise ValueError("Q8_0 parity tolerance is incomplete")
+    limits = {key: tolerance[key] for key in tolerance}
+    if not all(
+        isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        for value in limits.values()
+    ):
+        raise ValueError("Q8_0 parity tolerances must be finite numbers")
+    if limits["max_abs"] < 0 or limits["relative_rms"] < 0 or not -1 <= limits["min_cosine"] <= 1:
+        raise ValueError("Q8_0 parity tolerances are out of range")
+    max_abs, relative_rms, cosine = _fixture_metrics(
+        decoded.astype(np.float64), expected.astype(np.float64)
+    )
+    passed = (
+        max_abs <= limits["max_abs"]
+        and relative_rms <= limits["relative_rms"]
+        and cosine >= limits["min_cosine"]
+    )
+    return {
+        "schema_name": "sensitive-q8-0-packed-parity-result",
+        "schema_version": 1,
+        "tensor_identity": identity,
+        "tensor_class": tensor_class,
+        "quant_format": "Q8_0",
+        "scale_representation": scale,
+        "packed_sha256": packed_hash,
+        "reference_f32_sha256": document["reference_f32_sha256"],
+        "decoded_f32_sha256": decoded_hash,
+        "max_abs": max_abs,
+        "relative_rms": relative_rms,
+        "cosine": cosine,
+        "passed": passed,
+    }
+
+
+def assert_q8_0_packed_scale_parity(
+    fixture: str | Path | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require a packed Q8_0 sensitive tensor to match its reference dequantization."""
+    report = evaluate_q8_0_packed_scale_parity(fixture)
+    if not report["passed"]:
+        raise ValueError(f"packed Q8_0 scale/dequant parity failed: {report['tensor_identity']}")
+    return report
+
+
 def assert_sensitive_tensor_fixture_rejected(
     fixture: str | Path | Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -671,11 +802,13 @@ def assert_sensitive_tensor_fixture_rejected(
 
 
 __all__ = [
+    "assert_q8_0_packed_scale_parity",
     "assert_sensitive_tensor_fixture_rejected",
     "build_sensitive_precision_policy",
     "build_sensitive_tensor_census",
     "classify_sensitive_tensor",
     "default_scale_representation",
+    "evaluate_q8_0_packed_scale_parity",
     "evaluate_sensitive_tensor_fixture",
     "validate_sensitive_profile_qualification",
     "validate_sensitive_tensor_census",

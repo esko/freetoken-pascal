@@ -18,7 +18,8 @@ prompts and deterministic long-context templates.
   treated as measured evidence.
 - `kernels/` contains arithmetic values checked against simple independent scalar formulas.
 - `sensitive/` contains deterministic tensor-level positive controls for a mis-scaled
-  shared-expert gate and a perturbed GDN control. These prove H0 rejection sensitivity;
-  they are not long-horizon model-quality evidence.
+  shared-expert gate and a perturbed GDN control, plus a packed Q8_0 scale/dequant parity
+  block checked through the GGML reference decoder. These prove H0 tensor behavior;
+  they are not long-horizon model-quality or qualification evidence.
 - `results/` contains schema-valid synthetic evidence. The `evidence_status` field prevents these
   examples from being confused with measured release results.

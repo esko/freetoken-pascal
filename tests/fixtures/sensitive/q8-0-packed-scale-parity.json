@@ -1,0 +1,27 @@
+{
+  "schema_name": "sensitive-q8-0-packed-parity",
+  "schema_version": 1,
+  "tensor_identity": "blk.0.attn_gate.weight",
+  "tensor_class": "gdn_output_gate",
+  "quant_format": "Q8_0",
+  "scale_representation": {
+    "kind": "per-block",
+    "location": "inline-ggml-block",
+    "dtype": "F16",
+    "required": true
+  },
+  "packed_base64": "ADCAwODw+Pz+/wABAgQIECBAZJx/gRHvH+E/wV+hbpI3yQ==",
+  "packed_sha256": "3b2b849f1e378b385936d1f3f7778953d1bca432296e53f369d102f4e06ec6a6",
+  "reference_f32_sha256": "f73d065e93a62b4466852d88261356f79026dbca205d59c6c212ac4b5b474d12",
+  "expected_values": [
+    -16.0, -8.0, -4.0, -2.0, -1.0, -0.5, -0.25, -0.125,
+    0.0, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0,
+    12.5, -12.5, 15.875, -15.875, 2.125, -2.125, 3.875, -3.875,
+    7.875, -7.875, 11.875, -11.875, 13.75, -13.75, 6.875, -6.875
+  ],
+  "tolerance": {
+    "max_abs": 0.0,
+    "relative_rms": 0.0,
+    "min_cosine": 1.0
+  }
+}
