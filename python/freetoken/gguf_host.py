@@ -1523,13 +1523,23 @@ class MappedPLETable:
         if unique.size and self.mapping is not None:
             _ = int(self.mapping.rows[unique, 0].sum(dtype=np.uint64))
         elif unique.size:
+            fd = self._pread_fd
+            if fd is None:
+                raise RuntimeError("PLE positional warm backend is unavailable")
             for row in unique:
-                if len(os.pread(self._pread_fd, 1, int(row) * self.descriptor.row_bytes)) != 1:
+                chunk = os.pread(
+                    fd,
+                    1,
+                    self.descriptor.data_offset + int(row) * self.descriptor.row_bytes,
+                )
+                if len(chunk) != 1:
                     with self._prefetch_lock:
                         self._short_reads += 1
                     raise ValueError("short PLE positional warm read")
                 with self._prefetch_lock:
                     self._targeted_positional_warm_reads += 1
+                    self._targeted_warm_rows += 1
+            return
         with self._prefetch_lock:
             self._targeted_warm_rows += int(unique.size)
 

@@ -208,6 +208,130 @@ def test_ple_warm_modes_and_fault_telemetry_are_observable() -> None:
         assert table.telemetry()["full_model_warm_bytes"] == FIXTURE.stat().st_size
 
 
+def _open_source_ple_pread_table() -> MappedPLETable:
+    layout = inspect_qwen_host_layout(FIXTURE)
+    table = MappedPLETable(layout.ple, None, model_shard_paths=layout.shard_paths)
+    table.backend = "pread"
+    table._pread_fd = os.open(layout.ple.shard_path, os.O_RDONLY)
+    return table
+
+
+def test_source_ple_pread_targeted_warm_uses_descriptor_offset_and_deduplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = _open_source_ple_pread_table()
+    try:
+        real_pread = os.pread
+        calls: list[tuple[int, int]] = []
+
+        def recording_pread(fd: int, size: int, offset: int) -> bytes:
+            calls.append((size, offset))
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", recording_pread)
+        table.warm_rows(np.array([31, 0, 31, 16, 0]))
+        telemetry = table.telemetry()
+    finally:
+        table.close()
+
+    descriptor = inspect_qwen_host_layout(FIXTURE).ple
+    assert calls == [
+        (1, descriptor.data_offset + row * descriptor.row_bytes) for row in (0, 16, 31)
+    ]
+    assert telemetry["targeted_warm_rows"] == 3
+    assert telemetry["targeted_positional_warm_reads"] == 3
+
+
+def test_dedicated_ple_pread_targeted_warm_keeps_zero_artifact_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    real_pread = os.pread
+    calls: list[tuple[int, int]] = []
+
+    def recording_pread(fd: int, size: int, offset: int) -> bytes:
+        calls.append((size, offset))
+        return real_pread(fd, size, offset)
+
+    monkeypatch.setattr("freetoken.gguf_host.os.pread", recording_pread)
+    with MappedPLETable.open_from_artifact(artifact, backend="pread") as table:
+        table.warm_rows(np.array([31, 0, 31, 16]))
+        telemetry = table.telemetry()
+
+    assert calls == [(1, row * 90) for row in (0, 16, 31)]
+    assert telemetry["targeted_warm_rows"] == 3
+    assert telemetry["targeted_positional_warm_reads"] == 3
+
+
+def test_source_ple_pread_async_prefetch_uses_descriptor_offset_and_deduplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = _open_source_ple_pread_table()
+    try:
+        real_pread = os.pread
+        calls: list[tuple[int, int]] = []
+
+        def recording_pread(fd: int, size: int, offset: int) -> bytes:
+            calls.append((size, offset))
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", recording_pread)
+        handle = table.prefetch(np.array([31, 0, 31, 16, 0]))
+        handle.result()
+        telemetry = table.telemetry()
+    finally:
+        table.close()
+
+    descriptor = inspect_qwen_host_layout(FIXTURE).ple
+    assert calls == [
+        (descriptor.row_bytes, descriptor.data_offset + row * descriptor.row_bytes)
+        for row in (0, 16, 31)
+    ]
+    assert telemetry["prefetch_unique_rows"] == 3
+    assert telemetry["prefetch_warmed_rows"] == 3
+
+
+def test_source_ple_pread_targeted_warm_failure_does_not_claim_unwarmed_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = _open_source_ple_pread_table()
+    try:
+        real_pread = os.pread
+        calls = 0
+
+        def short_second_read(fd: int, size: int, offset: int) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                return b""
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr("freetoken.gguf_host.os.pread", short_second_read)
+        with pytest.raises(ValueError, match="short PLE positional warm read"):
+            table.warm_rows(np.array([0, 16, 31]))
+        telemetry = table.telemetry()
+    finally:
+        table.close()
+
+    assert telemetry["short_reads"] == 1
+    assert telemetry["targeted_positional_warm_reads"] == 1
+    assert telemetry["targeted_warm_rows"] == 1
+
+
+def test_source_ple_pread_targeted_warm_without_fd_fails_without_claiming_rows() -> None:
+    table = _open_source_ple_pread_table()
+    table._pread_fd = None
+    try:
+        with pytest.raises(RuntimeError, match="positional warm backend is unavailable"):
+            table.warm_rows(np.array([0]))
+        telemetry = table.telemetry()
+    finally:
+        table.close()
+
+    assert telemetry["targeted_warm_rows"] == 0
+    assert telemetry["targeted_positional_warm_reads"] == 0
+
+
 def test_dedicated_ple_artifact_round_trip_and_manifest(tmp_path: Path) -> None:
     artifact = tmp_path / "ple"
     convert_gguf_ple_to_artifact(FIXTURE, artifact)
