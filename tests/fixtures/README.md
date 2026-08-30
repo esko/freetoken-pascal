@@ -21,5 +21,9 @@ prompts and deterministic long-context templates.
   shared-expert gate and a perturbed GDN control, plus a packed Q8_0 scale/dequant parity
   block checked through the GGML reference decoder. These prove H0 tensor behavior;
   they are not long-horizon model-quality or qualification evidence.
+- `qwen38-long-horizon-contract.json` is the H0 contract for five semantic/agentic probe
+  families and a minimum 16-step aligned state trace. The contract and harness are synthetic
+  scaffolding; the linked sensitive control proves that accumulated GDN drift fails even when
+  semantic output tokens remain unchanged, but neither file claims model or P4 parity.
 - `results/` contains schema-valid synthetic evidence. The `evidence_status` field prevents these
   examples from being confused with measured release results.

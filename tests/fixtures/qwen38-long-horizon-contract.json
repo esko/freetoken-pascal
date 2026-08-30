@@ -1,0 +1,73 @@
+{
+  "schema_name": "qwen38-long-horizon-contract",
+  "schema_version": 1,
+  "contract_id": "qwen38-v1-long-horizon",
+  "minimum_steps": 16,
+  "probes": [
+    {
+      "id": "multi-turn-coding",
+      "kind": "multi-turn-coding",
+      "steps": [
+        {"id": "draft", "expectation": {"kind": "contains", "value": "def normalize"}},
+        {"id": "edit", "expectation": {"kind": "contains", "value": "return result"}},
+        {"id": "verify", "expectation": {"kind": "contains", "value": "tests pass"}}
+      ]
+    },
+    {
+      "id": "repeated-tool-calls",
+      "kind": "repeated-tool-calls",
+      "steps": [
+        {"id": "lookup-1", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-2", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}},
+        {"id": "lookup-3", "expectation": {"kind": "exact", "value": "{\"path\":\"a.py\",\"line\":7}"}}
+      ]
+    },
+    {
+      "id": "state-dependent-reasoning",
+      "kind": "state-dependent-reasoning",
+      "steps": [
+        {"id": "establish", "expectation": {"kind": "contains", "value": "state=ready"}},
+        {"id": "continue", "expectation": {"kind": "contains", "value": "next=2"}},
+        {"id": "restore", "expectation": {"kind": "contains", "value": "state=ready"}}
+      ]
+    },
+    {
+      "id": "structured-transform",
+      "kind": "structured-transform",
+      "steps": [
+        {
+          "id": "transform",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        },
+        {
+          "id": "replay",
+          "expectation": {"kind": "json-object", "required": {"path": "string", "line": "integer"}}
+        }
+      ]
+    },
+    {
+      "id": "long-generation",
+      "kind": "long-generation",
+      "steps": [
+        {"id": "prefill", "expectation": {"kind": "contains", "value": "checkpoint"}},
+        {"id": "suffix", "expectation": {"kind": "contains", "value": "suffix"}},
+        {"id": "complete", "expectation": {"kind": "contains", "value": "done"}}
+      ]
+    }
+  ],
+  "observations": {
+    "continuation_tokens": {"comparison": "exact", "minimum_steps": 16},
+    "router_ids": {"comparison": "exact", "minimum_steps": 16},
+    "semantic_output_tokens": {"comparison": "exact", "minimum_steps": 16},
+    "gdn_state": {
+      "comparison": "numeric",
+      "minimum_steps": 16,
+      "tolerance": {"max_abs": 0.00001, "relative_rms": 0.00002, "min_cosine": 0.99999}
+    }
+  },
+  "sensitive_control": {
+    "tensor_class": "gdn_in_proj_a",
+    "fixture": "tests/fixtures/sensitive/gdn-control-perturbed.json",
+    "required_observation": "gdn_state"
+  }
+}
