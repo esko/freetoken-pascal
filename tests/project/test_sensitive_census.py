@@ -95,8 +95,9 @@ def test_sensitive_census_classifies_reconciled_tensor_identities() -> None:
     assert classify_sensitive_tensor("blk.0.attn_qkv.weight") == "gdn_state_projection"
     assert (
         classify_sensitive_tensor("model.layers.0.linear_attn.in_proj_z.weight")
-        == "gdn_state_projection"
+        == "gdn_output_gate"
     )
+    assert classify_sensitive_tensor("blk.0.in_proj_z.weight") == "gdn_output_gate"
     assert (
         classify_sensitive_tensor("model.layers.0.linear_attn.in_proj.weight")
         == "gdn_state_projection"

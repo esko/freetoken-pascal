@@ -139,8 +139,8 @@ def classify_sensitive_tensor(
     if _ends_with_any(name, (".ssm_beta.weight", ".in_proj_b.weight")):
         return "gdn_in_proj_b"
     if re.fullmatch(
-        r"(?:blk\.\d+\.(?:in_proj_z|in_proj|in_proj_qkv|in_proj_qkvz)|"
-        r"model\.layers\.\d+\.linear_attn\.(?:in_proj_z|in_proj|in_proj_qkv|in_proj_qkvz))\.weight",
+        r"(?:blk\.\d+\.(?:in_proj|in_proj_qkv|in_proj_qkvz)|"
+        r"model\.layers\.\d+\.linear_attn\.(?:in_proj|in_proj_qkv|in_proj_qkvz))\.weight",
         name,
     ) or _ends_with_any(name, (".attn_qkv.weight", ".linear_attn.in_proj_qkv.weight")):
         return "gdn_state_projection"
@@ -157,7 +157,10 @@ def classify_sensitive_tensor(
         ),
     ):
         return "gdn_control"
-    if _ends_with_any(name, (".attn_gate.weight", ".linear_attn.gate.weight")):
+    if _ends_with_any(
+        name,
+        (".attn_gate.weight", ".linear_attn.gate.weight", ".linear_attn.in_proj_z.weight"),
+    ) or re.fullmatch(r"blk\.\d+\.in_proj_z\.weight", name):
         return "gdn_output_gate"
 
     # Converter names for the write gate are block_inject and hc_*_inject.  A

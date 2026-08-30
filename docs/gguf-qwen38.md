@@ -37,8 +37,8 @@ down projections may use different formats and the down format varies by layer.
 For a profile census, pass `--profile reference-q4` or `--profile throughput-q3` and
 record immutable source/converter provenance with `--conversion-provenance`. The output
 then contains `sensitive_tensors` records for the exact router, shared-expert gate,
-reconciled GDN state projections (`in_proj_z`, `in_proj`, and fused `in_proj_qkvz` where
-present), `in_proj_a`/`in_proj_b` (`ssm_alpha`/`ssm_beta`) and recurrent controls,
+reconciled GDN state projections (`in_proj` and fused `in_proj_qkvz` where present), the
+`in_proj_z` output gate, `in_proj_a`/`in_proj_b` (`ssm_alpha`/`ssm_beta`) and recurrent controls,
 hyperconnection mix/write controls, and norm identities. Each record includes `class`, source
 `dtype`/`quant_format`, structured `scale_representation`, `conversion_provenance`,
 `selected_precision`, promotion status/evidence, and a rationale. The accompanying
