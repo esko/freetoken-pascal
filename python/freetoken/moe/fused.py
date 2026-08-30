@@ -85,7 +85,7 @@ def _run_triton_candidate(
     topk: int,
     renormalize: bool,
     num_token_non_padded: torch.Tensor | None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     from freetoken.kernel.triton.moe_router import fused_topk_softmax
 
     return fused_topk_softmax(gating_output, topk, renormalize, num_token_non_padded)
@@ -96,7 +96,7 @@ def _run_external_triton(
     topk: int,
     renormalize: bool,
     num_token_non_padded: torch.Tensor | None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     from triton_kernels.topk import topk as triton_kernels_topk
 
     logits = gating_output.float()
