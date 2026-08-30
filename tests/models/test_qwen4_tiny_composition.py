@@ -137,7 +137,7 @@ def test_tiny_qwen_text_composes_prefill_decode_and_is_deterministic(_tiny_model
     assert first.shape == (1, config.vocab_size)
     assert torch.isfinite(first).all()
 
-    decode = _batch(prompt + [9], phase="decode", cached_len=len(prompt))
+    decode = _batch([*prompt, 9], phase="decode", cached_len=len(prompt))
     decoded = _run(model, context, decode)
     assert decoded.shape == (1, config.vocab_size)
     assert torch.isfinite(decoded).all()
@@ -242,4 +242,15 @@ def test_qwen4_cpu_reference_rejects_offload_expert_layout():
     moe = object.__new__(Qwen4ExpMoE)
     moe.experts = SimpleNamespace(weight_format="bf16")
     with pytest.raises(RuntimeError, match="resident gate_up_proj/down_proj"):
+        moe.forward(torch.zeros(1, 4))
+
+
+def test_qwen4_cpu_reference_rejects_quantized_expert_layout():
+    moe = object.__new__(Qwen4ExpMoE)
+    moe.experts = SimpleNamespace(
+        weight_format="fp8_block",
+        gate_up_proj=torch.empty(1),
+        down_proj=torch.empty(1),
+    )
+    with pytest.raises(RuntimeError, match="unquantized resident expert weights"):
         moe.forward(torch.zeros(1, 4))
