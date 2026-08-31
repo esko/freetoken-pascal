@@ -857,16 +857,12 @@ def test_ftw_malformed_bank_geometry_fails_before_allocation(
     before = tuple(host_banks._LIVE_BUFFERS)
     policy = host_banks.HostBankPolicy(strategy="pageable") if use_policy else None
     with pytest.raises(ValueError, match=message):
-        load_ftw_banks(
-            str(checkpoint), num_layers=1, workers=1, host_bank_policy=policy
-        )
+        load_ftw_banks(str(checkpoint), num_layers=1, workers=1, host_bank_policy=policy)
     assert tuple(host_banks._LIVE_BUFFERS) == before
 
 
 @pytest.mark.parametrize("corruption", ["shard-gap", "shard-size", "tensor-range"])
-def test_ftw_corrupt_storage_geometry_fails_before_allocation(
-    tmp_path, monkeypatch, corruption
-):
+def test_ftw_corrupt_storage_geometry_fails_before_allocation(tmp_path, monkeypatch, corruption):
     import json
 
     import freetoken.moe.host_banks as host_banks
