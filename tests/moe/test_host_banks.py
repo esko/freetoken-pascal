@@ -809,17 +809,17 @@ def test_ftw_default_path_keeps_successful_allocations_live(tmp_path, monkeypatc
     monkeypatch.setattr(host_banks, "born_pinned_default", lambda: False)
     monkeypatch.setattr(host_banks, "HostBank", track_allocation)
     monkeypatch.setenv("FREETOKEN_SKIP_BANK_PIN", "1")
+    before = tuple(host_banks._LIVE_BUFFERS)
     result = load_ftw_banks(str(checkpoint), num_layers=1, workers=1)
     assert result is not None
     assert result.sources["gate_up"][0].tolist() == [list(range(8)), list(range(8, 16))]
     assert all(bank.tensor is not None for bank in allocated)
 
-    # The default path retains its historical tensor-owned lifetime.  Drop the
-    # returned aliases before explicit test cleanup of the tracked owners.
-    result.sources.clear()
-    object.__setattr__(result, "gate_up_alpha", None)
-    for bank in reversed(allocated):
-        bank.close()
+    # The returned bundle owns the wrappers and keeps the aliases live until close.
+    result.close()
+    assert tuple(host_banks._LIVE_BUFFERS) == before
+    result.close()
+    assert tuple(host_banks._LIVE_BUFFERS) == before
 
 
 @pytest.mark.parametrize("use_policy", [False, True])

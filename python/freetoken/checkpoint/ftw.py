@@ -1171,12 +1171,13 @@ def load_ftw_banks(
             sources[name] = views
             views = []
         alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
-        retained_owners = owners if host_bank_policy is not None else ()
         result = ExpertBanks(
             reader.meta("quant_format"), sources, **alpha_kw,
             layer_residency=applied,
             host_bank_accounting=accounting,
-            host_bank_owners=retained_owners,
+            # Keep the HostBank wrappers alive for both policy and legacy paths so
+            # ExpertBanks.close() can release their mappings and registrations.
+            host_bank_owners=owners,
         )
     except BaseException:
         if not committed:
