@@ -370,6 +370,87 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         conv_win = conv_in[fla.track_conv_src].transpose(-1, -2).contiguous()  # [nt, conv_dim, K-1]
         cv.index_copy_(0, fla.track_dst, conv_win.to(cv.dtype))
 
+    @staticmethod
+    def _pascal_capture_active(batch) -> bool:
+        """Return whether the explicit Pascal path would run under CUDA capture.
+
+        ``pascal_gdn_recurrence`` validates slot metadata through synchronous host reads and
+        lazily JIT-loads its module, so it is intentionally eager-only.  A graph flag supplied
+        by a caller is authoritative; otherwise query the current CUDA stream when available.
+        """
+
+        configured = getattr(batch, "graph_capture", None)
+        if configured is not None:
+            if type(configured) is not bool:
+                raise GdnDispatchError("pascal-fp32 graph_capture metadata must be a bool")
+            return configured
+        try:
+            return bool(torch.cuda.is_current_stream_capturing())
+        except RuntimeError as error:
+            raise GdnDispatchError(
+                "pascal-fp32 cannot determine CUDA graph-capture state"
+            ) from error
+
+    @staticmethod
+    def _validate_pascal_metadata(fla) -> None:
+        """Reject scheduler checkpoint metadata the standalone recurrence cannot preserve."""
+
+        tracking_fields = (
+            "track_dst",
+            "track_h_row",
+            "track_conv_src",
+            "track_boundary_row",
+        )
+        if any(getattr(fla, name, None) is not None for name in tracking_fields):
+            raise GdnDispatchError(
+                "pascal-fp32 does not support GDN tracking/checkpoint-boundary metadata"
+            )
+
+    def _pascal_recurrent(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        state_source: torch.Tensor,
+        fla,
+    ) -> torch.Tensor:
+        """Run the explicit Pascal recurrence over the model's leading batch dimension.
+
+        The model projection path uses ``[1, T, H, D]`` for both prefill and decode, while the
+        standalone ABI uses flattened ragged ``[T, H, D]`` tensors.  Keep the conversion here so
+        the ABI never has to infer a model leading dimension.  All recurrence inputs and the
+        pool are FP32; the caller converts the returned core output back to model dtype before
+        the existing norm/output projection path.
+        """
+
+        if q.ndim != 4 or q.shape[0] != 1:
+            raise GdnDispatchError(
+                "pascal-fp32 requires a singleton model leading dimension, "
+                f"got q shape {tuple(q.shape)}"
+            )
+        if state_source.dtype != torch.float32:
+            raise GdnDispatchError(
+                "pascal-fp32 requires an FP32 recurrent state pool; refusing implicit state cast"
+            )
+
+        from freetoken.kernel.gdn_pascal import pascal_gdn_recurrence
+
+        def flat(tensor: torch.Tensor) -> torch.Tensor:
+            return tensor[0].to(dtype=torch.float32).contiguous()
+
+        return pascal_gdn_recurrence(
+            flat(q),
+            flat(k),
+            flat(v),
+            flat(g),
+            flat(beta),
+            state_source,
+            fla.cache_indices,
+            fla.cu_seqlens,
+        ).unsqueeze(0)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -412,12 +493,12 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 "triton-candidate selected but no Qwen4 GDN candidate implementation is registered"
             )
         if decision.selected_implementation == "pascal-fp32":
-            # The standalone adapter is an explicit H1/H2 bring-up seam, not a production
-            # model path yet.  Keeping this fail-closed prevents an environment override from
-            # accidentally routing a full model through a kernel before P4 parity evidence.
-            raise GdnDispatchError(
-                "pascal-fp32 selected but Qwen4 GDN runtime integration is not H2-qualified"
-            )
+            # The path is explicit-only and eager-only.  It deliberately reuses the reference
+            # projection/conv/gate/norm/output stages and only substitutes the recurrence kernel.
+            # Tracking/checkpoint snapshots require the FLA state-return contract and cannot be
+            # silently dropped by this standalone adapter.
+            if self._pascal_capture_active(batch):
+                raise GdnDispatchError("pascal-fp32 is not supported during CUDA graph capture")
 
         # Per-forward GDN metadata (cu_seqlens / cache_indices / continuation flags),
         # built once and shared by all GDN layers. The scheduler/graph set it; build it
@@ -428,6 +509,8 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
 
             fla = build_fla_metadata(batch, hidden_states.device)
             batch.fla_metadata = fla
+        if decision.selected_implementation == "pascal-fp32":
+            self._validate_pascal_metadata(fla)
 
         if self._fp8:
             qkvz = self.in_proj_qkvz.forward(hidden_states)
@@ -441,7 +524,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         li = pool.local_index(self.layer_id)
 
         if batch.is_decode:
-            if decision.selected_implementation == "torch-reference":
+            if decision.selected_implementation in ("torch-reference", "pascal-fp32"):
                 mixed = self._reference_conv_decode(conv_in, fla.cache_indices, pool)
             else:
                 # Fused fla decode kernel: gating + in-kernel l2norm + recurrent update +
@@ -466,6 +549,17 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                     pool.recurrent_states[li],
                     fla,
                 )
+            elif decision.selected_implementation == "pascal-fp32":
+                g, beta = self._gate_params(a, b)
+                core_out = self._pascal_recurrent(
+                    q,
+                    k,
+                    v,
+                    g.reshape(1, B, self.num_v_heads),
+                    beta.float().reshape(1, B, self.num_v_heads),
+                    pool.recurrent_states[li],
+                    fla,
+                )
             else:
                 core_out = gdn_decode_fla(
                     q,
@@ -481,7 +575,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                     scale=self.head_k_dim**-0.5,
                 )
         else:
-            if decision.selected_implementation == "torch-reference":
+            if decision.selected_implementation in ("torch-reference", "pascal-fp32"):
                 mixed = self._reference_conv_prefill(conv_in, pool, fla)
             else:
                 from freetoken.models.qwen3_5_moe.gdn_kernels import gdn_prefill_chunk_fla
@@ -512,6 +606,16 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                     fla,
                 )
                 self._write_reference_track_snapshot(pool, li, conv_in, fla)
+            elif decision.selected_implementation == "pascal-fp32":
+                core_out = self._pascal_recurrent(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    pool.recurrent_states[li],
+                    fla,
+                )
             else:
                 track = fla.track_dst is not None
                 result = gdn_prefill_chunk_fla(
@@ -532,7 +636,10 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 else:
                     core_out = result
 
-        core_out = core_out.reshape(-1, self.head_v_dim)
+        # Pascal recurrence is FP32 by contract; return to the projection/model dtype before
+        # the existing reference norm and output projection so downstream residual arithmetic
+        # keeps its established dtype and no hidden FP32 path leaks into the model.
+        core_out = core_out.to(dtype).reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
         out = self.norm.forward(
             core_out, z, use_fla=decision.selected_implementation == "fla"

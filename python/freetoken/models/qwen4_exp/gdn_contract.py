@@ -20,6 +20,7 @@ GDN_MIN_FLA_CAPABILITY = (7, 0)
 GDN_FLA_DTYPES = frozenset({"bfloat16", "float16"})
 GDN_PASCAL_CAPABILITY = (6, 1)
 GDN_PASCAL_DTYPE = "float32"
+GDN_PASCAL_MODEL_DTYPES = frozenset({"bfloat16", "float16", "float32"})
 _MODES = frozenset({"auto", "torch-reference", "triton-candidate", "pascal-fp32"})
 _MODE_ALIASES = {"reference": "torch-reference"}
 _IMPLEMENTATIONS = frozenset({"torch-reference", "fla", "triton-candidate", "pascal-fp32"})
@@ -166,7 +167,8 @@ def resolve_gdn_dispatch(
     supported model dtype.  Pascal and every unavailable/unsupported case select the pure-Torch
     reference implementation with a reason.  The candidate paths are never selected by ``auto``;
     they must be explicitly requested and have an affirmative availability probe.  The
-    ``pascal-fp32`` path is restricted to ``sm_61`` + FP32 and remains unavailable until the
+    ``pascal-fp32`` path is restricted to ``sm_61`` and supported model activation dtypes;
+    its recurrence is staged to FP32 by the model adapter. It remains unavailable until the
     caller supplies a positive qualification gate (H2 evidence is not inferred here).
     """
 
@@ -224,8 +226,10 @@ def resolve_gdn_dispatch(
     elif mode == "pascal-fp32":
         if capability != GDN_PASCAL_CAPABILITY:
             raise GdnDispatchError("pascal-fp32 requires sm_61 capability")
-        if dtype_name != GDN_PASCAL_DTYPE:
-            raise GdnDispatchError("pascal-fp32 requires float32 inputs")
+        if dtype_name not in GDN_PASCAL_MODEL_DTYPES:
+            raise GdnDispatchError(
+                "pascal-fp32 requires bfloat16, float16, or float32 model inputs"
+            )
         if pascal is not True:
             raise GdnDispatchError("pascal-fp32 unavailable: pascal-fp32-unqualified")
         decision = GdnDispatchDecision(selected_implementation="pascal-fp32", **common)
@@ -261,6 +265,7 @@ __all__ = [
     "GDN_MIN_FLA_CAPABILITY",
     "GDN_PASCAL_CAPABILITY",
     "GDN_PASCAL_DTYPE",
+    "GDN_PASCAL_MODEL_DTYPES",
     "GDNDispatchDecision",
     "GDNDispatchError",
     "GdnDispatchDecision",
