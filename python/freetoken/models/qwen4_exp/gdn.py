@@ -24,6 +24,18 @@ from .gdn_contract import (
 
 logger = init_logger(__name__)
 GdnObserver = Callable[[GdnDispatchDecision], None]
+GdnPhaseObserver = Callable[[str, str], None]
+GDN_PHASE_NAMES = (
+    "projection",
+    "convolution",
+    "qkv_prepare",
+    "gate",
+    "recurrence_device",
+    "metadata_validation",
+    "adapter_host_overhead",
+    "norm",
+    "output_projection",
+)
 _warned_reference_decisions: set[GdnDispatchDecision] = set()
 
 
@@ -126,6 +138,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         attn_quant: str = "none",
         gdn_mode: str | None = None,
         gdn_observer: GdnObserver | None = None,
+        gdn_phase_observer: GdnPhaseObserver | None = None,
         gdn_fla_available: bool | None = None,
         gdn_candidate_available: bool | None = None,
         gdn_pascal_available: bool = False,
@@ -141,7 +154,12 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         self._gdn_mode = parse_gdn_mode(gdn_mode) if gdn_mode is not None else gdn_mode_from_env()
         if gdn_observer is not None and not callable(gdn_observer):
             raise TypeError("gdn_observer must be callable")
+        if gdn_phase_observer is not None and not callable(gdn_phase_observer):
+            raise TypeError("gdn_phase_observer must be callable")
         self._gdn_observer = gdn_observer
+        # The model factory leaves this optional evidence hook unset, so ordinary forwards do
+        # not allocate events or invoke callbacks.
+        self._gdn_phase_observer = gdn_phase_observer
         self._gdn_fla_available = (
             _probe_fla_available() if gdn_fla_available is None else gdn_fla_available
         )
@@ -205,9 +223,16 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         )
 
     def _gate_params(self, a: torch.Tensor, b: torch.Tensor):
-        beta = b.sigmoid()
-        g = -self.A_log.exp() * F.softplus(a.float() + self.dt_bias)
-        return g, beta
+        observer = self._gdn_phase_observer
+        if observer is not None:
+            observer("gate", "begin")
+        try:
+            beta = b.sigmoid()
+            g = -self.A_log.exp() * F.softplus(a.float() + self.dt_bias)
+            return g, beta
+        finally:
+            if observer is not None:
+                observer("gate", "end")
 
     def _conv_weight(self) -> torch.Tensor:
         return self.conv1d.weight.squeeze(1)  # [conv_dim, kernel] for the fused kernel
@@ -391,20 +416,26 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 "pascal-fp32 cannot determine CUDA graph-capture state"
             ) from error
 
-    @staticmethod
-    def _validate_pascal_metadata(fla) -> None:
+    def _validate_pascal_metadata(self, fla) -> None:
         """Reject scheduler checkpoint metadata the standalone recurrence cannot preserve."""
 
-        tracking_fields = (
-            "track_dst",
-            "track_h_row",
-            "track_conv_src",
-            "track_boundary_row",
-        )
-        if any(getattr(fla, name, None) is not None for name in tracking_fields):
-            raise GdnDispatchError(
-                "pascal-fp32 does not support GDN tracking/checkpoint-boundary metadata"
+        observer = self._gdn_phase_observer
+        if observer is not None:
+            observer("metadata_validation", "begin")
+        try:
+            tracking_fields = (
+                "track_dst",
+                "track_h_row",
+                "track_conv_src",
+                "track_boundary_row",
             )
+            if any(getattr(fla, name, None) is not None for name in tracking_fields):
+                raise GdnDispatchError(
+                    "pascal-fp32 does not support GDN tracking/checkpoint-boundary metadata"
+                )
+        finally:
+            if observer is not None:
+                observer("metadata_validation", "end")
 
     def _pascal_recurrent(
         self,
@@ -453,21 +484,36 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                     raise GdnDispatchError(f"pascal-fp32 {name} exceeds the int32 ABI range")
             return tensor.to(dtype=torch.int32).contiguous()
 
-        cache_indices = int32_metadata("cache_indices", fla.cache_indices)
-        cu_seqlens = int32_metadata("cu_seqlens", fla.cu_seqlens)
+        observer = self._gdn_phase_observer
+        if observer is not None:
+            observer("metadata_validation", "begin")
+        try:
+            cache_indices = int32_metadata("cache_indices", fla.cache_indices)
+            cu_seqlens = int32_metadata("cu_seqlens", fla.cu_seqlens)
+        finally:
+            if observer is not None:
+                observer("metadata_validation", "end")
 
         from freetoken.kernel.gdn_pascal import pascal_gdn_recurrence
 
-        return pascal_gdn_recurrence(
-            flat(q),
-            flat(k),
-            flat(v),
-            flat(g),
-            flat(beta),
-            state_source,
-            cache_indices,
-            cu_seqlens,
-        ).unsqueeze(0)
+        if observer is not None:
+            observer("adapter_host_overhead", "begin")
+            observer("recurrence_device", "begin")
+        try:
+            return pascal_gdn_recurrence(
+                flat(q),
+                flat(k),
+                flat(v),
+                flat(g),
+                flat(beta),
+                state_source,
+                cache_indices,
+                cu_seqlens,
+            ).unsqueeze(0)
+        finally:
+            if observer is not None:
+                observer("recurrence_device", "end")
+                observer("adapter_host_overhead", "end")
 
     def forward(
         self,
@@ -530,82 +576,122 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         if decision.selected_implementation == "pascal-fp32":
             self._validate_pascal_metadata(fla)
 
-        if self._fp8:
-            qkvz = self.in_proj_qkvz.forward(hidden_states)
-            conv_in, z = torch.split(qkvz, [self.conv_dim, self.value_dim], dim=-1)
-            ba = self.in_proj_ba.forward(hidden_states)
-            b, a = torch.split(ba, [self.num_v_heads, self.num_v_heads], dim=-1)
-        else:
-            proj = self.in_proj.forward(hidden_states)
-            conv_in, z, b, a = torch.split(proj, self._in_proj_split, dim=-1)
-        z = z.reshape(total, self.num_v_heads, self.head_v_dim)
+        observer = self._gdn_phase_observer
+        if observer is not None:
+            observer("projection", "begin")
+        try:
+            if self._fp8:
+                qkvz = self.in_proj_qkvz.forward(hidden_states)
+                conv_in, z = torch.split(qkvz, [self.conv_dim, self.value_dim], dim=-1)
+                ba = self.in_proj_ba.forward(hidden_states)
+                b, a = torch.split(ba, [self.num_v_heads, self.num_v_heads], dim=-1)
+            else:
+                proj = self.in_proj.forward(hidden_states)
+                conv_in, z, b, a = torch.split(proj, self._in_proj_split, dim=-1)
+            z = z.reshape(total, self.num_v_heads, self.head_v_dim)
+        finally:
+            if observer is not None:
+                observer("projection", "end")
         li = pool.local_index(self.layer_id)
 
+        if observer is not None:
+            observer("convolution", "begin")
+        try:
+            if batch.is_decode:
+                if decision.selected_implementation in ("torch-reference", "pascal-fp32"):
+                    mixed = self._reference_conv_decode(conv_in, fla.cache_indices, pool)
+                else:
+                    # Fused fla decode kernel: gating + in-kernel l2norm + recurrent update +
+                    # per-request state read/write-by-index, all in one kernel (no gather/scatter,
+                    # no clone, no external l2norm). q/k stay at num_k_heads (kernel handles GQA).
+                    from freetoken.models.qwen3_5_moe.gdn_kernels import gdn_decode_fla
+
+                    mixed = self._conv_decode(conv_in, fla.cache_indices, pool)  # [B, conv_dim]
+            else:
+                if decision.selected_implementation in ("torch-reference", "pascal-fp32"):
+                    mixed = self._reference_conv_prefill(conv_in, pool, fla)
+                else:
+                    from freetoken.models.qwen3_5_moe.gdn_kernels import gdn_prefill_chunk_fla
+
+                    mixed = self._conv_prefill(
+                        conv_in, pool, fla.cu_seqlens, fla.cache_indices, fla.has_initial_state
+                    )
+        finally:
+            if observer is not None:
+                observer("convolution", "end")
+
         if batch.is_decode:
-            if decision.selected_implementation in ("torch-reference", "pascal-fp32"):
-                mixed = self._reference_conv_decode(conv_in, fla.cache_indices, pool)
-            else:
-                # Fused fla decode kernel: gating + in-kernel l2norm + recurrent update +
-                # per-request state read/write-by-index, all in one kernel (no gather/scatter,
-                # no clone, no external l2norm). q/k stay at num_k_heads (kernel handles GQA).
-                from freetoken.models.qwen3_5_moe.gdn_kernels import gdn_decode_fla
-
-                mixed = self._conv_decode(conv_in, fla.cache_indices, pool)  # [B, conv_dim]
             B = mixed.shape[0]
-            qf, kf, vf = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
-            q = qf.reshape(1, B, self.num_k_heads, self.head_k_dim).to(dtype)
-            k = kf.reshape(1, B, self.num_k_heads, self.head_k_dim).to(dtype)
-            v = vf.reshape(1, B, self.num_v_heads, self.head_v_dim).to(dtype)
-            if decision.selected_implementation == "torch-reference":
-                g, beta = self._gate_params(a, b)
-                core_out = self._reference_recurrent(
-                    q,
-                    k,
-                    v,
-                    g.reshape(1, B, self.num_v_heads),
-                    beta.float().reshape(1, B, self.num_v_heads),
-                    pool.recurrent_states[li],
-                    fla,
+            if observer is not None:
+                observer("qkv_prepare", "begin")
+            try:
+                qf, kf, vf = torch.split(
+                    mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1
                 )
-            elif decision.selected_implementation == "pascal-fp32":
-                g, beta = self._gate_params(a, b)
-                core_out = self._pascal_recurrent(
-                    q,
-                    k,
-                    v,
-                    g.reshape(1, B, self.num_v_heads),
-                    beta.float().reshape(1, B, self.num_v_heads),
-                    pool.recurrent_states[li],
-                    fla,
-                )
-            else:
-                core_out = gdn_decode_fla(
-                    q,
-                    k,
-                    v,
-                    a,
-                    b,
-                    A_log=self.A_log,
-                    dt_bias=self.dt_bias,
-                    state_source=pool.recurrent_states[li],
-                    indices=fla.cache_indices,
-                    cu_seqlens=fla.cu_seqlens,
-                    scale=self.head_k_dim**-0.5,
-                )
+                q = qf.reshape(1, B, self.num_k_heads, self.head_k_dim).to(dtype)
+                k = kf.reshape(1, B, self.num_k_heads, self.head_k_dim).to(dtype)
+                v = vf.reshape(1, B, self.num_v_heads, self.head_v_dim).to(dtype)
+            finally:
+                if observer is not None:
+                    observer("qkv_prepare", "end")
+            g, beta = self._gate_params(a, b)
+            observe_recurrence = (
+                observer is not None and decision.selected_implementation != "pascal-fp32"
+            )
+            if observe_recurrence:
+                observer("recurrence_device", "begin")
+            try:
+                if decision.selected_implementation == "torch-reference":
+                    core_out = self._reference_recurrent(
+                        q,
+                        k,
+                        v,
+                        g.reshape(1, B, self.num_v_heads),
+                        beta.float().reshape(1, B, self.num_v_heads),
+                        pool.recurrent_states[li],
+                        fla,
+                    )
+                elif decision.selected_implementation == "pascal-fp32":
+                    core_out = self._pascal_recurrent(
+                        q,
+                        k,
+                        v,
+                        g.reshape(1, B, self.num_v_heads),
+                        beta.float().reshape(1, B, self.num_v_heads),
+                        pool.recurrent_states[li],
+                        fla,
+                    )
+                else:
+                    core_out = gdn_decode_fla(
+                        q,
+                        k,
+                        v,
+                        a,
+                        b,
+                        A_log=self.A_log,
+                        dt_bias=self.dt_bias,
+                        state_source=pool.recurrent_states[li],
+                        indices=fla.cache_indices,
+                        cu_seqlens=fla.cu_seqlens,
+                        scale=self.head_k_dim**-0.5,
+                    )
+            finally:
+                if observe_recurrence:
+                    observer("recurrence_device", "end")
         else:
-            if decision.selected_implementation in ("torch-reference", "pascal-fp32"):
-                mixed = self._reference_conv_prefill(conv_in, pool, fla)
-            else:
-                from freetoken.models.qwen3_5_moe.gdn_kernels import gdn_prefill_chunk_fla
-
-                mixed = self._conv_prefill(
-                    conv_in, pool, fla.cu_seqlens, fla.cache_indices, fla.has_initial_state
-                )
             # fla chunk handles GQA in-kernel: q/k stay at num_k_heads, v at num_v_heads.
-            qf, kf, vf = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
-            q = qf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
-            k = kf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
-            v = vf.reshape(1, total, self.num_v_heads, self.head_v_dim).to(dtype)
+            if observer is not None:
+                observer("qkv_prepare", "begin")
+            try:
+                qf, kf, vf = torch.split(
+                    mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1
+                )
+                q = qf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
+                k = kf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
+                v = vf.reshape(1, total, self.num_v_heads, self.head_v_dim).to(dtype)
+            finally:
+                if observer is not None:
+                    observer("qkv_prepare", "end")
             g, beta = self._gate_params(a, b)
             g = g.reshape(1, total, self.num_v_heads)
             beta = beta.float().reshape(1, total, self.num_v_heads)
@@ -613,56 +699,77 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             # fresh sequences (cached_len==0) must start from a zeroed slot.
             if fla.fresh_state_indices is not None:
                 pool.recurrent_states[li].index_fill_(0, fla.fresh_state_indices, 0.0)
-            if decision.selected_implementation == "torch-reference":
-                core_out = self._reference_recurrent(
-                    q,
-                    k,
-                    v,
-                    g,
-                    beta,
-                    pool.recurrent_states[li],
-                    fla,
-                )
-                self._write_reference_track_snapshot(pool, li, conv_in, fla)
-            elif decision.selected_implementation == "pascal-fp32":
-                core_out = self._pascal_recurrent(
-                    q,
-                    k,
-                    v,
-                    g,
-                    beta,
-                    pool.recurrent_states[li],
-                    fla,
-                )
-            else:
-                track = fla.track_dst is not None
-                result = gdn_prefill_chunk_fla(
-                    q,
-                    k,
-                    v,
-                    g,
-                    beta,
-                    state_source=pool.recurrent_states[li],
-                    indices=fla.cache_indices,
-                    cu_seqlens=fla.cu_seqlens,
-                    scale=self.head_k_dim**-0.5,
-                    return_h=track,
-                )
-                if track:
-                    core_out, h = result
-                    self._write_track_snapshot(pool, li, conv_in, h, fla)
+            observe_recurrence = (
+                observer is not None and decision.selected_implementation != "pascal-fp32"
+            )
+            if observe_recurrence:
+                observer("recurrence_device", "begin")
+            try:
+                if decision.selected_implementation == "torch-reference":
+                    core_out = self._reference_recurrent(
+                        q,
+                        k,
+                        v,
+                        g,
+                        beta,
+                        pool.recurrent_states[li],
+                        fla,
+                    )
+                    self._write_reference_track_snapshot(pool, li, conv_in, fla)
+                elif decision.selected_implementation == "pascal-fp32":
+                    core_out = self._pascal_recurrent(
+                        q,
+                        k,
+                        v,
+                        g,
+                        beta,
+                        pool.recurrent_states[li],
+                        fla,
+                    )
                 else:
-                    core_out = result
+                    track = fla.track_dst is not None
+                    result = gdn_prefill_chunk_fla(
+                        q,
+                        k,
+                        v,
+                        g,
+                        beta,
+                        state_source=pool.recurrent_states[li],
+                        indices=fla.cache_indices,
+                        cu_seqlens=fla.cu_seqlens,
+                        scale=self.head_k_dim**-0.5,
+                        return_h=track,
+                    )
+                    if track:
+                        core_out, h = result
+                        self._write_track_snapshot(pool, li, conv_in, h, fla)
+                    else:
+                        core_out = result
+            finally:
+                if observe_recurrence:
+                    observer("recurrence_device", "end")
 
         # Pascal recurrence is FP32 by contract; return to the projection/model dtype before
         # the existing reference norm and output projection so downstream residual arithmetic
         # keeps its established dtype and no hidden FP32 path leaks into the model.
         core_out = core_out.to(dtype).reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
-        out = self.norm.forward(
-            core_out, z, use_fla=decision.selected_implementation == "fla"
-        ).reshape(total, -1)
-        return self.out_proj.forward(out)
+        if observer is not None:
+            observer("norm", "begin")
+        try:
+            out = self.norm.forward(
+                core_out, z, use_fla=decision.selected_implementation == "fla"
+            ).reshape(total, -1)
+        finally:
+            if observer is not None:
+                observer("norm", "end")
+        if observer is not None:
+            observer("output_projection", "begin")
+        try:
+            return self.out_proj.forward(out)
+        finally:
+            if observer is not None:
+                observer("output_projection", "end")
 
 
-__all__ = ["Qwen4ExpGatedDeltaNet"]
+__all__ = ["GDN_PHASE_NAMES", "GdnPhaseObserver", "Qwen4ExpGatedDeltaNet"]

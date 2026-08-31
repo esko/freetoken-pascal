@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
+from freetoken.distributed import set_tp_info
+from freetoken.models.qwen4_exp.gdn import Qwen4ExpGatedDeltaNet
+from freetoken.utils import torch_dtype
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -33,6 +37,27 @@ def _geometry() -> dict[str, object]:
 
 
 def _minimal_report() -> dict[str, object]:
+    def timing_block() -> dict[str, object]:
+        common = {
+            phase: {"cuda_event_ms": 0.0, "host_wall_ms": 0.0}
+            for phase in (*BENCHMARK.COMMON_PHASE_NAMES, "layer_total")
+        }
+        candidate = {
+            **common,
+            **{
+                phase: {"cuda_event_ms": 0.0, "host_wall_ms": 0.0}
+                for phase in BENCHMARK.OPTIONAL_PHASE_NAMES
+            },
+        }
+        return {
+            "candidate": [{"phase_timings": candidate}],
+            "reference": [{"phase_timings": common}],
+            "phase_statistics": {
+                "candidate": {phase: {} for phase in candidate},
+                "reference": {phase: {} for phase in common},
+            },
+        }
+
     return {
         "format_name": "raw-pascal-gdn-model-boundary-observation",
         "format_version": 1,
@@ -41,10 +66,33 @@ def _minimal_report() -> dict[str, object]:
         "workload": {},
         "selected_behavior": {},
         "correctness": {},
-        "timings": {},
+        "timings": {"prefill": timing_block(), "decode": timing_block()},
         "timing_scope": "test",
         "metadata": {},
     }
+
+
+def _phase_samples() -> list[dict[str, object]]:
+    phase_timing = {
+        phase: {"cuda_event_ms": 0.5, "host_wall_ms": 0.75} for phase in BENCHMARK.PHASE_NAMES
+    }
+    return [
+        {
+            "index": 0,
+            "cuda_event_ms": 3.0,
+            "host_wall_ms": 4.0,
+            "phase_timings": phase_timing,
+        },
+        {
+            "index": 1,
+            "cuda_event_ms": 1.0,
+            "host_wall_ms": 2.0,
+            "phase_timings": {
+                phase: {"cuda_event_ms": 0.25, "host_wall_ms": 0.5}
+                for phase in BENCHMARK.PHASE_NAMES
+            },
+        },
+    ]
 
 
 def test_parser_defaults_are_bounded_and_qwen_geometry_is_fixed() -> None:
@@ -114,6 +162,78 @@ def test_summary_retains_two_clock_statistics() -> None:
         "host_wall_min_ms": 2.0,
         "host_wall_max_ms": 4.0,
     }
+
+
+def test_phase_summary_is_bounded_to_declared_phases() -> None:
+    summary = BENCHMARK._phase_summary(_phase_samples())
+
+    assert tuple(summary) == BENCHMARK.PHASE_NAMES
+    assert summary["projection"]["count"] == 2
+    assert summary["projection"]["cuda_event_median_ms"] == 0.375
+    assert summary["projection"]["host_wall_median_ms"] == 0.625
+
+
+def test_phase_recorder_rejects_unbalanced_events_without_cuda() -> None:
+    class FakeCuda:
+        def current_stream(self, _device):
+            return object()
+
+        def Event(self, **_kwargs):
+            raise AssertionError("event allocation must not happen in this failure test")
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    recorder = BENCHMARK._PhaseRecorder(
+        FakeTorch(), "cuda:0", required_phases=BENCHMARK.COMMON_PHASE_NAMES
+    )
+    recorder.reset()
+    with pytest.raises(BENCHMARK.PhaseTelemetryError, match="unknown GDN model phase"):
+        recorder("bad-phase", "begin")
+    recorder.disable()
+
+
+def test_phase_recorder_requires_begin_before_end_without_cuda() -> None:
+    class FakeCuda:
+        def current_stream(self, _device):
+            return object()
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    recorder = BENCHMARK._PhaseRecorder(
+        FakeTorch(), "cuda:0", required_phases=BENCHMARK.COMMON_PHASE_NAMES
+    )
+    recorder.reset()
+    with pytest.raises(BENCHMARK.PhaseTelemetryError, match="without begin"):
+        recorder("projection", "end")
+    recorder.disable()
+
+
+def test_model_phase_observer_accepts_callable_and_rejects_noncallable() -> None:
+    set_tp_info(rank=0, size=1)
+
+    def observer(*_events) -> None:
+        pass
+
+    kwargs = {
+        "hidden_size": BENCHMARK.MODEL_HIDDEN_SIZE,
+        "num_k_heads": BENCHMARK.MODEL_KEY_HEADS,
+        "num_v_heads": BENCHMARK.MODEL_VALUE_HEADS,
+        "head_k_dim": BENCHMARK.MODEL_HEAD_DIM,
+        "head_v_dim": BENCHMARK.MODEL_HEAD_DIM,
+        "conv_kernel_size": BENCHMARK.MODEL_CONV_KERNEL,
+        "rms_norm_eps": BENCHMARK.MODEL_RMS_EPS,
+        "layer_id": BENCHMARK.MODEL_LAYER_ID,
+        "gdn_mode": "reference",
+    }
+    with torch.device("meta"), torch_dtype(torch.bfloat16):
+        operator = Qwen4ExpGatedDeltaNet(gdn_phase_observer=observer, **kwargs)
+    assert operator._gdn_phase_observer is observer
+
+    with torch.device("meta"), torch_dtype(torch.bfloat16):
+        with pytest.raises(TypeError, match="gdn_phase_observer must be callable"):
+            Qwen4ExpGatedDeltaNet(gdn_phase_observer=object(), **kwargs)
 
 
 def test_report_format_enforces_geometry_and_json_safety() -> None:

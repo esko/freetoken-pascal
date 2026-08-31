@@ -70,6 +70,12 @@ synchronous Pascal metadata validation; device-scoped CUDA events include device
 stream idle caused by that synchronous dispatch. Paired sample order alternates. Keep the run short,
 and capture `nvidia-smi` telemetry separately:
 
+Every timed sample also contains phase-level CUDA-event and host-wall intervals plus aggregate
+`phase_statistics`. The required phases are layer total, projection, convolution, qkv preparation,
+gate, recurrence device work, norm, and output projection. Pascal samples additionally report
+metadata validation and combined adapter/launch host overhead; the latter's CUDA interval overlaps
+the recurrence interval and must not be added as separate device work.
+
 ```bash
 commit=$(git rev-parse HEAD)
 nvidia-smi --query-gpu=index,uuid,ecc.mode.current,temperature.gpu,power.draw,clocks.current.graphics,clocks.current.memory,clocks_throttle_reasons.active --format=csv
