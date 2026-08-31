@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 
 
-def _inputs(torch, *, dim: int = 64):
+def _inputs(torch, *, dim: int = 64, key_heads: int = 1, value_heads: int = 2):
     generator = torch.Generator(device="cuda").manual_seed(93)
-    tokens, key_heads, value_heads, slots = 5, 1, 2, 4
+    tokens, slots = 5, 4
     q = torch.randn(tokens, key_heads, dim, device="cuda", generator=generator)
     k = torch.randn(tokens, key_heads, dim, device="cuda", generator=generator)
     v = torch.randn(tokens, value_heads, dim, device="cuda", generator=generator)
@@ -53,12 +53,17 @@ def _reference(torch, inputs):
 
 
 @pytest.mark.sm61
-@pytest.mark.parametrize("dim", [64, 128])
-def test_pascal_gdn_matches_independent_ragged_reference(dim: int) -> None:
+@pytest.mark.parametrize(
+    ("dim", "key_heads", "value_heads"),
+    [(64, 1, 2), (128, 1, 2), (64, 2, 2)],
+)
+def test_pascal_gdn_matches_independent_ragged_reference(
+    dim: int, key_heads: int, value_heads: int
+) -> None:
     torch = pytest.importorskip("torch")
     from freetoken.kernel.gdn_pascal import pascal_gdn_recurrence
 
-    inputs = _inputs(torch, dim=dim)
+    inputs = _inputs(torch, dim=dim, key_heads=key_heads, value_heads=value_heads)
     expected_output, expected_state = _reference(torch, inputs)
     actual_state = inputs[5].clone()
     actual = pascal_gdn_recurrence(*inputs[:5], actual_state, *inputs[6:])
@@ -102,3 +107,40 @@ def test_pascal_gdn_chunk_and_tokenwise_decode_preserve_state() -> None:
 
     torch.testing.assert_close(decode_output, chunk_output, rtol=3e-5, atol=3e-5)
     torch.testing.assert_close(decode_state, chunk_state, rtol=3e-5, atol=3e-5)
+
+
+@pytest.mark.sm61
+def test_pascal_gdn_checkpoint_restore_replays_suffix() -> None:
+    torch = pytest.importorskip("torch")
+    from freetoken.kernel.gdn_pascal import pascal_gdn_recurrence
+
+    inputs = _inputs(torch)
+    q, k, v, g, beta, initial_state = inputs[:6]
+    slot = torch.tensor([3], device="cuda", dtype=torch.int32)
+    full_offsets = torch.tensor([0, 5], device="cuda", dtype=torch.int32)
+    full_state = initial_state.clone()
+    full_output = pascal_gdn_recurrence(q, k, v, g, beta, full_state, slot, full_offsets)
+
+    prefix_state = initial_state.clone()
+    prefix_offsets = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
+    prefix_output = pascal_gdn_recurrence(
+        q[:2], k[:2], v[:2], g[:2], beta[:2], prefix_state, slot, prefix_offsets
+    )
+    checkpoint = prefix_state.clone()
+    suffix_offsets = torch.tensor([0, 3], device="cuda", dtype=torch.int32)
+    suffix_output = pascal_gdn_recurrence(
+        q[2:], k[2:], v[2:], g[2:], beta[2:], prefix_state, slot, suffix_offsets
+    )
+
+    restored_state = checkpoint.clone()
+    replay_output = pascal_gdn_recurrence(
+        q[2:], k[2:], v[2:], g[2:], beta[2:], restored_state, slot, suffix_offsets
+    )
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(
+        torch.cat((prefix_output, suffix_output)), full_output, rtol=3e-5, atol=3e-5
+    )
+    torch.testing.assert_close(prefix_state, full_state, rtol=3e-5, atol=3e-5)
+    torch.testing.assert_close(replay_output, suffix_output, rtol=0, atol=0)
+    torch.testing.assert_close(restored_state, prefix_state, rtol=0, atol=0)
