@@ -256,6 +256,11 @@ def _device_metadata(torch: Any, device: Any) -> dict[str, Any]:
     major, minor = torch.cuda.get_device_capability(device)
     return {
         "index": int(device.index),
+        "uuid": f"GPU-{properties.uuid}",
+        "pci_address": (
+            f"{int(properties.pci_domain_id):04x}:{int(properties.pci_bus_id):02x}:"
+            f"{int(properties.pci_device_id):02x}.0"
+        ),
         "name": str(properties.name),
         "compute_capability": f"{int(major)}.{int(minor)}",
         "major": int(major),
@@ -447,7 +452,11 @@ def run_benchmark(
             "candidate": _summary(candidate_samples),
             "reference": _summary(reference_samples),
         },
-        "timing_scope": "CUDA-event device work; host validation and dispatch are excluded",
+        "timing_scope": (
+            "CUDA-event interval around each adapter call; includes device work and stream-idle "
+            "time caused by synchronous validation/dispatch inside the call, but excludes input "
+            "reset and allocation"
+        ),
         "metadata": {
             "commit": _git_commit(),
             "command": command,
