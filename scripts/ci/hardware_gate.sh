@@ -27,11 +27,13 @@ PY
 readarray -t software_fields < <("$host_python" -c '
 import json, sys
 data = json.loads(sys.argv[1])
+if not isinstance(data, dict):
+    raise SystemExit("software probe did not return an object")
 print(data["cuda_runtime"])
 print(data["torch"])
 print(data["device_count"])
 print(data["triton"])
-' "$software_probe")
+' "$(printf '%s\n' "$software_probe" | tail -n 1)")
 
 # PCI/NUMA/NVMe capture runs on the host; CUDA runtime identity is measured in
 # the exact container used by the bounded device tests.
