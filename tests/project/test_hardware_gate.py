@@ -108,6 +108,34 @@ def test_measured_inventory_contract_is_schema_valid() -> None:
     Draft202012Validator(schema).validate(inventory(["6.1", "6.1"]))
 
 
+def test_measured_schema_requires_capture_and_valid_timestamp() -> None:
+    schema = json.loads(
+        (ROOT / "schemas" / "hardware-inventory.schema.json").read_text(encoding="utf-8")
+    )
+    measured = inventory(["6.1"])
+    del measured["capture"]
+    measured["captured_at"] = "not-a-date"
+
+    errors = list(
+        Draft202012Validator(schema, format_checker=CHECK_HARDWARE.FORMAT_CHECKER).iter_errors(
+            measured
+        )
+    )
+
+    assert any(error.validator == "required" and "capture" in error.message for error in errors)
+    assert any(
+        error.validator == "format" and list(error.path) == ["captured_at"] for error in errors
+    )
+
+
+def test_ecc_off_inventory_accepts_full_physical_memory() -> None:
+    measured = inventory(["6.1"])
+    measured["gpus"][0]["ecc_mode"] = "disabled"
+    measured["gpus"][0]["memory_mib"] = 8192
+
+    assert CHECK_HARDWARE.validate_pascal_inventory(measured) == []
+
+
 def test_non_pascal_inventory_fails_instead_of_skipping() -> None:
     errors = CHECK_HARDWARE.validate_pascal_inventory(inventory(["8.0"]))
 

@@ -11,7 +11,7 @@ def _assert_expected_p4(properties: object) -> None:
     # nvidia-smi reports the nominal 7,680 MiB. Torch exposes about 7,599 MiB
     # while ECC is enabled because the reservation is not allocatable.
     usable_mib = properties.total_memory // (1024 * 1024)
-    assert 7580 <= usable_mib <= 7680
+    assert 7580 <= usable_mib <= 8192
 
 
 @pytest.mark.sm61

@@ -4,12 +4,22 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 
 ROOT = Path(__file__).resolve().parents[1]
+FORMAT_CHECKER = FormatChecker()
+
+
+@FORMAT_CHECKER.checks("date-time", raises=ValueError)
+def _is_rfc3339_datetime(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.tzinfo is not None
 
 
 def validate_pascal_inventory(data: Any, *, minimum_gpus: int = 1) -> list[str]:
@@ -36,8 +46,13 @@ def validate_pascal_inventory(data: Any, *, minimum_gpus: int = 1) -> list[str]:
                 f"gpus[{index}] must have compute capability 6.1, "
                 f"found {gpu.get('compute_capability')!r}"
             )
-        if gpu.get("memory_mib") != 7680:
-            errors.append(f"gpus[{index}] must expose 7680 MiB, found {gpu.get('memory_mib')!r}")
+        ecc_mode = gpu.get("ecc_mode")
+        memory_mib = gpu.get("memory_mib")
+        valid_memory = memory_mib == 7680 if ecc_mode == "enabled" else memory_mib in (7680, 8192)
+        if ecc_mode not in ("enabled", "disabled") or not valid_memory:
+            errors.append(
+                f"gpus[{index}] has invalid ECC/memory profile {ecc_mode!r}/{memory_mib!r} MiB"
+            )
         uuid = gpu.get("uuid")
         if not isinstance(uuid, str) or re.fullmatch(r"GPU-[0-9a-fA-F-]{36}", uuid) is None:
             errors.append(f"gpus[{index}].uuid must be a GPU UUID")
@@ -132,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: unable to read hardware inventory: {error}", file=sys.stderr)
         return 1
     schema = json.loads((ROOT / "schemas" / "hardware-inventory.schema.json").read_text())
-    validator = Draft202012Validator(schema)
+    validator = Draft202012Validator(schema, format_checker=FORMAT_CHECKER)
     schema_errors = sorted(validator.iter_errors(data), key=lambda error: list(error.path))
     errors = [
         f"schema {'.'.join(str(part) for part in error.path) or '$'}: {error.message}"

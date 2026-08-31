@@ -111,6 +111,27 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"evidence_status": {"const": "measured"}},
+        "required": ["evidence_status"]
+      },
+      "then": {
+        "required": ["storage", "thermal_qualification", "capture"],
+        "properties": {
+          "gpus": {
+            "items": {
+              "required": ["ecc_mode", "topology", "pci_link"]
+            }
+          },
+          "software": {
+            "required": ["cuda_runtime", "nvidia_container_toolkit", "torch_cuda_device_count"]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "topology": {
       "type": "object",
