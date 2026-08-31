@@ -48,7 +48,7 @@ minimum_gpus=1
 case "$level" in
   dual-p4|release) minimum_gpus=2 ;;
 esac
-docker run --rm \
+docker run --rm --gpus all \
   -v "$repo_root:$container_root" \
   -w "$container_root" \
   "$image" \
