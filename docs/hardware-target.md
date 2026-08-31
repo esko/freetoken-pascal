@@ -16,6 +16,8 @@
 
 Both P4 cards and the PCIe NVMe device are installed on Gorilla.
 Passive inventory and bounded one-allocation CUDA arithmetic have passed on both cards through Torch 2.11.0 with CUDA 12.6.
+ECC is currently enabled, yielding about 7,599 MiB of Torch-visible memory per card from the nominal 7,680 MiB.
+The intended performance profile may disable ECC, but usable memory and correctness must be recaptured after the required reset rather than combined with the ECC-on evidence.
 The cards are intentionally throttled while airflow optimization is incomplete, so sustained-load, thermal, link-under-load, performance, H2 completion and H3 completion remain unqualified.
 The self-hosted runner is not yet configured.
 
@@ -65,6 +67,7 @@ Current status:
 6. [ ] Register the self-hosted GitHub runner with labels:
    `self-hosted`, `linux`, `x64`, `cuda`, `sm61`.
 7. [x] Run bounded identity/allocation/arithmetic on each card independently.
+   A seconds-long FP32 characterization also exercised both links at Gen3 ×16 without exceeding 36 °C, but is explicitly non-qualifying while clocks and airflow are provisional.
 8. [ ] Correct airflow and qualify one card under bounded sustained load before dual-card load.
 9. [ ] Attach the complete inventory and thermal artifacts to the hardware qualification issue.
 

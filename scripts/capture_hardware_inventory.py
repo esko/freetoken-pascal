@@ -142,6 +142,14 @@ def _nvme_inventory() -> list[dict[str, Any]]:
     return devices
 
 
+def _cpu_model() -> str:
+    document = json.loads(_run("lscpu", "-J"))
+    for item in document.get("lscpu", []):
+        if item.get("field") == "Model name:":
+            return str(item["data"])
+    raise RuntimeError("lscpu did not report a CPU model")
+
+
 def capture(
     *,
     cuda_runtime: str,
@@ -160,7 +168,7 @@ def capture(
         "host": {
             "hostname": socket.gethostname(),
             "os": platform.platform(),
-            "cpu": platform.processor() or _run("lscpu", "-J"),
+            "cpu": platform.processor() or _cpu_model(),
             "numa_nodes": len(list(Path("/sys/devices/system/node").glob("node[0-9]*"))),
             "memory_bytes": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"),
         },
@@ -184,7 +192,7 @@ def capture(
             "reason": "airflow optimization incomplete; sustained load was not run",
         },
         "capture": {
-            "deterministic": True,
+            "deterministic": False,
             "commands": ["nvidia-smi", "sysfs", "lsblk", "dpkg-query"],
         },
     }

@@ -36,6 +36,10 @@ gpu:
       pcie_max: {generation: 3, width: 16}
       pcie_idle_observed: {generation: 1, width: 16}
   installed: true
+  ecc:
+    current: enabled
+    intended_performance_profile: disabled
+    note: ECC-off usable VRAM requires a separate post-reset measurement
   thermal_qualification: unqualified
   sustained_load: not-run
   qualification_note: GPUs are intentionally throttled pending airflow optimization
@@ -58,4 +62,11 @@ validation:
   actual_topology_required: true
   self_hosted_runner_configured: false
   bounded_cuda_arithmetic: passed-both-devices
+  short_characterization:
+    status: passed-non-qualifying
+    max_temperature_c: 36
+    max_graphics_clock_mhz: 885
+    max_memory_clock_mhz: 2999
+    pcie_active_observed: {generation: 3, width: 16}
+    note: thermally constrained seconds-long probe; not release performance evidence
   thermal_load_gate: pending
