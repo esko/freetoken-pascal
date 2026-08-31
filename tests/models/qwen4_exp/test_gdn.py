@@ -122,6 +122,7 @@ def _ref_out(ref, hidden: torch.Tensor, use_chunk_rule: bool = False) -> torch.T
 def test_prefill_matches_reference(ratio, length):
     op, ref = _make_layer(ratio, seed=ratio)
     hidden, _, out = _prefill(op, _ctx(ratio), [length], seed=11)
+    assert out.dtype == hidden[0].dtype
     torch.testing.assert_close(out.float(), _ref_out(ref, hidden[0]), rtol=RTOL, atol=ATOL)
 
 

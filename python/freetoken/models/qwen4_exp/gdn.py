@@ -295,6 +295,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         launch overhead.  It is the correctness/fallback path; the FLA path remains unchanged
         for a qualified modern GPU.
         """
+        output_dtype = v.dtype
         q = q.float()
         k = k.float()
         v = v.float()
@@ -344,7 +345,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             )
             states = torch.stack([state for _destination, state in tracked]).to(state_dtype)
             state_source.index_copy_(0, destinations, states)
-        return output.to(v.dtype)
+        return output.to(output_dtype)
 
     def _write_reference_track_snapshot(self, pool, li: int, conv_in, fla) -> None:
         """Copy raw convolution context for the reference path's tracked boundary."""
