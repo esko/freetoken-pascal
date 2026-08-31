@@ -65,6 +65,19 @@ run_single_smoke() {
     bash -lc 'PYTHONPATH=python pytest -q tests/project/test_hardware_smoke.py -m "sm61 and not dual_p4"'
 }
 
+run_single_h2() {
+  docker run --rm --gpus "device=$smoke_gpu" \
+    -e FREETOKEN_SM61_RUNNER_VERIFIED=1 \
+    -e FREETOKEN_DISABLE_KERNEL_CACHE=1 \
+    -v "$repo_root:$container_root" \
+    -w "$container_root" \
+    "$image" \
+    bash -lc 'PYTHONPATH=python pytest -q \
+      tests/project/test_hardware_smoke.py \
+      tests/project/test_gdn_pascal_hardware.py \
+      -m "sm61 and not dual_p4"'
+}
+
 run_dual_smoke() {
   docker run --rm --gpus all \
     -e FREETOKEN_SM61_RUNNER_VERIFIED=1 \
@@ -76,11 +89,14 @@ run_dual_smoke() {
 }
 
 case "$level" in
-  smoke|single-p4)
+  smoke)
     run_single_smoke
     ;;
+  single-p4)
+    run_single_h2
+    ;;
   dual-p4)
-    run_single_smoke
+    run_single_h2
     run_dual_smoke
     ;;
   release)
