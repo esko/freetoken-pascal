@@ -305,6 +305,21 @@ def _make_weights(torch: Any, device: Any, seed: int) -> dict[str, Any]:
     }
 
 
+def _ensure_tp1() -> None:
+    """Initialize the standalone process exactly as a TP1 Engine would."""
+
+    from freetoken.distributed import set_tp_info, try_get_tp_info
+
+    current = try_get_tp_info()
+    if current is None:
+        set_tp_info(rank=0, size=1)
+    elif (current.rank, current.size) != (0, 1):
+        raise RuntimeError(
+            "Pascal GDN model benchmark requires TP1 rank 0, "
+            f"got rank={current.rank}, size={current.size}"
+        )
+
+
 def _make_operator(torch: Any, mode: str, weights: dict[str, Any]) -> Any:
     """Build a model op with explicit dispatch and no factory/auto selection."""
 
@@ -625,6 +640,7 @@ def run_benchmark(
 
     import freetoken.core as core
 
+    _ensure_tp1()
     weights = _make_weights(torch, device, config.seed)
     pascal = _make_operator(torch, "pascal-fp32", weights)
     reference = _make_operator(torch, "reference", weights)
