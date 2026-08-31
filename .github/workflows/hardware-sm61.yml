@@ -38,6 +38,10 @@ jobs:
           nvidia-smi topo -m > results/hardware/nvidia-topology.txt
           lscpu > results/hardware/lscpu.txt
           numactl -H > results/hardware/numa.txt
+          lspci -Dnn > results/hardware/lspci-Dnn.txt
+          lspci -tv > results/hardware/lspci-tree.txt
+          lsblk -e7 -o NAME,PATH,TYPE,SIZE,MODEL,TRAN,ROTA,MOUNTPOINTS \
+            > results/hardware/block-devices.txt
       - name: Run hardware gate
         run: bash scripts/ci/hardware_gate.sh
       - name: Upload evidence

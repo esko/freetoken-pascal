@@ -1,5 +1,5 @@
 schema_version: 1
-status: gpu-pending
+status: installed-thermal-unqualified
 host:
   model: Fujitsu PRIMERGY RX2530 M1
   os: Ubuntu Server 26.04 LTS
@@ -20,10 +20,53 @@ gpu:
   compute_capability: "6.1"
   memory_gib_each: 8
   nvlink: false
-  installed: false
+  devices:
+    - index: 0
+      uuid: GPU-7af15080-238c-fd1d-66da-4f8984053664
+      pci_bus_id: "0000:02:00.0"
+      pci_root: "pci0000:00"
+      numa_node: 0
+      pcie_max: {generation: 3, width: 16}
+      pcie_idle_observed: {generation: 1, width: 16}
+    - index: 1
+      uuid: GPU-70e2a7db-7560-b18a-7a20-4295300c6a53
+      pci_bus_id: "0000:81:00.0"
+      pci_root: "pci0000:80"
+      numa_node: 1
+      pcie_max: {generation: 3, width: 16}
+      pcie_idle_observed: {generation: 1, width: 16}
+  installed: true
+  ecc:
+    current: enabled
+    intended_performance_profile: disabled
+    note: ECC-off usable VRAM requires a separate post-reset measurement
+  thermal_qualification: unqualified
+  sustained_load: not-run
+  qualification_note: GPUs are intentionally throttled pending airflow optimization
+  driver: "580.173.02"
+storage_observed:
+  nvme:
+    model: Lenovo PS8 Portable SSD
+    controller: Phison PS5013-E13
+    pci_bus_id: "0000:03:00.0"
+    pci_root: "pci0000:00"
+    numa_node: 0
+    pcie_current: {generation: 3, width: 4}
+    mount: /srv/nvme
 toolchain:
   cuda: "12.6"
   python: "3.12"
+  torch: "2.11.0+cu126"
+  nvidia_container_toolkit: "1.20.0-1"
 validation:
   actual_topology_required: true
   self_hosted_runner_configured: false
+  bounded_cuda_arithmetic: passed-both-devices
+  short_characterization:
+    status: passed-non-qualifying
+    max_temperature_c: 36
+    max_graphics_clock_mhz: 885
+    max_memory_clock_mhz: 2999
+    pcie_active_observed: {generation: 3, width: 16}
+    note: thermally constrained seconds-long probe; not release performance evidence
+  thermal_load_gate: pending

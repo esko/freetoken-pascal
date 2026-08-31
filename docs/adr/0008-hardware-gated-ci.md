@@ -5,7 +5,7 @@
 
 ## Context
 
-GitHub-hosted runners do not provide Tesla P4 hardware. The cards are not yet available, but development must proceed without pretending emulation proves runtime correctness.
+GitHub-hosted runners do not provide Tesla P4 hardware. At decision time the cards were not yet available, so development had to proceed without pretending emulation proved runtime correctness. The cards are now installed on Gorilla; local hardware evidence remains distinct from unavailable hosted-runner evidence.
 
 ## Decision
 
