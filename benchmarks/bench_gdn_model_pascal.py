@@ -10,6 +10,13 @@ outputs and recurrent/conv state before recording CUDA-event and host wall timin
 This is observational, thermally constrained H2 evidence.  It does not enable factory
 or ``auto`` dispatch, change model defaults, or qualify a release backend.
 
+Each timed sample also records ``phase_timings`` and aggregate ``phase_statistics`` for
+the layer total, projections, width-4 convolution, qkv preparation, gate, recurrence,
+norm, and output projection.  Pascal samples additionally expose synchronous metadata
+validation and adapter/launch host overhead.  The adapter host interval is intentionally
+reported as combined overhead; its CUDA interval overlaps ``recurrence_device`` and is
+not an independent device-work bucket.
+
 Example (run inside the CUDA 12.6 image)::
 
     FREETOKEN_BENCHMARK_COMMIT=$(git rev-parse HEAD) \\
@@ -22,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import statistics
@@ -55,6 +63,18 @@ MODEL_RTOL = 2e-2
 MODEL_ATOL = 2e-2
 STATE_RTOL = 3e-5
 STATE_ATOL = 3e-5
+COMMON_PHASE_NAMES = (
+    "projection",
+    "convolution",
+    "qkv_prepare",
+    "gate",
+    "recurrence_device",
+    "norm",
+    "output_projection",
+)
+OPTIONAL_PHASE_NAMES = ("metadata_validation", "adapter_host_overhead")
+PHASE_NAMES = ("layer_total", *COMMON_PHASE_NAMES, *OPTIONAL_PHASE_NAMES)
+PHASE_EVENTS = ("begin", "end")
 
 
 class BenchmarkConfigError(ValueError):
@@ -222,6 +242,103 @@ def _summary(samples: list[dict[str, float]]) -> dict[str, float | int]:
     }
 
 
+class PhaseTelemetryError(RuntimeError):
+    """Raised when the model phase observer reports an invalid or unbalanced interval."""
+
+
+class _PhaseRecorder:
+    """Record CUDA and host intervals emitted by one explicit model-boundary invocation."""
+
+    def __init__(self, torch: Any, device: Any, *, required_phases: tuple[str, ...]) -> None:
+        self._torch = torch
+        self._stream = torch.cuda.current_stream(device)
+        self._required_phases = required_phases
+        self._active = False
+        self._pending: dict[str, tuple[Any, float]] = {}
+        self._completed: dict[str, list[tuple[Any, Any, float, float]]] = {}
+
+    def reset(self) -> None:
+        self._active = True
+        self._pending.clear()
+        self._completed.clear()
+
+    def disable(self) -> None:
+        self._active = False
+        self._pending.clear()
+        self._completed.clear()
+
+    def __call__(self, phase: str, event: str) -> None:
+        if not self._active:
+            return
+        if phase not in PHASE_NAMES:
+            raise PhaseTelemetryError(f"unknown GDN model phase: {phase!r}")
+        if event not in PHASE_EVENTS:
+            raise PhaseTelemetryError(f"unknown GDN phase event: {event!r}")
+        if event == "begin":
+            if phase in self._pending:
+                raise PhaseTelemetryError(f"duplicate begin event for GDN phase {phase!r}")
+            start = self._torch.cuda.Event(enable_timing=True)
+            start.record(self._stream)
+            self._pending[phase] = (start, time.perf_counter())
+            return
+        pending = self._pending.pop(phase, None)
+        if pending is None:
+            raise PhaseTelemetryError(f"end event without begin for GDN phase {phase!r}")
+        start, host_start = pending
+        end = self._torch.cuda.Event(enable_timing=True)
+        end.record(self._stream)
+        self._completed.setdefault(phase, []).append((start, end, host_start, time.perf_counter()))
+
+    def collect(self) -> dict[str, dict[str, float]]:
+        if not self._active:
+            raise PhaseTelemetryError("phase recorder is not active")
+        if self._pending:
+            raise PhaseTelemetryError(f"unclosed GDN phases: {sorted(self._pending)}")
+        missing = [phase for phase in self._required_phases if phase not in self._completed]
+        if missing:
+            raise PhaseTelemetryError(f"missing GDN phases: {missing}")
+        result = {}
+        for phase in self._completed:
+            intervals = self._completed[phase]
+            result[phase] = {
+                "cuda_event_ms": float(
+                    sum(start.elapsed_time(end) for start, end, _begin, _finish in intervals)
+                ),
+                "host_wall_ms": float(
+                    sum((finish - begin) * 1000.0 for _start, _end, begin, finish in intervals)
+                ),
+            }
+        self.disable()
+        return result
+
+
+def _phase_summary(samples: list[dict[str, Any]]) -> dict[str, dict[str, float | int]]:
+    """Summarize each raw phase interval without discarding per-sample observations."""
+
+    phases = {phase for sample in samples for phase in sample["phase_timings"]}
+
+    def values(phase: str, clock: str):
+        return [
+            float(sample["phase_timings"][phase][clock])
+            for sample in samples
+            if phase in sample["phase_timings"]
+        ]
+
+    return {
+        phase: {
+            "count": len(values(phase, "cuda_event_ms")),
+            "cuda_event_median_ms": float(statistics.median(values(phase, "cuda_event_ms"))),
+            "cuda_event_min_ms": float(min(values(phase, "cuda_event_ms"))),
+            "cuda_event_max_ms": float(max(values(phase, "cuda_event_ms"))),
+            "host_wall_median_ms": float(statistics.median(values(phase, "host_wall_ms"))),
+            "host_wall_min_ms": float(min(values(phase, "host_wall_ms"))),
+            "host_wall_max_ms": float(max(values(phase, "host_wall_ms"))),
+        }
+        for phase in PHASE_NAMES
+        if phase in phases
+    }
+
+
 def validate_report_format(report: dict[str, Any]) -> None:
     """Validate the stable, JSON-safe shape emitted by this observational benchmark."""
 
@@ -259,6 +376,50 @@ def validate_report_format(report: dict[str, Any]) -> None:
     }
     if geometry != expected:
         raise ValueError(f"unexpected model-boundary geometry: {geometry!r}")
+    timings = report["timings"]
+    if not isinstance(timings, dict):
+        raise ValueError("timings must be a mapping")
+    for case in ("prefill", "decode"):
+        block = timings.get(case)
+        if not isinstance(block, dict):
+            raise ValueError(f"timings missing {case} case")
+        statistics_by_side = block.get("phase_statistics")
+        if not isinstance(statistics_by_side, dict):
+            raise ValueError(f"timings {case} missing phase_statistics")
+        for side in ("candidate", "reference"):
+            samples = block.get(side)
+            if not isinstance(samples, list) or not samples:
+                raise ValueError(f"timings {case} missing {side} samples")
+            required_phases = {"layer_total", *COMMON_PHASE_NAMES}
+            if side == "candidate":
+                required_phases.update(OPTIONAL_PHASE_NAMES)
+            for sample in samples:
+                if not isinstance(sample, dict):
+                    raise ValueError(f"timings {case} {side} sample must be a mapping")
+                phase_timings = sample.get("phase_timings")
+                if not isinstance(phase_timings, dict):
+                    raise ValueError(f"timings {case} {side} sample missing phase_timings")
+                missing_phases = required_phases.difference(phase_timings)
+                if missing_phases:
+                    raise ValueError(
+                        f"timings {case} {side} missing phases: {sorted(missing_phases)}"
+                    )
+                for phase in required_phases:
+                    timing = phase_timings[phase]
+                    if not isinstance(timing, dict):
+                        raise ValueError(f"timing for phase {phase!r} must be a mapping")
+                    for clock in ("cuda_event_ms", "host_wall_ms"):
+                        value = float(timing.get(clock, float("nan")))
+                        if not math.isfinite(value) or value < 0:
+                            raise ValueError(f"invalid {clock} for phase {phase!r}")
+            side_statistics = statistics_by_side.get(side)
+            if not isinstance(side_statistics, dict):
+                raise ValueError(f"timings {case} missing {side} phase statistics")
+            missing_statistics = required_phases.difference(side_statistics)
+            if missing_statistics:
+                raise ValueError(
+                    f"timings {case} {side} missing phase statistics: {sorted(missing_statistics)}"
+                )
     json.dumps(report, allow_nan=False)
 
 
@@ -322,7 +483,13 @@ def _ensure_tp1() -> None:
         )
 
 
-def _make_operator(torch: Any, mode: str, weights: dict[str, Any]) -> Any:
+def _make_operator(
+    torch: Any,
+    mode: str,
+    weights: dict[str, Any],
+    *,
+    phase_observer: Callable[[str, str], None] | None = None,
+) -> Any:
     """Build a model op with explicit dispatch and no factory/auto selection."""
 
     from freetoken.models.qwen4_exp.gdn import Qwen4ExpGatedDeltaNet
@@ -343,6 +510,7 @@ def _make_operator(torch: Any, mode: str, weights: dict[str, Any]) -> Any:
             gdn_fla_available=False,
             gdn_candidate_available=False,
             gdn_pascal_available=mode == "pascal-fp32",
+            gdn_phase_observer=phase_observer,
         )
     operator.load_state_dict({name: value.clone() for name, value in weights.items()})
     return operator
@@ -575,41 +743,98 @@ def _time_case(
     hidden: Any,
     pascal_state: tuple[Any, Any],
     reference_state: tuple[Any, Any],
+    pascal_phase_recorder: _PhaseRecorder,
+    reference_phase_recorder: _PhaseRecorder,
     core: Any,
 ) -> dict[str, Any]:
     def invoke(
-        context: Any, operator: Any, batch: Any, state: tuple[Any, Any]
-    ) -> tuple[float, float]:
+        context: Any,
+        operator: Any,
+        batch: Any,
+        state: tuple[Any, Any],
+        phase_recorder: _PhaseRecorder,
+        *,
+        record_phases: bool,
+    ) -> tuple[float, float, dict[str, dict[str, float]] | None]:
         _reset_state(context, *state)
-        return _timed_call(
-            torch,
-            device,
-            lambda: _invoke(torch, core, context, operator, batch, hidden),
-        )
+        if record_phases:
+            phase_recorder.reset()
+        try:
+            cuda_ms, wall_ms = _timed_call(
+                torch,
+                device,
+                lambda: _invoke(torch, core, context, operator, batch, hidden),
+            )
+            phase_ms = phase_recorder.collect() if record_phases else None
+            if phase_ms is not None:
+                phase_ms["layer_total"] = {
+                    "cuda_event_ms": cuda_ms,
+                    "host_wall_ms": wall_ms,
+                }
+        finally:
+            if record_phases:
+                phase_recorder.disable()
+        return cuda_ms, wall_ms, phase_ms
 
     for _ in range(config.warmups):
-        invoke(pascal_context, pascal, pascal_batch, pascal_state)
-        invoke(reference_context, reference, reference_batch, reference_state)
+        invoke(
+            pascal_context,
+            pascal,
+            pascal_batch,
+            pascal_state,
+            pascal_phase_recorder,
+            record_phases=False,
+        )
+        invoke(
+            reference_context,
+            reference,
+            reference_batch,
+            reference_state,
+            reference_phase_recorder,
+            record_phases=False,
+        )
 
-    candidate_samples: list[dict[str, float]] = []
-    reference_samples: list[dict[str, float]] = []
+    candidate_samples: list[dict[str, Any]] = []
+    reference_samples: list[dict[str, Any]] = []
     pair_order: list[str] = []
     for sample_index in range(config.repeats):
         order = "candidate-reference" if sample_index % 2 == 0 else "reference-candidate"
         pair_order.append(order)
 
         def record_candidate(index: int = sample_index) -> None:
-            cuda_ms, wall_ms = invoke(pascal_context, pascal, pascal_batch, pascal_state)
+            cuda_ms, wall_ms, phase_ms = invoke(
+                pascal_context,
+                pascal,
+                pascal_batch,
+                pascal_state,
+                pascal_phase_recorder,
+                record_phases=True,
+            )
             candidate_samples.append(
-                {"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
+                {
+                    "index": index,
+                    "cuda_event_ms": cuda_ms,
+                    "host_wall_ms": wall_ms,
+                    "phase_timings": phase_ms,
+                }
             )
 
         def record_reference(index: int = sample_index) -> None:
-            cuda_ms, wall_ms = invoke(
-                reference_context, reference, reference_batch, reference_state
+            cuda_ms, wall_ms, phase_ms = invoke(
+                reference_context,
+                reference,
+                reference_batch,
+                reference_state,
+                reference_phase_recorder,
+                record_phases=True,
             )
             reference_samples.append(
-                {"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
+                {
+                    "index": index,
+                    "cuda_event_ms": cuda_ms,
+                    "host_wall_ms": wall_ms,
+                    "phase_timings": phase_ms,
+                }
             )
 
         if sample_index % 2 == 0:
@@ -626,6 +851,10 @@ def _time_case(
         "statistics": {
             "candidate": _summary(candidate_samples),
             "reference": _summary(reference_samples),
+        },
+        "phase_statistics": {
+            "candidate": _phase_summary(candidate_samples),
+            "reference": _phase_summary(reference_samples),
         },
     }
 
@@ -662,9 +891,13 @@ def run_benchmark(
     import freetoken.core as core
 
     _ensure_tp1()
+    pascal_phase_recorder = _PhaseRecorder(
+        torch, device, required_phases=(*COMMON_PHASE_NAMES, *OPTIONAL_PHASE_NAMES)
+    )
+    reference_phase_recorder = _PhaseRecorder(torch, device, required_phases=COMMON_PHASE_NAMES)
     weights = _make_weights(torch, device, config.seed)
-    pascal = _make_operator(torch, "pascal-fp32", weights)
-    reference = _make_operator(torch, "reference", weights)
+    pascal = _make_operator(torch, "pascal-fp32", weights, phase_observer=pascal_phase_recorder)
+    reference = _make_operator(torch, "reference", weights, phase_observer=reference_phase_recorder)
     pascal_context = _make_context(torch, device)
     reference_context = _make_context(torch, device)
 
@@ -750,6 +983,8 @@ def run_benchmark(
         hidden=prefill_hidden,
         pascal_state=(initial_conv, initial_recurrent),
         reference_state=(initial_conv, initial_recurrent),
+        pascal_phase_recorder=pascal_phase_recorder,
+        reference_phase_recorder=reference_phase_recorder,
         core=core,
     )
     decode_timing = _time_case(
@@ -766,6 +1001,8 @@ def run_benchmark(
         hidden=decode_hidden,
         pascal_state=pascal_post_prefill,
         reference_state=reference_post_prefill,
+        pascal_phase_recorder=pascal_phase_recorder,
+        reference_phase_recorder=reference_phase_recorder,
         core=core,
     )
 
@@ -811,8 +1048,9 @@ def run_benchmark(
             "Single-layer model boundary. The device-scoped CUDA-event interval includes GPU "
             "work plus stream-idle time caused by synchronous validation/dispatch; host wall "
             "time also includes Python dispatch. Both exclude input/state reset and batch "
-            "construction and include projection, reference convolution, gate, recurrence, "
-            "norm, and output projection."
+            "construction and include projection, width-4 causal convolution, gate, recurrence, "
+            "norm, and output projection. Per-phase CUDA events are emitted by the optional "
+            "model observer; whole-call timings include the small event-recording overhead."
         ),
         "metadata": {
             "commit": _git_commit(),
