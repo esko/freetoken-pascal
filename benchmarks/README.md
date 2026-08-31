@@ -60,5 +60,28 @@ docker run --rm --gpus device=0 \
       --tokens 1 --warmups 2 --repeats 5 --output results/hardware/gdn-pascal-t1.json'
 ```
 
+**`bench_gdn_model_pascal.py`** — bounded single-layer model-boundary H2 A/B timing for the same
+explicit Pascal and Torch-reference implementations. It covers the real Qwen4ExpGatedDeltaNet BF16
+projection, causal convolution, gate, recurrence, gated norm, and output projection for both
+prefill and one-token decode, with nonzero carried state and correctness checked first. The
+fixed Qwen3.8 geometry is `hidden=2560/D=128/HK=16/HV=48`; it is explicit-only, thermally constrained,
+and not a complete-model or release benchmark. The host wall clock includes Python dispatch and
+synchronous Pascal metadata validation; device-scoped CUDA events include device work plus any
+stream idle caused by that synchronous dispatch. Paired sample order alternates. Keep the run short,
+and capture `nvidia-smi` telemetry separately:
+
+```bash
+commit=$(git rev-parse HEAD)
+nvidia-smi --query-gpu=index,uuid,ecc.mode.current,temperature.gpu,power.draw,clocks.current.graphics,clocks.current.memory,clocks_throttle_reasons.active --format=csv
+docker run --rm --gpus device=0 \
+    -e FREETOKEN_BENCHMARK_COMMIT="$commit" \
+    -e FREETOKEN_DISABLE_KERNEL_CACHE=1 \
+    -v "$PWD:/workspace/freetoken-pascal" \
+    -w /workspace/freetoken-pascal freetoken-pascal:cuda126 \
+    bash -lc 'PYTHONPATH=python python benchmarks/bench_gdn_model_pascal.py \
+      --prefill-tokens 8 --warmups 2 --repeats 5 \
+      --output results/hardware/gdn-model-pascal-t8.json'
+```
+
 For host RAM vs PCIe bandwidth and the offload/hybrid backend pick, use `ft bench bw`
 instead — it writes the JSON profile the engine reads.
