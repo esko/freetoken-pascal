@@ -44,8 +44,8 @@ placeholder checksum and hardware field with captured values.
 
 ## Hardware gates and retention
 
-The ordinary hosted workflow is H0/H1 only. H2 and H3 are deferred because the Tesla P4 cards and
-self-hosted runner are not installed. The manual hardware workflow first records inventory and calls
+The ordinary hosted workflow is H0/H1 only. Both Tesla P4 cards are installed on Gorilla, while
+cooling qualification and any self-hosted runner remain pending. The local hardware gate first records inventory and calls
 `scripts/check_hardware_inventory.py`; zero GPUs, a non-6.1 device, or fewer than two devices for a
 dual-P4 level is a hard failure before pytest starts. Verified environment flags then unlock the
 `sm61` and `dual_p4` markers. Otherwise pytest reports an explicit deferred skip reason.

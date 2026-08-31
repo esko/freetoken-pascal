@@ -42,4 +42,5 @@ scripts/ci/verify_cuda126.sh
 H1 compiles every shipping CUDA translation unit for `sm_61`, inspects the resulting device code,
 and runs the attention tile selectors without accessing a GPU. H1 does not establish runtime
 correctness. Activation, sampling, MoE, attention, and pinned-memory parity must still run on a real
-Tesla P4 under H2; that gate remains blocked until Issue #9 provisions the cards and runner.
+Tesla P4 under H2. Issue #9 has established bounded per-card allocation and arithmetic on the
+installed cards; sustained thermal qualification and runner provisioning remain open.
