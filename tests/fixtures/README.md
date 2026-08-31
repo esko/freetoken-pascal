@@ -10,6 +10,8 @@ prompts and deterministic long-context templates.
 - `gguf/` is generated deterministically by `scripts/generate_test_fixtures.py`. The valid file
   contains only 282 bytes of artificial tensor payload; malformed variants exercise metadata,
   quant identifier, block stride, and offset failures.
+- `gguf/qwen4-tiny-experts.gguf` is a deterministic two-layer, four-expert, block-valid Q4_K
+  fixture used by the H0 real model-attachment parity harness.
 - `routing/` contains a locality-positive trace and a cyclic adversarial trace for host cache
   simulation.
 - `qwen38-reference-corpus.json` pins the tokenizer revision and deterministic prompt cases used

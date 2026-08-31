@@ -13,6 +13,12 @@
       "size": 215712
     },
     {
+      "expectation": "valid block-valid Qwen4 tiny expert layout",
+      "name": "qwen4-tiny-experts.gguf",
+      "sha256": "1cb4157e072bdfd7ceee1615b116baadeacb68d015e96781ddaa1b468f2a5c4f",
+      "size": 888512
+    },
+    {
       "expectation": "unsupported quant type",
       "name": "unsupported-known-quant.gguf",
       "sha256": "2e95a99adc5fb52a600188b98eb65980cef3c32c48520e75eb2ae3d7e8c58b1e",
