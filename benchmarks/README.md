@@ -38,5 +38,27 @@ PYTHONPATH=python python benchmarks/bench_ple_io.py \
     --output results/ple-io.json
 ```
 
+**`bench_gdn_pascal.py`** — bounded, kernel-only H2 timing for the explicit Pascal FP32
+GDN recurrence against the independent Torch reference. The defaults use the Qwen3.8
+`D=128/HK=16/HV=48` geometry and hard-limit the warmup and sample counts. It does not
+measure full-model GDN or end-to-end decode, and its raw observational JSON is not release
+evidence accepted by `scripts/validate_evidence.py`. Capture `nvidia-smi` temperature,
+power, clocks, throttle reasons, ECC mode, and the repository hardware inventory beside it.
+
+The CUDA image intentionally has no Git executable. Obtain the commit from the exact host
+checkout mounted into the container and inject it explicitly:
+
+```bash
+commit=$(git rev-parse HEAD)
+nvidia-smi --query-gpu=index,uuid,ecc.mode.current,temperature.gpu,power.draw,clocks.current.graphics,clocks.current.memory,clocks_throttle_reasons.active --format=csv
+docker run --rm --gpus device=0 \
+    -e FREETOKEN_BENCHMARK_COMMIT="$commit" \
+    -e FREETOKEN_DISABLE_KERNEL_CACHE=1 \
+    -v "$PWD:/workspace/freetoken-pascal" \
+    -w /workspace/freetoken-pascal freetoken-pascal:cuda126 \
+    bash -lc 'PYTHONPATH=python python benchmarks/bench_gdn_pascal.py \
+      --tokens 1 --warmups 2 --repeats 5 --output results/hardware/gdn-pascal-t1.json'
+```
+
 For host RAM vs PCIe bandwidth and the offload/hybrid backend pick, use `ft bench bw`
 instead — it writes the JSON profile the engine reads.

@@ -55,7 +55,9 @@ def _reference(torch, inputs):
 @pytest.mark.sm61
 @pytest.mark.parametrize(
     ("dim", "key_heads", "value_heads"),
-    [(64, 1, 2), (128, 1, 2), (64, 2, 2)],
+    # The final tuple is the Qwen3.8 artifact geometry: ssm_a has 48 rows and
+    # attn_qkv has 10,240 outputs = 2 * 16 * 128 + 48 * 128.
+    [(64, 1, 2), (128, 1, 2), (64, 2, 2), (128, 16, 48)],
 )
 def test_pascal_gdn_matches_independent_ragged_reference(
     dim: int, key_heads: int, value_heads: int
