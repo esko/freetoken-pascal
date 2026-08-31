@@ -234,6 +234,20 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             if observer is not None:
                 observer("gate", "end")
 
+    def _decode_gate_params(
+        self, selected_implementation: str, a: torch.Tensor, b: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Materialize explicit gates only for decode backends that consume them.
+
+        The fused FLA decode kernel consumes the original ``a`` and ``b`` projections and
+        computes its gates internally.  Keeping that path out of ``_gate_params`` preserves
+        the default operation order when optional benchmark telemetry is attached.
+        """
+
+        if selected_implementation not in ("torch-reference", "pascal-fp32"):
+            return None
+        return self._gate_params(a, b)
+
     def _conv_weight(self) -> torch.Tensor:
         return self.conv1d.weight.squeeze(1)  # [conv_dim, kernel] for the fused kernel
 
@@ -634,7 +648,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             finally:
                 if observer is not None:
                     observer("qkv_prepare", "end")
-            g, beta = self._gate_params(a, b)
+            gate_params = self._decode_gate_params(decision.selected_implementation, a, b)
             observe_recurrence = (
                 observer is not None and decision.selected_implementation != "pascal-fp32"
             )
@@ -642,6 +656,8 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 observer("recurrence_device", "begin")
             try:
                 if decision.selected_implementation == "torch-reference":
+                    assert gate_params is not None
+                    g, beta = gate_params
                     core_out = self._reference_recurrent(
                         q,
                         k,
@@ -652,6 +668,8 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                         fla,
                     )
                 elif decision.selected_implementation == "pascal-fp32":
+                    assert gate_params is not None
+                    g, beta = gate_params
                     core_out = self._pascal_recurrent(
                         q,
                         k,

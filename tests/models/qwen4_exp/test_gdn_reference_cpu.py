@@ -455,3 +455,16 @@ def test_pascal_path_rejects_scheduler_metadata_outside_int32_before_cast():
             torch.zeros(1, 1, 2, 2, dtype=torch.float32),
             fla,
         )
+
+
+def test_fla_decode_does_not_materialize_explicit_gate_params(monkeypatch):
+    op = _op(num_k_heads=1, num_v_heads=1, head_dim=2, conv_dim=1, kernel=2)
+
+    def unexpected_gate_params(*_args):
+        raise AssertionError("FLA decode must compute gates inside its fused kernel")
+
+    monkeypatch.setattr(op, "_gate_params", unexpected_gate_params)
+    a = torch.zeros(1, 1)
+    b = torch.zeros(1, 1)
+
+    assert op._decode_gate_params("fla", a, b) is None
