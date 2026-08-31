@@ -17,7 +17,10 @@ def _run(*command: str) -> str:
 
 
 def _pci_generation(speed: str) -> int:
-    value = float(speed.removesuffix("GT/s"))
+    match = re.search(r"[0-9.]+", speed)
+    if match is None:
+        raise RuntimeError(f"unable to parse PCIe speed {speed!r}")
+    value = float(match.group())
     mapping = {2.5: 1, 5.0: 2, 8.0: 3, 16.0: 4, 32.0: 5}
     try:
         return mapping[value]
@@ -26,14 +29,20 @@ def _pci_generation(speed: str) -> int:
 
 
 def _pci_link(bus: str) -> tuple[dict[str, int], dict[str, int]]:
-    verbose = _run("lspci", "-s", bus, "-vv")
-    capacity = re.search(r"LnkCap:.*Speed ([0-9.]+GT/s), Width x([0-9]+)", verbose)
-    current = re.search(r"LnkSta:.*Speed ([0-9.]+GT/s).*Width x([0-9]+)", verbose)
-    if capacity is None or current is None:
-        raise RuntimeError(f"unable to parse PCIe link for {bus}")
+    device = Path("/sys/bus/pci/devices") / bus
     return (
-        {"generation": _pci_generation(capacity.group(1)), "width": int(capacity.group(2))},
-        {"generation": _pci_generation(current.group(1)), "width": int(current.group(2))},
+        {
+            "generation": _pci_generation(
+                (device / "max_link_speed").read_text(encoding="utf-8").strip()
+            ),
+            "width": int((device / "max_link_width").read_text(encoding="utf-8").strip()),
+        },
+        {
+            "generation": _pci_generation(
+                (device / "current_link_speed").read_text(encoding="utf-8").strip()
+            ),
+            "width": int((device / "current_link_width").read_text(encoding="utf-8").strip()),
+        },
     )
 
 
@@ -176,7 +185,7 @@ def capture(
         },
         "capture": {
             "deterministic": True,
-            "commands": ["nvidia-smi", "lspci", "sysfs", "lsblk", "dpkg-query"],
+            "commands": ["nvidia-smi", "sysfs", "lsblk", "dpkg-query"],
         },
     }
 
