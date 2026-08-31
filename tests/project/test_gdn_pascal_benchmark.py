@@ -115,6 +115,7 @@ def test_summary_keeps_raw_samples_and_reports_median_min_max() -> None:
 def test_injected_commit_supports_gitless_runtime(monkeypatch) -> None:
     commit = "a" * 40
     monkeypatch.setenv("FREETOKEN_BENCHMARK_COMMIT", commit)
+    monkeypatch.setattr(BENCHMARK, "_checkout_commit", lambda *, required: None)
 
     assert BENCHMARK._git_commit() == commit
 
@@ -124,4 +125,12 @@ def test_injected_commit_rejects_noncanonical_sha(monkeypatch, commit) -> None:
     monkeypatch.setenv("FREETOKEN_BENCHMARK_COMMIT", commit)
 
     with pytest.raises(RuntimeError, match="40-character lowercase Git SHA"):
+        BENCHMARK._git_commit()
+
+
+def test_injected_commit_must_match_checkout_when_git_is_available(monkeypatch) -> None:
+    monkeypatch.setenv("FREETOKEN_BENCHMARK_COMMIT", "a" * 40)
+    monkeypatch.setattr(BENCHMARK, "_checkout_commit", lambda *, required: "b" * 40)
+
+    with pytest.raises(RuntimeError, match="does not match the mounted checkout"):
         BENCHMARK._git_commit()

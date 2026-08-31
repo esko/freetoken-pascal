@@ -156,19 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _git_commit() -> str:
-    """Return the exact repository commit used for the report."""
-
-    injected = os.environ.get("FREETOKEN_BENCHMARK_COMMIT")
-    if injected is not None:
-        if len(injected) != 40 or any(
-            character not in "0123456789abcdef" for character in injected
-        ):
-            raise RuntimeError(
-                "FREETOKEN_BENCHMARK_COMMIT must be a 40-character lowercase Git SHA"
-            )
-        return injected
-
+def _checkout_commit(*, required: bool) -> str | None:
     try:
         completed = subprocess.run(
             ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
@@ -177,11 +165,32 @@ def _git_commit() -> str:
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as error:
-        raise RuntimeError("cannot determine exact Git commit for benchmark report") from error
+        if required:
+            raise RuntimeError("cannot determine exact Git commit for benchmark report") from error
+        return None
     commit = completed.stdout.strip()
     if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
         raise RuntimeError(f"git returned an invalid commit: {commit!r}")
     return commit
+
+
+def _git_commit() -> str:
+    """Return and, when possible, verify the exact repository commit for the report."""
+
+    injected = os.environ.get("FREETOKEN_BENCHMARK_COMMIT")
+    if injected is None:
+        commit = _checkout_commit(required=True)
+        assert commit is not None
+        return commit
+    if len(injected) != 40 or any(character not in "0123456789abcdef" for character in injected):
+        raise RuntimeError("FREETOKEN_BENCHMARK_COMMIT must be a 40-character lowercase Git SHA")
+    checkout = _checkout_commit(required=False)
+    if checkout is not None and checkout != injected:
+        raise RuntimeError(
+            "FREETOKEN_BENCHMARK_COMMIT does not match the mounted checkout: "
+            f"{injected} != {checkout}"
+        )
+    return injected
 
 
 def _torch_reference_recurrence(
@@ -408,8 +417,8 @@ def run_benchmark(
     command = command or shlex.join([sys.executable, *sys.argv])
     device_info = _device_metadata(torch, device)
     return {
-        "schema_name": "pascal-gdn-recurrence-benchmark",
-        "schema_version": 1,
+        "format_name": "raw-pascal-gdn-recurrence-observation",
+        "format_version": 1,
         "qualification": QUALIFICATION,
         "workload": {
             "tokens": config.tokens,
