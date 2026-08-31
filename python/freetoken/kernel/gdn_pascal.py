@@ -9,7 +9,7 @@ or performance qualification is implied by compiling or invoking this module.
 from __future__ import annotations
 
 import functools
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
@@ -35,26 +35,25 @@ class PascalGdnMetadataBinding:
     data_ptr: int
     storage_offset: int
     stride: tuple[int, ...]
-    version: int | None
+    version: int
     shape: tuple[int, ...]
     dtype: str
     device: str
-    owner_epoch: int
 
 
 _METADATA_PROOF_SEAL = object()
 
 
-def _tensor_version(value: torch.Tensor) -> int | None:
+def _tensor_version(value: torch.Tensor) -> int:
     try:
         return int(value._version)
     except RuntimeError:
-        # Inference tensors intentionally have no version counter. Their scheduler-owned
-        # metadata proof still binds object/storage/layout and its owner epoch.
-        return None
+        raise PascalGdnContractError(
+            "Pascal GDN metadata proof requires versioned tensors; construct it outside inference mode"
+        ) from None
 
 
-def _metadata_binding(value: torch.Tensor, owner_epoch: int) -> PascalGdnMetadataBinding:
+def _metadata_binding(value: torch.Tensor) -> PascalGdnMetadataBinding:
     return PascalGdnMetadataBinding(
         object_id=id(value),
         data_ptr=int(value.data_ptr()),
@@ -64,75 +63,95 @@ def _metadata_binding(value: torch.Tensor, owner_epoch: int) -> PascalGdnMetadat
         shape=tuple(int(part) for part in value.shape),
         dtype=str(value.dtype),
         device=str(value.device),
-        owner_epoch=int(owner_epoch),
     )
 
 
-@dataclass(frozen=True, slots=True)
 class PascalGdnMetadataProof:
     """Host-origin metadata values bound to the exact tensors staged for one forward.
 
-    The scheduler creates this proof after staging ``slot_indices`` and ``cu_seqlens``.
-    A Pascal launch can use the immutable host values for range and monotonicity checks
-    without copying the same device tensors back to the CPU.  The private seal and trusted
-    copies make accidental ``dataclasses.replace`` edits fail closed; tensor identity,
-    storage, version, shape, dtype, and device are checked on every launch.
+    The scheduler supplies host values and the explicit Pascal model lazily creates the
+    proof-owned tensors. A Pascal launch can use the immutable host values for range and
+    monotonicity checks without copying generic device tensors back to the CPU. The private
+    token and opaque object prevent ``dataclasses.replace`` forgery; tensor identity, storage,
+    version, shape, dtype, and device are checked on every launch.
     """
 
-    slot_values: tuple[int, ...]
-    offset_values: tuple[int, ...]
-    slot_binding: PascalGdnMetadataBinding
-    offset_binding: PascalGdnMetadataBinding
-    _trusted_slot_values: tuple[int, ...] = field(repr=False, compare=False)
-    _trusted_offset_values: tuple[int, ...] = field(repr=False, compare=False)
-    _seal: object = field(repr=False, compare=False)
-    initial_values: tuple[bool, ...] | None = None
-    initial_binding: PascalGdnMetadataBinding | None = None
-    _trusted_initial_values: tuple[bool, ...] | None = field(repr=False, compare=False, default=None)
+    __slots__ = (
+        "_slot_indices",
+        "_cu_seqlens",
+        "_initial_state",
+        "_slot_values",
+        "_offset_values",
+        "_slot_binding",
+        "_offset_binding",
+        "_trusted_slot_values",
+        "_trusted_offset_values",
+        "_seal",
+        "_initial_values",
+        "_initial_binding",
+        "_trusted_initial_values",
+        "_initialized",
+    )
 
-    def __post_init__(self) -> None:
-        if self._seal is not _METADATA_PROOF_SEAL:
-            raise PascalGdnContractError("Pascal GDN metadata proof is not scheduler-issued")
-        if (
-            self.slot_values != self._trusted_slot_values
-            or self.offset_values != self._trusted_offset_values
-            or self.initial_values != self._trusted_initial_values
-        ):
-            raise PascalGdnContractError("Pascal GDN metadata proof values were modified")
-
-    @classmethod
-    def issue(
-        cls,
+    def __init__(
+        self,
+        seal: object,
         slot_indices: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        initial_state: torch.Tensor | None,
         slot_values: tuple[int, ...],
         offset_values: tuple[int, ...],
-        *,
-        initial_state: torch.Tensor | None = None,
-        initial_values: tuple[bool, ...] | None = None,
-        owner_epoch: int = 0,
-    ) -> "PascalGdnMetadataProof":
-        slots = tuple(int(value) for value in slot_values)
-        offsets = tuple(int(value) for value in offset_values)
-        initial = None if initial_values is None else tuple(bool(value) for value in initial_values)
-        if (initial_state is None) != (initial is None):
-            raise PascalGdnContractError(
-                "Pascal GDN initial-state proof requires tensor and host values together"
-            )
-        return cls(
-            slot_values=slots,
-            offset_values=offsets,
-            slot_binding=_metadata_binding(slot_indices, owner_epoch),
-            offset_binding=_metadata_binding(cu_seqlens, owner_epoch),
-            initial_values=initial,
-            initial_binding=(
-                None if initial_state is None else _metadata_binding(initial_state, owner_epoch)
-            ),
-            _trusted_slot_values=slots,
-            _trusted_offset_values=offsets,
-            _trusted_initial_values=initial,
-            _seal=_METADATA_PROOF_SEAL,
+        initial_values: tuple[bool, ...] | None,
+    ) -> None:
+        if seal is not _METADATA_PROOF_SEAL:
+            raise PascalGdnContractError("Pascal GDN metadata proof is not scheduler-issued")
+        object.__setattr__(self, "_slot_indices", slot_indices)
+        object.__setattr__(self, "_cu_seqlens", cu_seqlens)
+        object.__setattr__(self, "_initial_state", initial_state)
+        object.__setattr__(self, "_slot_values", tuple(slot_values))
+        object.__setattr__(self, "_offset_values", tuple(offset_values))
+        object.__setattr__(self, "_slot_binding", _metadata_binding(slot_indices))
+        object.__setattr__(self, "_offset_binding", _metadata_binding(cu_seqlens))
+        object.__setattr__(self, "_trusted_slot_values", tuple(slot_values))
+        object.__setattr__(self, "_trusted_offset_values", tuple(offset_values))
+        object.__setattr__(self, "_initial_values", initial_values)
+        object.__setattr__(
+            self,
+            "_initial_binding",
+            None if initial_state is None else _metadata_binding(initial_state),
         )
+        object.__setattr__(self, "_trusted_initial_values", initial_values)
+        object.__setattr__(self, "_seal", seal)
+        object.__setattr__(self, "_initialized", True)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        if getattr(self, "_initialized", False):
+            raise AttributeError("Pascal GDN metadata proof is immutable")
+        object.__setattr__(self, _name, _value)
+
+    @property
+    def slot_indices(self) -> torch.Tensor:
+        return self._slot_indices
+
+    @property
+    def cu_seqlens(self) -> torch.Tensor:
+        return self._cu_seqlens
+
+    @property
+    def initial_state(self) -> torch.Tensor | None:
+        return self._initial_state
+
+    @property
+    def slot_values(self) -> tuple[int, ...]:
+        return self._slot_values
+
+    @property
+    def offset_values(self) -> tuple[int, ...]:
+        return self._offset_values
+
+    @property
+    def initial_values(self) -> tuple[bool, ...] | None:
+        return self._initial_values
 
     def values_for(
         self,
@@ -150,12 +169,12 @@ class PascalGdnMetadataProof:
             or self.initial_values != self._trusted_initial_values
         ):
             raise PascalGdnContractError("Pascal GDN metadata proof values were modified")
-        if _metadata_binding(slot_indices, self.slot_binding.owner_epoch) != self.slot_binding:
+        if _metadata_binding(slot_indices) != self._slot_binding:
             raise PascalGdnContractError("Pascal GDN slot metadata proof is stale or unbound")
-        if _metadata_binding(cu_seqlens, self.offset_binding.owner_epoch) != self.offset_binding:
+        if _metadata_binding(cu_seqlens) != self._offset_binding:
             raise PascalGdnContractError("Pascal GDN offset metadata proof is stale or unbound")
-        if initial_state is not None and self.initial_binding is not None:
-            if _metadata_binding(initial_state, self.initial_binding.owner_epoch) != self.initial_binding:
+        if initial_state is not None and self._initial_binding is not None:
+            if _metadata_binding(initial_state) != self._initial_binding:
                 raise PascalGdnContractError("Pascal GDN initial-state proof is stale or unbound")
         elif initial_state is not None:
             raise PascalGdnContractError("Pascal GDN initial-state proof is unexpectedly present")
@@ -204,26 +223,39 @@ def _cpu_int_values(name: str, value: torch.Tensor) -> list[int]:
     return [int(item) for item in value.detach().to(device="cpu").flatten().tolist()]
 
 
-def make_pascal_gdn_metadata_proof(
-    slot_indices: torch.Tensor,
-    cu_seqlens: torch.Tensor,
+def _issue_pascal_gdn_metadata_proof(
+    device: torch.device,
     slot_values: tuple[int, ...],
     offset_values: tuple[int, ...],
     *,
-    initial_state: torch.Tensor | None = None,
     initial_values: tuple[bool, ...] | None = None,
-    owner_epoch: int = 0,
 ) -> PascalGdnMetadataProof:
-    """Issue a proof for scheduler-owned host values and their staged device tensors."""
+    """Issue dedicated Pascal metadata tensors from scheduler-owned host values."""
 
-    return PascalGdnMetadataProof.issue(
+    import torch
+
+    slots = tuple(int(value) for value in slot_values)
+    offsets = tuple(int(value) for value in offset_values)
+    initial = None if initial_values is None else tuple(bool(value) for value in initial_values)
+    # Preserve version counters even when the scheduler is called from an inference-mode
+    # section. These tensors are immutable launch metadata and are not the generic FLA tensors.
+    with torch.inference_mode(False):
+        pin = {"device": "cpu", "pin_memory": device.type == "cuda"}
+        slot_host = torch.tensor(slots, dtype=torch.int32, **pin)
+        offset_host = torch.tensor(offsets, dtype=torch.int32, **pin)
+        initial_host = None if initial is None else torch.tensor(initial, dtype=torch.bool, **pin)
+        slot_indices = slot_host.to(device, non_blocking=True)
+        cu_seqlens = offset_host.to(device, non_blocking=True)
+        initial_state = None if initial_host is None else initial_host.to(device, non_blocking=True)
+
+    return PascalGdnMetadataProof(
+        _METADATA_PROOF_SEAL,
         slot_indices,
         cu_seqlens,
-        slot_values,
-        offset_values,
-        initial_state=initial_state,
-        initial_values=initial_values,
-        owner_epoch=owner_epoch,
+        initial_state,
+        slots,
+        offsets,
+        initial,
     )
 
 
@@ -397,7 +429,7 @@ def pascal_gdn_recurrence(
         slot_indices,
         cu_seqlens,
         output,
-        metadata_proof,
+        metadata_proof=metadata_proof,
     )
     if q.device.type != "cuda":
         raise PascalGdnContractError("Pascal GDN requires a CUDA tensor on an explicit launch")
@@ -415,7 +447,6 @@ __all__ = [
     "PascalGdnLaunch",
     "PascalGdnMetadataBinding",
     "PascalGdnMetadataProof",
-    "make_pascal_gdn_metadata_proof",
     "pascal_gdn_recurrence",
     "validate_pascal_gdn_inputs",
 ]

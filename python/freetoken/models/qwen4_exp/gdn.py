@@ -292,7 +292,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             )
         else:
             slots, starts, proof_initial = proof.values_for(
-                fla.cache_indices, fla.cu_seqlens, fla.has_initial_state
+                proof.slot_indices, proof.cu_seqlens, proof.initial_state
             )
             has_initial_state = proof_initial
         result = torch.empty_like(conv_in)
@@ -439,6 +439,27 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 "pascal-fp32 cannot determine CUDA graph-capture state"
             ) from error
 
+    def _ensure_pascal_metadata_proof(self, fla, device: torch.device):
+        """Lazily issue one private Pascal proof for all layers sharing this metadata."""
+
+        proof = getattr(fla, "pascal_metadata_proof", None)
+        if proof is not None:
+            return proof
+        slots = getattr(fla, "_pascal_host_slot_values", None)
+        offsets = getattr(fla, "_pascal_host_offset_values", None)
+        if slots is None or offsets is None:
+            return None
+        from freetoken.kernel.gdn_pascal import _issue_pascal_gdn_metadata_proof
+
+        proof = _issue_pascal_gdn_metadata_proof(
+            device,
+            slots,
+            offsets,
+            initial_values=getattr(fla, "_pascal_host_initial_values", None),
+        )
+        fla.pascal_metadata_proof = proof
+        return proof
+
     def _validate_pascal_metadata(self, fla) -> None:
         """Reject scheduler checkpoint metadata the standalone recurrence cannot preserve."""
 
@@ -516,11 +537,11 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 cache_indices = int32_metadata("cache_indices", fla.cache_indices)
                 cu_seqlens = int32_metadata("cu_seqlens", fla.cu_seqlens)
             else:
-                # A scheduler-issued proof has already validated the host-origin values and binds
-                # them to these exact device tensors. Keep the tensors untouched so the kernel can
-                # validate identity/version without another synchronous device-to-host copy.
-                cache_indices = fla.cache_indices
-                cu_seqlens = fla.cu_seqlens
+                # A scheduler-issued proof owns dedicated int32 tensors built from its host
+                # tuples. The kernel validates their versioned identity without another
+                # synchronous device-to-host copy; generic FLA tensors remain untouched.
+                cache_indices = metadata_proof.slot_indices
+                cu_seqlens = metadata_proof.cu_seqlens
         finally:
             if observer is not None:
                 observer("metadata_validation", "end")
@@ -606,6 +627,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             fla = build_fla_metadata(batch, hidden_states.device)
             batch.fla_metadata = fla
         if decision.selected_implementation == "pascal-fp32":
+            self._ensure_pascal_metadata_proof(fla, hidden_states.device)
             self._validate_pascal_metadata(fla)
 
         observer = getattr(self, "_gdn_phase_observer", None)

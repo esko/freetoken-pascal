@@ -785,7 +785,6 @@ class Scheduler(SchedulerIOMixin):
         write_mapping = _make_write_tuple(batch, self.device)
         batch.out_loc = self.engine.page_table[input_mapping]
         if self.engine.linear_state_pool is not None:
-            batch.linear_metadata_epoch = self._forward_iter
             if batch.is_decode:
                 # GPU GDN-state slot (one per padded request) for the decode gather/scatter;
                 # lands in the CUDA-graph input buffer via copy_from. Gate on the cache mode,

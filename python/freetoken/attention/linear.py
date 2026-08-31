@@ -27,16 +27,20 @@ class FLAMetadata:
       fresh_state_indices prefill only: the state-pool slots whose sequence is fresh
                           (cached_len == 0) and must be zeroed before the chunk kernel
                           reads them in place. None if there are none / for decode.
-      pascal_metadata_proof scheduler-issued host values bound to the exact eager device
-                          tensors; None for graph/direct metadata, which keeps slow validation.
+      pascal_metadata_proof lazily-issued proof for explicit Pascal only; None until a Pascal
+                          layer requests it, and always None for CUDA-graph/direct metadata.
     """
 
     cu_seqlens: torch.Tensor
     cache_indices: torch.Tensor
     has_initial_state: torch.Tensor | None = None
     fresh_state_indices: torch.Tensor | None = None
-    # Scheduler-issued host proof for the explicit Pascal recurrence. CUDA-graph metadata and
-    # direct/untrusted callers leave this unset and therefore retain synchronous validation.
+    # Scheduler-origin tuples are a zero-allocation source for the explicit Pascal proof. The
+    # model issues dedicated device tensors only when pascal-fp32 is explicitly selected.
+    _pascal_host_slot_values: tuple[int, ...] | None = None
+    _pascal_host_offset_values: tuple[int, ...] | None = None
+    _pascal_host_initial_values: tuple[bool, ...] | None = None
+    # The proof is populated once by the first Pascal layer and reused by all later layers.
     pascal_metadata_proof: "PascalGdnMetadataProof | None" = None
 
     # --- hybrid-radix track-checkpoint (extra_buffer) fields; all None when not caching ---
@@ -55,9 +59,10 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
     (the input_ids/attn-metadata pattern), so the copies overlap the forward instead of
     stalling it.
 
-    Decode is one token per request, so ``cu_seqlens`` is a plain ``arange(bs+1)`` and
-    ``cache_indices`` is ``batch.linear_table_idx`` (already int32) -- reused as-is. Under
-    CUDA graph the decode ``FLAMetadata`` is instead built directly in
+    Decode is one token per request, so generic ``cu_seqlens`` is a plain ``arange(bs+1)`` and
+    generic ``cache_indices`` is ``batch.linear_table_idx`` (already int32). When the scheduler
+    supplies host slot values, the Pascal model lazily creates separate versioned int32 tensors
+    from those values. Under CUDA graph the decode ``FLAMetadata`` is instead built directly in
     ``GraphCaptureBuffer.set_batch`` against the persistent buffers (stable addresses); this
     builder serves the eager scheduler path and direct-op test callers.
     """
@@ -74,24 +79,17 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
         cu_seqlens = torch.arange(bs + 1, dtype=torch.int32, device=device)
         # the scheduler stages linear_table_idx from gdn_slot (decode), reused as-is here
         assert batch.linear_table_idx is not None
-        proof = None
         slot_values = getattr(batch, "linear_table_idx_host", None)
         if slot_values is not None:
             if len(slot_values) != bs:
                 raise ValueError("linear_table_idx_host must match padded decode batch size")
-            from freetoken.kernel.gdn_pascal import make_pascal_gdn_metadata_proof
-
-            proof = make_pascal_gdn_metadata_proof(
-                batch.linear_table_idx,
-                cu_seqlens,
-                tuple(int(value) for value in slot_values),
-                tuple(range(bs + 1)),
-                owner_epoch=int(getattr(batch, "linear_metadata_epoch", 0)),
-            )
         return FLAMetadata(
             cu_seqlens=cu_seqlens,
             cache_indices=batch.linear_table_idx,
-            pascal_metadata_proof=proof,
+            _pascal_host_slot_values=(
+                None if slot_values is None else tuple(int(value) for value in slot_values)
+            ),
+            _pascal_host_offset_values=(tuple(range(bs + 1)) if slot_values is not None else None),
         )
 
     # prefill: cumsum of query (extend) lengths, per-request slot + continuation flags.
@@ -105,21 +103,9 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
     offsets = [0]
     for length in lens:
         offsets.append(offsets[-1] + int(length))
-    cu_device = cu_host.to(device, dtype=torch.int32, non_blocking=True)
+    cu_device = cu_host.to(device, non_blocking=True)
     idx_device = idx_host.to(device, non_blocking=True)
     has_init_device = has_init_host.to(device, non_blocking=True)
-    from freetoken.kernel.gdn_pascal import make_pascal_gdn_metadata_proof
-
-    proof = make_pascal_gdn_metadata_proof(
-        idx_device,
-        cu_device,
-        tuple(gdn_slot(r) for r in reqs),
-        tuple(offsets),
-        initial_state=has_init_device,
-        initial_values=tuple(r.cached_len > 0 for r in reqs),
-        owner_epoch=int(getattr(batch, "linear_metadata_epoch", 0)),
-    )
-
     track = _build_track_metadata(reqs, cu_host, device, pin)
 
     return FLAMetadata(
@@ -129,7 +115,9 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
         fresh_state_indices=(
             fresh_host.to(device, non_blocking=True) if fresh_host is not None else None
         ),
-        pascal_metadata_proof=proof,
+        _pascal_host_slot_values=tuple(gdn_slot(r) for r in reqs),
+        _pascal_host_offset_values=tuple(offsets),
+        _pascal_host_initial_values=tuple(r.cached_len > 0 for r in reqs),
         **track,
     )
 
