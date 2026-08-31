@@ -3,7 +3,7 @@
 - Downstream issue: #93
 - Branch: `issue-93-pascal-gdn-h1`
 - Base: `71b6b46ebe` (merged PR #95)
-- Validation class: H0 plus H1 source/compile census; no P4 evidence
+- Validation class: H0 plus H1 source/compile census and bounded H2 kernel parity
 
 Issue #93 establishes the backend decision boundary for Qwen3.8-Flash-Next GatedDeltaNet.
 The immutable, Torch-free contract lives in
@@ -62,8 +62,8 @@ No donor Triton or graph-fusion code is imported by this slice. The candidate re
 `auto`, and forcing it without an affirmative availability probe fails closed. The FLA kernel's
 recurrent state is indexed as [V,K] while the current pool contract is [K,V]; equal head
 dimensions make the tensors shape-compatible but do not establish axis-order equivalence. The
-direct snapshot path therefore remains an explicit H0 limitation pending canonical nonzero-state
-H2 parity. Cross-backend switching and checkpoint parity are not claimed. Hosted tests cover decision
+direct snapshot path therefore remains an explicit limitation pending canonical FLA/Pascal
+axis-order comparison. Cross-backend switching and checkpoint parity are not claimed. Hosted tests cover decision
 immutability, visible fallback reasons, invalid/forced modes, observer delivery, constructor
 snapshotting, reference state behavior, the standalone Pascal source/adapter contract, and the
 static guarantee that the Qwen4 GDN boundary resolves before any FLA call.
@@ -73,5 +73,20 @@ backend must preserve. Deterministic CPU tests compare chunk evaluation with tok
 nonzero state, restore both convolution and recurrent state before replaying a suffix, reset and
 replay the complete sequence, exercise ragged requests mapped to noncontiguous slots, and verify
 that concurrent request updates leave unaddressed slots byte-for-byte unchanged. These checks are
-reference contracts only. They do not establish FLA/Pascal checkpoint interchangeability, kernel
-registration, device concurrency, or H2 parity; those remain issue #93 hardware work.
+reference contracts alone do not establish FLA/Pascal checkpoint interchangeability, kernel
+registration, or device concurrency; those remain issue #93 work.
+
+## Bounded P4 parity
+
+The standalone recurrence was source-JIT compiled with CUDA 12.6 and
+`FREETOKEN_DISABLE_KERNEL_CACHE=1`, then launched independently on each installed Tesla P4.
+The H2 fixture covers D64/D128, GQA ratios one and two, nonzero initial state, ragged disjoint
+slots, untouched-slot isolation, chunk-versus-tokenwise decode, and checkpoint/restore suffix
+replay against `gdn_reference.recurrent_gated_delta_rule` at `rtol=3e-5, atol=3e-5`.
+Both physical cards passed five cases. The bounded runs peaked at 43 degrees C and approximately
+24 W on GPU 0 and 42 degrees C and approximately 24 W on GPU 1; clocks remained intentionally
+constrained and these observations are not performance or sustained thermal qualification.
+
+This evidence qualifies the standalone kernel as a correctness candidate only. Automatic dispatch,
+full-model integration, FLA/Pascal state interchange, kernel-only and end-to-end A/B measurement,
+and any fused projection/convolution/recurrence path remain open under issue #93.
