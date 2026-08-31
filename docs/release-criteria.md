@@ -22,7 +22,7 @@ FreeToken-Pascal core v1 is complete only when every required item is evidenced.
 - [ ] Sensitive tensors begin at source/lossless precision; any Q8 or lower promotion is per-class and evidence-gated, and no broad Q2/Q3/Q4 rule can silently demote them.
 - [ ] `shared_expert_gate` and equivalent router/GDN/control tensors pass independent scale/dequant parity and finite/range checks against the authoritative reference.
 - [ ] GDN, QSA, hyperconnections, router, shared expert and PLE pass reference checks.
-- [ ] Issue #93 H0/H1 backend decision, visible `pascal-fp32` explicit-only selection/rejection, ragged/concurrent isolation, fallback telemetry, and donor provenance pass; H2 one-P4 parity remains a separate hardware gate.
+- [ ] Issue #93 H0/H1 backend decision, visible `pascal-fp32` explicit-only selection/rejection, ragged/concurrent isolation, fallback telemetry, donor provenance and H2 standalone/model-boundary parity pass; end-to-end performance, tracking/checkpoint and promotion remain separate gates.
 - [ ] QSA selected blocks/rows, sparse-attention output and recurrent/index state pass independent dense-equivalent, sparse-region and context-boundary checks.
 - [ ] 32K and 128K continuations are coherent and state-correct.
 - [ ] 262K qualification is either passed or explicitly documented as unsupported with measured reason.

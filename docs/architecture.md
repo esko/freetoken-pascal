@@ -134,8 +134,13 @@ The recurrent matrix remains in the pool's semantic `[K,V]` order.
 `g` is the caller-provided log-decay.
 The source deliberately excludes donor graph fusion and SSM convolution assumptions.
 `pascal-fp32` is explicit-only and never an `auto` choice, requires a positive qualification gate,
-and remains fail-closed in the model forward until H2 one-P4 parity and end-to-end evidence exist.
-H1 compilation and source census are not hardware evidence.
+and substitutes only the FP32 recurrence inside the Qwen GDN model boundary. Projection,
+convolution, gate construction, normalization and output projection retain their reference paths,
+and BF16/FP16 model activations are staged to FP32 only for the recurrence. The path is eager-only
+and fails closed for CUDA capture, non-FP32 recurrent pools and tracking/checkpoint-boundary
+metadata that the standalone adapter cannot preserve. Factory activation and automatic selection
+remain disabled pending end-to-end performance evidence. H1 compilation and source census are not
+hardware evidence.
 
 ## GGUF ingestion
 
