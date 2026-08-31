@@ -435,16 +435,29 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 "pascal-fp32 requires an FP32 recurrent state pool; refusing implicit state cast"
             )
 
-        from freetoken.kernel.gdn_pascal import pascal_gdn_recurrence
-
         def flat(tensor: torch.Tensor) -> torch.Tensor:
             return tensor[0].to(dtype=torch.float32).contiguous()
 
         # Scheduler metadata is commonly int64, while the standalone CUDA ABI is explicitly
-        # int32. Runtime request/token bounds are already below int32; make the eager staging
-        # conversion visible here instead of weakening the kernel contract.
-        cache_indices = fla.cache_indices.to(dtype=torch.int32).contiguous()
-        cu_seqlens = fla.cu_seqlens.to(dtype=torch.int32).contiguous()
+        # int32. Validate before conversion so malformed external metadata cannot wrap into a
+        # valid-looking slot or offset.
+        def int32_metadata(name: str, tensor: torch.Tensor) -> torch.Tensor:
+            if tensor.dtype not in (torch.int32, torch.int64):
+                raise GdnDispatchError(
+                    f"pascal-fp32 {name} must use int32 or int64 metadata, got {tensor.dtype}"
+                )
+            if tensor.numel():
+                minimum, maximum = torch.aminmax(tensor)
+                limit = torch.iinfo(torch.int32)
+                if int(minimum.item()) < limit.min or int(maximum.item()) > limit.max:
+                    raise GdnDispatchError(f"pascal-fp32 {name} exceeds the int32 ABI range")
+            return tensor.to(dtype=torch.int32).contiguous()
+
+        cache_indices = int32_metadata("cache_indices", fla.cache_indices)
+        cu_seqlens = int32_metadata("cu_seqlens", fla.cu_seqlens)
+
+        from freetoken.kernel.gdn_pascal import pascal_gdn_recurrence
+
         return pascal_gdn_recurrence(
             flat(q),
             flat(k),

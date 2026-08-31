@@ -437,3 +437,21 @@ def test_pascal_path_rejects_graph_capture_and_non_fp32_state():
             torch.zeros(1, 1, 2, 2, dtype=torch.bfloat16),
             fla,
         )
+
+
+def test_pascal_path_rejects_scheduler_metadata_outside_int32_before_cast():
+    op = _op(num_k_heads=1, num_v_heads=1, head_dim=2, conv_dim=1, kernel=2)
+    fla = _fla([1], [0])
+    fla.cache_indices = torch.tensor([1 << 31], dtype=torch.int64)
+    q = torch.zeros(1, 1, 1, 2)
+
+    with pytest.raises(RuntimeError, match="cache_indices exceeds the int32 ABI range"):
+        op._pascal_recurrent(
+            q,
+            q,
+            torch.zeros(1, 1, 1, 2),
+            torch.zeros(1, 1, 1),
+            torch.zeros(1, 1, 1),
+            torch.zeros(1, 1, 2, 2, dtype=torch.float32),
+            fla,
+        )
