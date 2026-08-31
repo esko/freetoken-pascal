@@ -785,6 +785,7 @@ class Scheduler(SchedulerIOMixin):
         write_mapping = _make_write_tuple(batch, self.device)
         batch.out_loc = self.engine.page_table[input_mapping]
         if self.engine.linear_state_pool is not None:
+            batch.linear_metadata_epoch = self._forward_iter
             if batch.is_decode:
                 # GPU GDN-state slot (one per padded request) for the decode gather/scatter;
                 # lands in the CUDA-graph input buffer via copy_from. Gate on the cache mode,
@@ -797,10 +798,12 @@ class Scheduler(SchedulerIOMixin):
                     pool = self.engine.linear_state_pool
                     slots = [r.linear_slot_idx if r.linear_slot_idx is not None
                              else pool.padding_slot for r in batch.padded_reqs]
+                    batch.linear_table_idx_host = tuple(int(slot) for slot in slots)
                     batch.linear_table_idx = torch.tensor(
                         slots, dtype=torch.int32, device="cpu", pin_memory=True
                     ).to(self.device, non_blocking=True)
                 else:
+                    batch.linear_table_idx_host = tuple(int(r.table_idx) for r in batch.padded_reqs)
                     batch.linear_table_idx = input_mapping[0].to(torch.int32)
             # Per-forward GDN metadata (cu_seqlens / cache_indices / continuation flags),
             # built once here instead of rebuilt in each of the 30 GDN layers. For decode

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import importlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from freetoken.attention.linear import build_fla_metadata
+from freetoken.core import Batch, Req, SamplingParams
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "python/freetoken/kernel/csrc/jit/gdn_pascal.cu"
@@ -77,6 +80,87 @@ def test_validator_accepts_ragged_gqa_pool_layout_and_pre_sigmoided_beta() -> No
     assert launch.num_k_heads == 1
     assert launch.num_v_heads == 2
     assert launch.num_slots == 4
+
+
+def test_scheduler_metadata_proof_avoids_duplicate_device_to_host_validation(monkeypatch) -> None:
+    adapter = _require_adapter()
+    inputs = _inputs()
+    proof = adapter.make_pascal_gdn_metadata_proof(
+        inputs[6], inputs[7], (1, 2), (0, 1, 3)
+    )
+
+    def unexpected_sync(*_args, **_kwargs):
+        raise AssertionError("bound metadata must not be copied to the host")
+
+    monkeypatch.setattr(adapter, "_cpu_int_values", unexpected_sync)
+    launch = adapter.validate_pascal_gdn_inputs(*inputs, metadata_proof=proof)
+    assert launch.num_tokens == 3
+
+
+def test_metadata_proof_rejects_forgery_tensor_replacement_and_mutation() -> None:
+    adapter = _require_adapter()
+    inputs = _inputs()
+    proof = adapter.make_pascal_gdn_metadata_proof(
+        inputs[6], inputs[7], (1, 2), (0, 1, 3)
+    )
+
+    with pytest.raises(adapter.PascalGdnContractError, match="values were modified"):
+        replace(proof, slot_values=(2, 1))
+
+    replacement = inputs[6].clone()
+    with pytest.raises(adapter.PascalGdnContractError, match="stale or unbound"):
+        adapter.validate_pascal_gdn_inputs(
+            *inputs[:6], replacement, inputs[7], metadata_proof=proof
+        )
+
+    inputs[6][0] = 0
+    with pytest.raises(adapter.PascalGdnContractError, match="stale or unbound"):
+        adapter.validate_pascal_gdn_inputs(*inputs, metadata_proof=proof)
+
+
+@pytest.mark.parametrize(
+    ("slot_values", "offset_values", "message"),
+    [((4, 2), (0, 1, 3), "out-of-range"), ((1, 2), (0, 3, 2), "nondecreasing")],
+)
+def test_metadata_proof_retains_fail_closed_slot_and_offset_checks(
+    slot_values, offset_values, message
+) -> None:
+    adapter = _require_adapter()
+    inputs = _inputs()
+    proof = adapter.make_pascal_gdn_metadata_proof(
+        inputs[6], inputs[7], slot_values, offset_values
+    )
+    with pytest.raises(adapter.PascalGdnContractError, match=message):
+        adapter.validate_pascal_gdn_inputs(*inputs, metadata_proof=proof)
+
+
+def test_metadata_builder_distinguishes_cold_and_scheduler_proven_decode_paths() -> None:
+    req = Req(
+        input_ids=torch.tensor([1, 2], dtype=torch.int32),
+        table_idx=1,
+        cached_len=1,
+        output_len=2,
+        uid=0,
+        sampling_params=SamplingParams(),
+        cache_handle=None,
+    )
+    batch = Batch(reqs=[req], phase="decode")
+    batch.padded_reqs = [req]
+    batch.linear_table_idx = torch.tensor([1], dtype=torch.int32)
+
+    cold = build_fla_metadata(batch, torch.device("cpu"))
+    assert cold.pascal_metadata_proof is None
+
+    batch.linear_table_idx_host = (1,)
+    batch.linear_metadata_epoch = 7
+    proven = build_fla_metadata(batch, torch.device("cpu"))
+    assert proven.pascal_metadata_proof is not None
+    slots, offsets, initial = proven.pascal_metadata_proof.values_for(
+        proven.cache_indices, proven.cu_seqlens
+    )
+    assert slots == [1]
+    assert offsets == [0, 1]
+    assert initial is None
 
 
 @pytest.mark.parametrize(

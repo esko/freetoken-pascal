@@ -569,9 +569,23 @@ def _make_batch(
     batch.padded_reqs = [request]
     if phase == "decode":
         batch.linear_table_idx = torch.tensor([1], dtype=torch.int32, device=device)
+        # Mirror scheduler-owned eager metadata. A direct caller that omits this host tuple
+        # remains on the cold/unproven validation path and is covered by hosted tests.
+        batch.linear_table_idx_host = (1,)
     core._GLOBAL_CTX = context
     batch.fla_metadata = build_fla_metadata(batch, device)
     return batch
+
+
+def _metadata_validation_mode(batch: Any) -> str:
+    """Return the visible Pascal metadata validation mode for benchmark evidence."""
+
+    metadata = getattr(batch, "fla_metadata", None)
+    if metadata is None:
+        return "unbuilt"
+    if getattr(metadata, "pascal_metadata_proof", None) is not None:
+        return "scheduler-issued-proof"
+    return "synchronous-fallback"
 
 
 def _set_global_context(core: Any, context: Any) -> None:
@@ -1041,6 +1055,12 @@ def run_benchmark(
             "factory_or_auto_enabled": False,
             "default_path": "automatic GDN dispatch remains unchanged",
             "fallback_path": "torch-reference remains available",
+            "metadata_validation": {
+                "prefill_candidate": _metadata_validation_mode(prefill_batch_pascal),
+                "prefill_reference": _metadata_validation_mode(prefill_batch_reference),
+                "decode_candidate": _metadata_validation_mode(decode_batch_pascal),
+                "decode_reference": _metadata_validation_mode(decode_batch_reference),
+            },
         },
         "correctness": correctness,
         "timings": {"prefill": prefill_timing, "decode": decode_timing},

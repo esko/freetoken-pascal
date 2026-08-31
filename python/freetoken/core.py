@@ -121,6 +121,12 @@ class Batch:
     # decode to gather/scatter recurrent+conv state without host-side loops (so the
     # decode step is CUDA-graph capturable). Set by the scheduler / graph buffer.
     linear_table_idx: torch.Tensor | None = field(default=None, init=False)
+    # CPU-origin slot values used to issue a proof for eager Pascal GDN metadata. Graph and
+    # direct callers leave this unset, retaining the fully synchronous validation path.
+    linear_table_idx_host: Tuple[int, ...] | None = field(default=None, init=False)
+    # Monotonic scheduler-owned generation for the eager metadata tensors. It is not state-pool
+    # versioning and is intentionally absent from CUDA-graph metadata.
+    linear_metadata_epoch: int = field(default=0, init=False)
     # Per-forward GatedDeltaNet metadata (cu_seqlens / cache_indices / continuation
     # flags), built once and shared by all GDN layers. Lazily built by the GDN op if
     # the scheduler/graph didn't set it.

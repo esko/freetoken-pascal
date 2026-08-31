@@ -281,11 +281,20 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         li = pool.local_index(self.layer_id)
         state_len = pool.conv_states.shape[-1]
         weight = self._conv_weight().unsqueeze(1)
-        starts = fla.cu_seqlens.detach().cpu().tolist()
-        slots = fla.cache_indices.detach().cpu().tolist()
-        has_initial_state = (
-            None if fla.has_initial_state is None else fla.has_initial_state.detach().cpu().tolist()
-        )
+        proof = getattr(fla, "pascal_metadata_proof", None)
+        if proof is None:
+            starts = fla.cu_seqlens.detach().cpu().tolist()
+            slots = fla.cache_indices.detach().cpu().tolist()
+            has_initial_state = (
+                None
+                if fla.has_initial_state is None
+                else fla.has_initial_state.detach().cpu().tolist()
+            )
+        else:
+            slots, starts, proof_initial = proof.values_for(
+                fla.cache_indices, fla.cu_seqlens, fla.has_initial_state
+            )
+            has_initial_state = proof_initial
         result = torch.empty_like(conv_in)
         for index, slot in enumerate(slots):
             start, end = int(starts[index]), int(starts[index + 1])
@@ -502,8 +511,16 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         if observer is not None:
             observer("metadata_validation", "begin")
         try:
-            cache_indices = int32_metadata("cache_indices", fla.cache_indices)
-            cu_seqlens = int32_metadata("cu_seqlens", fla.cu_seqlens)
+            metadata_proof = getattr(fla, "pascal_metadata_proof", None)
+            if metadata_proof is None:
+                cache_indices = int32_metadata("cache_indices", fla.cache_indices)
+                cu_seqlens = int32_metadata("cu_seqlens", fla.cu_seqlens)
+            else:
+                # A scheduler-issued proof has already validated the host-origin values and binds
+                # them to these exact device tensors. Keep the tensors untouched so the kernel can
+                # validate identity/version without another synchronous device-to-host copy.
+                cache_indices = fla.cache_indices
+                cu_seqlens = fla.cu_seqlens
         finally:
             if observer is not None:
                 observer("metadata_validation", "end")
@@ -523,6 +540,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 state_source,
                 cache_indices,
                 cu_seqlens,
+                metadata_proof=metadata_proof,
             ).unsqueeze(0)
         finally:
             if observer is not None:

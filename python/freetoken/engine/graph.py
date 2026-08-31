@@ -52,7 +52,9 @@ class GraphCaptureBuffer:
         # Decode GDN metadata reads the persistent cu_seqlens (constant arange) and the
         # persistent table_idx slot map, so the captured kernels see stable addresses.
         batch.fla_metadata = FLAMetadata(
-            cu_seqlens=self.fla_cu_seqlens[: bs + 1], cache_indices=self.table_idx[_slice]
+            cu_seqlens=self.fla_cu_seqlens[: bs + 1],
+            cache_indices=self.table_idx[_slice],
+            pascal_metadata_proof=None,
         )
 
     def copy_from(self, batch: Batch) -> None:
