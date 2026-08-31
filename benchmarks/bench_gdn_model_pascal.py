@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded H2 A/B benchmark for the Qwen GDN model boundary on Pascal.
+"""Bounded H2 A/B benchmark for one Qwen GDN layer boundary on Pascal.
 
 The benchmark compares the explicit ``pascal-fp32`` model path with the explicit
 ``torch-reference`` path over the same BF16 Qwen3.8 geometry.  Each case includes
@@ -39,7 +39,7 @@ sys.path.insert(0, str(ROOT / "python"))
 MODEL_HEAD_DIM = 128
 MODEL_KEY_HEADS = 16
 MODEL_VALUE_HEADS = 48
-MODEL_HIDDEN_SIZE = 256
+MODEL_HIDDEN_SIZE = 2560
 MODEL_CONV_KERNEL = 4
 MODEL_RMS_EPS = 1e-6
 MODEL_LAYER_ID = 0
@@ -49,8 +49,10 @@ DEFAULT_REPEATS = 5
 MAX_WARMUPS = 8
 MAX_REPEATS = 16
 QUALIFICATION = "thermally-constrained-non-release"
-MODEL_RTOL = 3e-2
-MODEL_ATOL = 3e-2
+# Match the existing BF16 Qwen GDN model/reference gate. Recurrence-state parity remains much
+# tighter because it compares the FP32 state before the BF16 norm/output projection.
+MODEL_RTOL = 2e-2
+MODEL_ATOL = 2e-2
 STATE_RTOL = 3e-5
 STATE_ATOL = 3e-5
 
@@ -543,11 +545,13 @@ def _timed_call(torch: Any, device: Any, operation: Callable[[], Any]) -> tuple[
 
     torch.cuda.synchronize(device)
     start_host = time.perf_counter()
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    result = operation()
-    end_event.record()
+    with torch.cuda.device(device):
+        stream = torch.cuda.current_stream(device)
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record(stream)
+        result = operation()
+        end_event.record(stream)
     end_event.synchronize()
     torch.cuda.synchronize(device)
     host_wall_ms = (time.perf_counter() - start_host) * 1000.0
@@ -589,17 +593,34 @@ def _time_case(
 
     candidate_samples: list[dict[str, float]] = []
     reference_samples: list[dict[str, float]] = []
+    pair_order: list[str] = []
     for sample_index in range(config.repeats):
-        cuda_ms, wall_ms = invoke(pascal_context, pascal, pascal_batch, pascal_state)
-        candidate_samples.append(
-            {"index": sample_index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
-        )
-        cuda_ms, wall_ms = invoke(reference_context, reference, reference_batch, reference_state)
-        reference_samples.append(
-            {"index": sample_index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
-        )
+        order = "candidate-reference" if sample_index % 2 == 0 else "reference-candidate"
+        pair_order.append(order)
+
+        def record_candidate(index: int = sample_index) -> None:
+            cuda_ms, wall_ms = invoke(pascal_context, pascal, pascal_batch, pascal_state)
+            candidate_samples.append(
+                {"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
+            )
+
+        def record_reference(index: int = sample_index) -> None:
+            cuda_ms, wall_ms = invoke(
+                reference_context, reference, reference_batch, reference_state
+            )
+            reference_samples.append(
+                {"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
+            )
+
+        if sample_index % 2 == 0:
+            record_candidate()
+            record_reference()
+        else:
+            record_reference()
+            record_candidate()
     return {
         "case": case,
+        "pair_order": pair_order,
         "candidate": candidate_samples,
         "reference": reference_samples,
         "statistics": {
@@ -787,11 +808,11 @@ def run_benchmark(
         "correctness": correctness,
         "timings": {"prefill": prefill_timing, "decode": decode_timing},
         "timing_scope": (
-            "CUDA-event interval covers the production model forward on the current stream, "
-            "including projection, reference convolution, gate, recurrence, norm, and output "
-            "projection; host wall time starts after a device synchronize and ends after event "
-            "and device synchronization, so it includes Python dispatch and Pascal metadata "
-            "validation but excludes input/state reset and batch construction."
+            "Single-layer model boundary. The device-scoped CUDA-event interval includes GPU "
+            "work plus stream-idle time caused by synchronous validation/dispatch; host wall "
+            "time also includes Python dispatch. Both exclude input/state reset and batch "
+            "construction and include projection, reference convolution, gate, recurrence, "
+            "norm, and output projection."
         ),
         "metadata": {
             "commit": _git_commit(),

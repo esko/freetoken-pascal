@@ -60,13 +60,14 @@ docker run --rm --gpus device=0 \
       --tokens 1 --warmups 2 --repeats 5 --output results/hardware/gdn-pascal-t1.json'
 ```
 
-**`bench_gdn_model_pascal.py`** — bounded model-boundary H2 A/B timing for the same explicit
-Pascal and Torch-reference implementations. It covers the real Qwen4ExpGatedDeltaNet BF16
+**`bench_gdn_model_pascal.py`** — bounded single-layer model-boundary H2 A/B timing for the same
+explicit Pascal and Torch-reference implementations. It covers the real Qwen4ExpGatedDeltaNet BF16
 projection, causal convolution, gate, recurrence, gated norm, and output projection for both
 prefill and one-token decode, with nonzero carried state and correctness checked first. The
-fixed Qwen3.8 geometry is `D=128/HK=16/HV=48`; it is explicit-only, thermally constrained,
-and not release evidence. The host wall clock includes Python dispatch and synchronous Pascal
-metadata validation; CUDA-event timing reports the device-stream interval. Keep the run short,
+fixed Qwen3.8 geometry is `hidden=2560/D=128/HK=16/HV=48`; it is explicit-only, thermally constrained,
+and not a complete-model or release benchmark. The host wall clock includes Python dispatch and
+synchronous Pascal metadata validation; device-scoped CUDA events include device work plus any
+stream idle caused by that synchronous dispatch. Paired sample order alternates. Keep the run short,
 and capture `nvidia-smi` telemetry separately:
 
 ```bash

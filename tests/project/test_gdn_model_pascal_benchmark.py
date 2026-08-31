@@ -21,7 +21,7 @@ SPEC.loader.exec_module(BENCHMARK)
 
 def _geometry() -> dict[str, object]:
     return {
-        "hidden_size": 256,
+        "hidden_size": 2560,
         "head_dim": 128,
         "key_heads": 16,
         "value_heads": 48,
@@ -63,6 +63,7 @@ def test_parser_defaults_are_bounded_and_qwen_geometry_is_fixed() -> None:
         )
     )
     assert BENCHMARK.MODEL_HEAD_DIM == 128
+    assert BENCHMARK.MODEL_HIDDEN_SIZE == 2560
     assert BENCHMARK.MODEL_KEY_HEADS == 16
     assert BENCHMARK.MODEL_VALUE_HEADS == 48
 
