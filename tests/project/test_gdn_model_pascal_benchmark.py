@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from freetoken.distributed import set_tp_info
 from freetoken.models.qwen4_exp.gdn import Qwen4ExpGatedDeltaNet
 from freetoken.utils import torch_dtype
 
@@ -211,7 +210,7 @@ def test_phase_recorder_requires_begin_before_end_without_cuda() -> None:
 
 
 def test_model_phase_observer_accepts_callable_and_rejects_noncallable() -> None:
-    set_tp_info(rank=0, size=1)
+    BENCHMARK._ensure_tp1()
 
     def observer(*_events) -> None:
         pass

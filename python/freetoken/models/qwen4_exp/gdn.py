@@ -223,7 +223,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         )
 
     def _gate_params(self, a: torch.Tensor, b: torch.Tensor):
-        observer = self._gdn_phase_observer
+        observer = getattr(self, "_gdn_phase_observer", None)
         if observer is not None:
             observer("gate", "begin")
         try:
@@ -419,7 +419,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
     def _validate_pascal_metadata(self, fla) -> None:
         """Reject scheduler checkpoint metadata the standalone recurrence cannot preserve."""
 
-        observer = self._gdn_phase_observer
+        observer = getattr(self, "_gdn_phase_observer", None)
         if observer is not None:
             observer("metadata_validation", "begin")
         try:
@@ -484,7 +484,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                     raise GdnDispatchError(f"pascal-fp32 {name} exceeds the int32 ABI range")
             return tensor.to(dtype=torch.int32).contiguous()
 
-        observer = self._gdn_phase_observer
+        observer = getattr(self, "_gdn_phase_observer", None)
         if observer is not None:
             observer("metadata_validation", "begin")
         try:
@@ -576,7 +576,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         if decision.selected_implementation == "pascal-fp32":
             self._validate_pascal_metadata(fla)
 
-        observer = self._gdn_phase_observer
+        observer = getattr(self, "_gdn_phase_observer", None)
         if observer is not None:
             observer("projection", "begin")
         try:
