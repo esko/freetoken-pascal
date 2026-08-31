@@ -440,6 +440,11 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         def flat(tensor: torch.Tensor) -> torch.Tensor:
             return tensor[0].to(dtype=torch.float32).contiguous()
 
+        # Scheduler metadata is commonly int64, while the standalone CUDA ABI is explicitly
+        # int32. Runtime request/token bounds are already below int32; make the eager staging
+        # conversion visible here instead of weakening the kernel contract.
+        cache_indices = fla.cache_indices.to(dtype=torch.int32).contiguous()
+        cu_seqlens = fla.cu_seqlens.to(dtype=torch.int32).contiguous()
         return pascal_gdn_recurrence(
             flat(q),
             flat(k),
@@ -447,8 +452,8 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             flat(g),
             flat(beta),
             state_source,
-            fla.cache_indices,
-            fla.cu_seqlens,
+            cache_indices,
+            cu_seqlens,
         ).unsqueeze(0)
 
     def forward(
