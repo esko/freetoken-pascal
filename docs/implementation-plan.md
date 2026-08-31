@@ -81,10 +81,11 @@ The H0 `QwenGGUFCpuMoELayer` is an explicit CPU-only adapter around that bundle.
 The H0 model-graph bridge transactionally replaces routed experts only for construction, lifecycle and correctness tests. The bundle remains caller-owned. This foundation does not make the CUDA-oriented trunk, router, shared expert, or LM head CPU-runnable and does not remove the Engine guard.
 
 An initialized Engine may explicitly borrow the same bundle through
-`Engine.attach_qwen_gguf_cpu_expert_bundle()` after its model is available, provided the
-registration is TP1, cache-free, and one-request. The Engine detaches its owned bridge
-wrappers during cleanup while the caller closes the bundle. Startup, CLI defaults, GGUF
-opening, prefill, serving and the homogeneous-cache guard remain unchanged.
+`Engine.attach_qwen_gguf_cpu_expert_bundle()` and its matching detach method after its
+model is available, provided the registration is TP1, cache-free, decode-only,
+graph-free, and one-request. The Engine detaches its owned bridge wrappers during
+cleanup while the caller closes the bundle. Startup, CLI defaults, GGUF opening,
+prefill, graphs, serving and the homogeneous-cache guard remain unchanged.
 
 The standalone `GGUFCpuEagerBridge` is an explicit experimental H0/H1 wrapper around the CPU layer. It rejects prefill, grouped requests, graph capture and caller workspaces before transfer. CPU inputs use the adapter directly; non-CPU inputs use an injected blocking transfer seam, execute the adapter once, and copy the independent routed result back. It makes no stream, pinned-memory, overlap or performance claim. Real CUDA transfer behavior is H2-unverified.
 

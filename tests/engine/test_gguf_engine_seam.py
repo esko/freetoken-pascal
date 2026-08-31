@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+
 import pytest
 
 
@@ -15,7 +16,7 @@ def _config(**overrides):
     values = {
         "model_path": "/models/qwen38.gguf",
         "model_config": model_config,
-        "moe_backend": "gguf_cpu",
+        "moe_backend": "cpu",
         "moe_cache_size": 0,
         "moe_cache_auto": False,
         "moe_cache_rate": None,
@@ -32,8 +33,15 @@ def _config(**overrides):
 class _Bundle:
     effective_num_threads = 1
 
+    def __init__(self):
+        self.close_calls = 0
+
     def host_weight_telemetry(self):
         return {"source": "synthetic"}
+
+    def close(self):
+        self.close_calls += 1
+
 
 class _Model:
     def __init__(self):
@@ -64,6 +72,30 @@ def test_engine_attaches_borrowed_bundle_without_homogeneous_cache():
     engine.attach_qwen_gguf_cpu_expert_bundle(bundle)
     assert engine._gguf_cpu_expert_bundle is bundle
     assert engine.model.attached == [bundle]
+    with pytest.raises(RuntimeError, match="already attached"):
+        engine.attach_qwen_gguf_cpu_expert_bundle(_Bundle())
+    assert engine.model.attached == [bundle]
+
+
+def test_engine_detach_is_explicit_and_never_closes_borrowed_bundle():
+    from freetoken.engine.engine import Engine
+
+    engine = Engine.__new__(Engine)
+    engine.model = _Model()
+    engine.moe_offload_cache = None
+    engine.config = _config()
+    bundle = _Bundle()
+
+    engine.attach_qwen_gguf_cpu_expert_bundle(bundle)
+    engine.detach_qwen_gguf_cpu_expert_bundle()
+
+    assert engine.model.detached == 1
+    assert engine._gguf_cpu_expert_bundle is None
+    assert bundle.close_calls == 0
+
+    # The public lifecycle seam is idempotent after the Engine-owned wrappers are gone.
+    engine.detach_qwen_gguf_cpu_expert_bundle()
+    assert engine.model.detached == 1
 
 
 @pytest.mark.parametrize(
@@ -103,6 +135,48 @@ def test_engine_cleanup_detaches_before_closing_owned_bundle():
 
     assert engine.model.detached == 1
     assert engine._gguf_cpu_expert_bundle is None
+    assert bundle.close_calls == 0
+
+
+def test_engine_cleanup_keeps_tracking_when_detach_fails():
+    from freetoken.engine.engine import Engine
+
+    class FailingModel(_Model):
+        def detach_gguf_cpu_expert_bundle(self):
+            raise RuntimeError("bridge is busy")
+
+    engine = Engine.__new__(Engine)
+    engine.model = FailingModel()
+    bundle = _Bundle()
+    engine._gguf_cpu_expert_bundle = bundle
+    engine.moe_offload_cache = None
+    engine.cpu_moe_executor = None
+    engine._expert_banks = None
+    engine._model_host_resources_closed = True
+
+    engine._cleanup_host_bank_resources()
+
+    assert engine._gguf_cpu_expert_bundle is bundle
+    assert bundle.close_calls == 0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"prefill": True},
+        {"grouped": True},
+        {"cuda_graph_bs": [1]},
+        {"cuda_graph_max_bs": 1},
+    ],
+)
+def test_engine_rejects_non_decode_or_graph_configuration(changes):
+    from freetoken.engine.engine import Engine
+
+    engine = Engine.__new__(Engine)
+    engine.model = _Model()
+    engine.config = _config(**changes)
+    with pytest.raises(ValueError, match=r"decode-only|grouped|graph"):
+        engine.attach_qwen_gguf_cpu_expert_bundle(_Bundle())
 
 
 def test_engine_telemetry_exposes_attached_gguf_cpu_layers():
