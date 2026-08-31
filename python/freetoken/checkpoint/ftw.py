@@ -119,9 +119,10 @@ def _validate_ftw_index(path: str, index, *, strict_storage: bool) -> int | None
 
     ``strict_storage`` is false only for the legacy metadata-only policy probe.  A
     non-empty shard list is still checked against the files in that probe; the relaxed
-    mode only permits the historical empty-shard metadata fixture.  The reader and
-    loader always use strict validation, so they never allocate from an index whose
-    shard geometry has not also been checked.
+    mode also permits the historical empty-shard metadata fixture without storage
+    totals.  Strict mode accepts only a canonical zero-length bundle with empty shards,
+    or a fully described shard geometry.  The reader and loader never allocate from an
+    index whose shard geometry has not also been checked.
     """
     if not isinstance(index, dict):
         raise ValueError(f"FTW index must be an object: {path}")
