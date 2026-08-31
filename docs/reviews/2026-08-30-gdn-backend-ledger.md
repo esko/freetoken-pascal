@@ -12,8 +12,10 @@ activation dtype, and explicit package probes. `auto` selects the eligible in-tr
 for supported modern-GPU inputs; `sm_61`, unsupported dtypes, and unavailable FLA select the
 observable `torch-reference` fallback. The `triton-candidate` path is explicit-only and remains
 gated until its donor audit and H1/H2 parity evidence are complete. The standalone `pascal-fp32`
-path is explicit-only, restricted to `sm_61` + FP32, and requires a positive qualification gate;
-it is never selected by `auto`, and the model forward remains fail-closed pending H2 integration.
+path is explicit-only, restricted to `sm_61`, and requires a positive qualification gate;
+it is never selected by `auto`. The H2 model boundary stages BF16/FP16 activations to FP32 for
+the recurrence only and retains reference projection, convolution, gating, normalization and
+output projection.
 The mode and package
 availability probes are frozen when the GDN object is constructed; a process-environment mutation
 cannot switch a live request between backends.
@@ -83,10 +85,14 @@ The standalone recurrence was source-JIT compiled with CUDA 12.6 and
 The H2 fixture covers D64/D128, GQA ratios one and two, nonzero initial state, ragged disjoint
 slots, untouched-slot isolation, chunk-versus-tokenwise decode, and checkpoint/restore suffix
 replay against `gdn_reference.recurrent_gated_delta_rule` at `rtol=3e-5, atol=3e-5`.
-Both physical cards passed five cases. The bounded runs peaked at 43 degrees C and approximately
+Both physical cards passed the bounded suite, including the artifact's D128/HK16/HV48 geometry.
+The ECC-on runs peaked at 43 degrees C and approximately
 24 W on GPU 0 and 42 degrees C and approximately 24 W on GPU 1; clocks remained intentionally
 constrained and these observations are not performance or sustained thermal qualification.
 
-This evidence qualifies the standalone kernel as a correctness candidate only. Automatic dispatch,
-full-model integration, FLA/Pascal state interchange, kernel-only and end-to-end A/B measurement,
-and any fused projection/convolution/recurrence path remain open under issue #93.
+PR #114 added bounded kernel-only observations and PR #115 repaired the BF16 reference fallback.
+The subsequent ECC-off model-boundary run passed ragged prefill, carried-state decode, output and
+recurrent/conv-state parity, telemetry, and untouched-slot isolation at the real Qwen geometry.
+The model seam remains explicit, eager-only and unavailable from the factory. Automatic dispatch,
+FLA/Pascal state interchange, tracking/checkpoint snapshots, end-to-end model A/B measurement and
+any fused projection/convolution/recurrence path remain open under issue #93.

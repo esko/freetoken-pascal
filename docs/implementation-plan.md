@@ -31,7 +31,7 @@ A clean clone passes hosted CI and compiles the reconciled source set for `sm_61
 
 - preserve/reapply FreeToken Pascal and CUDA 12.6 work on the reconciled upstream base;
 - validate merged upstream Qwen3.8/Qwen4 text architecture against downstream and independent references;
-- retain the merged issue #93 H0/H1 GDN backend decision, permanent reference/fallback contract, standalone CUDA 12.6 `sm_61` compile seam, ragged/concurrent isolation and donor provenance; `pascal-fp32` is explicit-only with visible fallback/rejection, and its H2 one-P4 parity and end-to-end qualification remains deferred;
+- retain the merged issue #93 H0/H1 GDN backend decision, permanent reference/fallback contract, standalone CUDA 12.6 `sm_61` compile seam, ragged/concurrent isolation and donor provenance; bounded H2 standalone and explicit model-boundary parity pass on the installed P4s, while `pascal-fp32` remains eager-only, factory-disabled and pending end-to-end qualification;
 - integrate downstream GGUF K/I loading without duplicating upstream model semantics;
 - support heterogeneous expert-bank types needed by target artifacts;
 - implement the dedicated, separately sharded PLE file as a core NVMe-backed path; NVMe PLE bytes remain a separate ownership boundary, independently observable and pageable, and are never generalized into routed-expert swap or generic expert execution;
@@ -47,7 +47,7 @@ A tiny Qwen4 model passes CPU/reference tests on the completed #77/#81 reconcili
 
 ### Deferred H2/H3 gate
 
-After P4 installation, one-P4 GDN parity/end-to-end qualification, PLE I/O behavior, and safe cache-disabled decode must pass on hardware. The optimized `pascal-fp32` GDN path is explicit-only and remains disabled unless that evidence passes.
+After P4 installation, one-P4 GDN end-to-end qualification, PLE I/O behavior, and safe cache-disabled decode must pass on hardware. Standalone and explicit model-boundary GDN parity now pass, but the optimized `pascal-fp32` path remains factory-disabled until same-workload end-to-end evidence improves performance outside noise.
 
 ## Phase 2 — AVX2 host expert backend and model profiles
 

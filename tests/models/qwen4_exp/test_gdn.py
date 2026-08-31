@@ -44,7 +44,15 @@ def _state_dict(ref) -> dict[str, torch.Tensor]:
     }
 
 
-def _make_layer(ratio: int, output_gate: str = "sigmoid", seed: int = 0):
+def _make_layer(
+    ratio: int,
+    output_gate: str = "sigmoid",
+    seed: int = 0,
+    *,
+    gdn_mode: str | None = None,
+    gdn_pascal_available: bool = False,
+    gdn_observer=None,
+):
     """fp32 reference + bf16 kernel op over one set of weights. The op is built on meta under
     the serving dtype, the way the engine builds a model, so load_state_dict's dtype check bites."""
     num_k, num_v = HEADS[ratio]
@@ -54,7 +62,7 @@ def _make_layer(ratio: int, output_gate: str = "sigmoid", seed: int = 0):
         head_v_dim=HEAD_DIM, conv_kernel_size=CONV_K, rms_norm_eps=EPS, output_gate=output_gate,
     ).to(DEV).float().eval()
     with torch.no_grad():
-        # HF inits A_log = log(U(0.01, 16)); a zero dt_bias or a unit gate norm would hide sign errors.
+        # HF inits A_log = log(U(0.01, 16)); nonzero dt/gate values expose sign errors.
         ref.A_log.uniform_(0.01, 16.0).log_()
         ref.dt_bias.uniform_(-1.0, 1.0)
         ref.norm.weight.normal_(1.0, 0.1)
@@ -63,6 +71,9 @@ def _make_layer(ratio: int, output_gate: str = "sigmoid", seed: int = 0):
             hidden_size=HIDDEN, num_k_heads=num_k, num_v_heads=num_v, head_k_dim=HEAD_DIM,
             head_v_dim=HEAD_DIM, conv_kernel_size=CONV_K, rms_norm_eps=EPS, layer_id=0,
             output_gate=output_gate,
+            gdn_mode=gdn_mode,
+            gdn_pascal_available=gdn_pascal_available,
+            gdn_observer=gdn_observer,
         )
     op.load_state_dict(_state_dict(ref))
     return op, ref
@@ -174,3 +185,109 @@ def test_output_gate_comes_from_the_config():
     torch.testing.assert_close(out_sig.float(), _ref_out(ref_sig, hidden[0]), rtol=RTOL, atol=ATOL)
 
     assert (out_sig.float() - out_silu.float()).abs().max().item() > 10 * ATOL
+
+
+def test_explicit_pascal_model_path_matches_reference_for_qwen_geometry():
+    """Exercise the real model seam on a P4: reference stages plus Pascal recurrence.
+
+    This remains an explicit H2 test.  It does not enable factory/auto dispatch, and it checks
+    the carried recurrent state as well as the model output for the Qwen3.8 artifact geometry.
+    """
+    if torch.cuda.get_device_capability() != (6, 1):
+        pytest.skip("explicit Pascal model integration test requires a Tesla P4 (sm_61)")
+
+    observed = []
+    pascal, _ = _make_layer(
+        3,
+        seed=31,
+        gdn_mode="pascal-fp32",
+        gdn_pascal_available=True,
+        gdn_observer=observed.append,
+    )
+    reference, _ = _make_layer(3, seed=31, gdn_mode="reference")
+    ctx_pascal = _ctx(3, num_slots=8)
+    ctx_reference = _ctx(3, num_slots=8)
+    assert ctx_pascal.linear_state_pool.recurrent_states.dtype == torch.float32
+    assert ctx_reference.linear_state_pool.recurrent_states.dtype == torch.float32
+    # Non-request slots carry sentinels so accidental flattening or broad writes are visible.
+    for ctx in (ctx_pascal, ctx_reference):
+        ctx.linear_state_pool.recurrent_states[0, 0].fill_(0.125)
+        ctx.linear_state_pool.recurrent_states[0, 7].fill_(-0.25)
+
+    torch.manual_seed(41)
+    lengths = [37, 11]
+    hidden = [torch.randn(n, HIDDEN, device=DEV, dtype=torch.bfloat16) for n in lengths]
+    reqs = [
+        Req(
+            input_ids=torch.zeros(n, dtype=torch.int32),
+            table_idx=slot,
+            cached_len=0,
+            output_len=2,
+            uid=i,
+            sampling_params=SamplingParams(),
+            cache_handle=None,
+        )
+        for i, (n, slot) in enumerate(zip(lengths, (3, 5), strict=True))
+    ]
+
+    def run_prefill(op, ctx):
+        import freetoken.core as core
+
+        core._GLOBAL_CTX = ctx
+        batch = Batch(reqs=reqs, phase="prefill")
+        batch.padded_reqs = reqs
+        with ctx.forward_batch(batch):
+            return op.forward(torch.cat(hidden, dim=0))
+
+    out_pascal = run_prefill(pascal, ctx_pascal)
+    out_reference = run_prefill(reference, ctx_reference)
+    assert out_pascal.dtype == torch.bfloat16
+    torch.testing.assert_close(out_pascal.float(), out_reference.float(), rtol=RTOL, atol=ATOL)
+    torch.testing.assert_close(
+        ctx_pascal.linear_state_pool.recurrent_states,
+        ctx_reference.linear_state_pool.recurrent_states,
+        rtol=3e-5,
+        atol=3e-5,
+    )
+    torch.testing.assert_close(
+        ctx_pascal.linear_state_pool.conv_states,
+        ctx_reference.linear_state_pool.conv_states,
+        rtol=0,
+        atol=0,
+    )
+    untouched = torch.full((48, HEAD_DIM, HEAD_DIM), 0.125, device=DEV)
+    torch.testing.assert_close(ctx_pascal.linear_state_pool.recurrent_states[0, 0], untouched)
+    untouched.fill_(-0.25)
+    torch.testing.assert_close(ctx_pascal.linear_state_pool.recurrent_states[0, 7], untouched)
+    assert observed and all(item.selected_implementation == "pascal-fp32" for item in observed)
+
+    nxt = torch.randn(2, HIDDEN, device=DEV, dtype=torch.bfloat16)
+
+    def run_decode(op, ctx):
+        import freetoken.core as core
+
+        core._GLOBAL_CTX = ctx
+        batch = Batch(reqs=reqs, phase="decode")
+        batch.padded_reqs = reqs
+        batch.linear_table_idx = torch.tensor([3, 5], dtype=torch.int32, device=DEV)
+        with ctx.forward_batch(batch):
+            return op.forward(nxt)
+
+    decode_pascal = run_decode(pascal, ctx_pascal)
+    decode_reference = run_decode(reference, ctx_reference)
+    assert decode_pascal.dtype == torch.bfloat16
+    torch.testing.assert_close(
+        decode_pascal.float(), decode_reference.float(), rtol=RTOL, atol=ATOL
+    )
+    torch.testing.assert_close(
+        ctx_pascal.linear_state_pool.recurrent_states,
+        ctx_reference.linear_state_pool.recurrent_states,
+        rtol=3e-5,
+        atol=3e-5,
+    )
+    torch.testing.assert_close(
+        ctx_pascal.linear_state_pool.conv_states,
+        ctx_reference.linear_state_pool.conv_states,
+        rtol=0,
+        atol=0,
+    )

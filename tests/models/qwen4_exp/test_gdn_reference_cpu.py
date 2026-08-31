@@ -406,3 +406,52 @@ def test_ragged_requests_update_only_their_noncontiguous_slots():
         offset += length
     for untouched in {1, 3}:
         torch.testing.assert_close(pool.recurrent_states[0, untouched], before[0, untouched])
+
+
+def test_pascal_path_rejects_checkpoint_tracking_metadata():
+    op = _op(num_k_heads=1, num_v_heads=1, head_dim=2, conv_dim=1, kernel=2)
+    with pytest.raises(RuntimeError, match="tracking/checkpoint-boundary"):
+        op._validate_pascal_metadata(
+            SimpleNamespace(
+                track_dst=torch.tensor([1]),
+                track_h_row=None,
+                track_conv_src=None,
+                track_boundary_row=None,
+            )
+        )
+
+
+def test_pascal_path_rejects_graph_capture_and_non_fp32_state():
+    op = _op(num_k_heads=1, num_v_heads=1, head_dim=2, conv_dim=1, kernel=2)
+    assert op._pascal_capture_active(SimpleNamespace(graph_capture=True)) is True
+
+    fla = _fla([1], [0])
+    q = torch.zeros(1, 1, 1, 2)
+    with pytest.raises(RuntimeError, match="FP32 recurrent state pool"):
+        op._pascal_recurrent(
+            q,
+            q,
+            torch.zeros(1, 1, 1, 2),
+            torch.zeros(1, 1, 1),
+            torch.zeros(1, 1, 1),
+            torch.zeros(1, 1, 2, 2, dtype=torch.bfloat16),
+            fla,
+        )
+
+
+def test_pascal_path_rejects_scheduler_metadata_outside_int32_before_cast():
+    op = _op(num_k_heads=1, num_v_heads=1, head_dim=2, conv_dim=1, kernel=2)
+    fla = _fla([1], [0])
+    fla.cache_indices = torch.tensor([1 << 31], dtype=torch.int64)
+    q = torch.zeros(1, 1, 1, 2)
+
+    with pytest.raises(RuntimeError, match="cache_indices exceeds the int32 ABI range"):
+        op._pascal_recurrent(
+            q,
+            q,
+            torch.zeros(1, 1, 1, 2),
+            torch.zeros(1, 1, 1),
+            torch.zeros(1, 1, 1),
+            torch.zeros(1, 1, 2, 2, dtype=torch.float32),
+            fla,
+        )

@@ -142,16 +142,20 @@ def test_pascal_backend_is_explicit_and_requires_positive_qualification_gate() -
     decision = resolve_gdn_dispatch(
         requested_mode="pascal-fp32",
         capability=(6, 1),
-        dtype="float32",
+        dtype="bfloat16",
         pascal_fp32_available=True,
     )
     assert decision.selected_implementation == "pascal-fp32"
+    assert decision.dtype == "bfloat16"
     assert decision.fallback_reason is None
 
 
 @pytest.mark.parametrize(
     ("capability", "dtype", "message"),
-    [((7, 0), "float32", "requires sm_61"), ((6, 1), "bfloat16", "requires float32")],
+    [
+        ((7, 0), "float32", "requires sm_61"),
+        ((6, 1), "float64", "requires bfloat16, float16, or float32"),
+    ],
 )
 def test_pascal_backend_rejects_unqualified_inputs(capability, dtype, message) -> None:
     with pytest.raises(GdnDispatchError, match=message):

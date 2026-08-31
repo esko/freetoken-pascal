@@ -25,15 +25,17 @@ availability probes are frozen for the lifetime of the GDN object. `auto` select
 in-tree FLA implementation only on supported modern-GPU inputs; `sm_61`, unsupported dtypes, or
 unavailable packages select the stateful `torch-reference` fallback and expose the reason through
 the debug observer. `triton-candidate` is explicit-only and fails closed until its donor and H1/H2
-parity gates are complete. `pascal-fp32` is a standalone explicit-only H1 bring-up seam for
-`sm_61` and FP32 tensors; it is never selected by `auto`, requires a positive qualification gate,
-and the model forward rejects it until H2 runtime integration is qualified. The immutable decision
+parity gates are complete. `pascal-fp32` is an explicit-only `sm_61` recurrence seam; it is never
+selected by `auto` and requires a positive qualification gate. Its H2 model boundary stages
+BF16/FP16 recurrence inputs to FP32 while retaining the reference projection, convolution, gate,
+normalization and output-projection stages. It remains eager-only and rejects graph capture,
+non-FP32 recurrent pools and unsupported tracking/checkpoint snapshots. The immutable decision
 contract is Torch-free so this policy is testable in H0. The standalone adapter preserves the
 pool's `[slots, value_heads, K, V]` layout, consumes pre-sigmoided beta, and addresses ragged
 requests with unique slot IDs and `cu_seqlens`. The FLA recurrent-state view is [V,K] while the
 pool view is [K,V]; equal dimensions only make these views shape-compatible, so axis-order and
 nonzero-state parity remain H2 work. Backend switching and checkpoint parity are not claimed by
-H0.
+H0, and factory activation remains disabled.
 
 QSA retains full-resolution K/V and stores one compressed index key per configured token group.
 Before the token budget is reached, selection is dense-equivalent. Beyond it, the indexer selects
