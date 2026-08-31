@@ -152,6 +152,10 @@ The backing mappings are private and exposed read-only, remain unpinned, and ret
 original artifact as their source of truth.
 
 The Issue #18 host-bank policy provides an explicit pre-load gate for FTW checkpoints.
+Independently of policy selection, the FTW loader validates the exact index snapshot parsed by `FTWReader`: metadata uses exact integers (booleans excluded), tensor shapes and byte counts are positive and consistent, and shard ranges are aligned, contiguous, present, size-checked, and covering every tensor before constructing any `HostBank`.
+It rejects duplicate or mixed alpha/flat/per-layer bank identities before allocation; an unsuccessful acquisition clears derived tensor views, closes the reader/progress bar, and rolls back every owned bank, including the legacy no-policy path.
+The outer `load_expert_banks` policy probe may parse metadata snapshot A before `load_ftw_banks` reopens the index; snapshot B parsed and validated by `FTWReader` is authoritative for the allocation and policy plan.
+This does not claim that the index or shard bytes are immutable between those reads; immutable checkpoint artifacts remain an operational assumption.
 Its omitted CLI/config value remains `None` and preserves legacy loader behavior, while an explicit `pageable` strategy leaves every source mapping in page-backed host memory and cannot consume the CUDA pin quota.
 The explicit `pinned` strategy registers only its selected layers after fill and rejects a page-rounded source size above `max_pinned_bytes` before FTW reads or allocation.
 The explicit `bounded-staging` strategy keeps all sources pageable and allocates a fixed `HostStagingRing` only within `max_staging_bytes`.

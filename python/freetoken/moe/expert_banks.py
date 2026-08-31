@@ -484,13 +484,15 @@ def load_expert_banks(
             )
         # Metadata-only preflight is deliberately at this boundary so callers can prove no
         # provider, shard read, or HostBank allocation happened before the budget decision.
+        # It may parse index snapshot A; load_ftw_banks reopens and validates snapshot B,
+        # whose exact contents are authoritative for the allocation and policy plan.
         prepare_ftw_host_bank_policy(
             model_path,
             num_layers=model_config.num_moe_layers,
             policy=host_bank_policy,
         )
-        # The policy preflight above is the one admission snapshot for this
-        # load. Thread it into the FTW loader so it does not re-read procfs.
+        # Thread only the point-in-time swap observation into the FTW loader; it
+        # must not reuse snapshot A as a substitute for snapshot B.
         if host_bank_policy.require_no_swap:
             ftw_swap_probe = host_bank_policy.swap_probe
             assert ftw_swap_probe is not None

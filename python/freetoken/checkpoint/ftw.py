@@ -37,6 +37,7 @@ import math
 import mmap
 import os
 import re
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -101,28 +102,197 @@ def _elsize(dt: torch.dtype) -> int:
     return torch.empty((), dtype=dt).element_size()
 
 
+def _index_int(index: dict, key: str, *, minimum: int | None = None) -> int | None:
+    """Read an optional FTW integer without accepting JSON booleans."""
+    value = index.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"FTW index has invalid {key}: expected an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"FTW index has invalid {key}: must be >= {minimum}")
+    return value
+
+
+def _validate_ftw_index(path: str, index, *, strict_storage: bool) -> int | None:
+    """Validate one parsed FTW index snapshot and return its logical byte length.
+
+    ``strict_storage`` is false only for the legacy metadata-only policy probe.  A
+    non-empty shard list is still checked against the files in that probe; the relaxed
+    mode also permits the historical empty-shard metadata fixture without storage
+    totals.  Strict mode accepts only a canonical zero-length bundle with empty shards,
+    or a fully described shard geometry.  The reader and loader never allocate from an
+    index whose shard geometry has not also been checked.
+    """
+    if not isinstance(index, dict):
+        raise ValueError(f"FTW index must be an object: {path}")
+    if index.get("format") != FORMAT_TAG:
+        raise ValueError(f"not a {FORMAT_TAG}: {path}")
+    version = _index_int(index, "version", minimum=0)
+    if strict_storage and version is None:
+        raise ValueError("FTW index must contain version")
+    if version is not None and version != FORMAT_VERSION:
+        raise ValueError(f"unsupported FTW index version {version}; expected {FORMAT_VERSION}")
+    align = _index_int(index, "align", minimum=1)
+    if strict_storage and align is None:
+        raise ValueError("FTW index must contain align")
+    if align is not None and align != ALIGN:
+        raise ValueError(f"unsupported FTW alignment {align}; expected {ALIGN}")
+    shard_limit = _index_int(index, "shard_limit", minimum=1)
+    if strict_storage and shard_limit is None:
+        raise ValueError("FTW index must contain shard_limit")
+    if shard_limit is not None and shard_limit % ALIGN:
+        raise ValueError(f"FTW shard_limit must be a positive {ALIGN}-byte multiple")
+    total_bytes = _index_int(index, "total_bytes", minimum=0)
+    _index_int(index, "expert_bank_num_layers", minimum=1)
+
+    shards = index.get("shards")
+    if shards is None:
+        raise ValueError("FTW index must contain a shard list")
+    else:
+        if not isinstance(shards, list):
+            raise ValueError("FTW index shards must be a list")
+        if any(not isinstance(shard, dict) for shard in shards):
+            raise ValueError("FTW shard entries must be objects")
+        validated_shards = []
+        files: set[str] = set()
+        for shard in shards:
+            file = shard.get("file")
+            global_off = _index_int(shard, "global_off", minimum=0)
+            nbytes = _index_int(shard, "nbytes", minimum=1)
+            if not isinstance(file, str) or not file or file != os.path.basename(file):
+                raise ValueError("FTW shard file must be a canonical basename")
+            if global_off is None or nbytes is None:
+                raise ValueError("FTW shard entries require global_off and nbytes")
+            if file in (".", ".."):
+                raise ValueError("FTW shard file must name a regular file")
+            if file in files:
+                raise ValueError(f"FTW shard file {file!r} is duplicated")
+            files.add(file)
+            if global_off % ALIGN:
+                raise ValueError(f"FTW shard {file!r} has an unaligned global_off")
+            if nbytes % ALIGN:
+                raise ValueError(f"FTW shard {file!r} has an unaligned nbytes")
+            if shard_limit is not None and nbytes > shard_limit:
+                raise ValueError(f"FTW shard {file!r} exceeds shard_limit")
+            validated_shards.append((global_off, nbytes, file))
+        logical_end = 0
+        for global_off, nbytes, file in sorted(validated_shards):
+            if global_off != logical_end:
+                raise ValueError(
+                    "FTW shards must form one contiguous logical range; a gap or overlap "
+                    "was found"
+                )
+            try:
+                physical_bytes = os.stat(os.path.join(path, file)).st_size
+            except OSError as exc:
+                raise ValueError(f"FTW shard {file!r} is unavailable: {exc}") from exc
+            if physical_bytes != nbytes:
+                raise ValueError(
+                    f"FTW shard {file!r} size mismatch: index={nbytes}, file={physical_bytes}"
+                )
+            logical_end += nbytes
+        if strict_storage:
+            if total_bytes is None:
+                raise ValueError("FTW index must contain total_bytes")
+            if total_bytes != logical_end:
+                raise ValueError(
+                    f"FTW total_bytes mismatch: index={total_bytes}, shards={logical_end}"
+                )
+        elif not validated_shards:
+            logical_end = None
+
+    tensors = index.get("tensors")
+    if not isinstance(tensors, list):
+        raise ValueError("FTW tensor entries must be an object list")
+    names: set[str] = set()
+    ranges: list[tuple[int, int, str]] = []
+    for entry in tensors:
+        if not isinstance(entry, dict):
+            raise ValueError("FTW tensor entries must be objects")
+        name = entry.get("name")
+        kind = entry.get("kind")
+        dtype_name = entry.get("dtype")
+        shape = entry.get("shape")
+        global_off = _index_int(entry, "global_off", minimum=0)
+        nbytes = _index_int(entry, "nbytes", minimum=1)
+        if not isinstance(name, str) or not name:
+            raise ValueError("FTW tensor name must be a non-empty string")
+        if global_off is None or nbytes is None:
+            raise ValueError(f"FTW tensor {name!r} requires global_off and nbytes")
+        if name in names:
+            if kind == "experts_bank":
+                layer_match = _LAYER_ENTRY_RE.match(name)
+                if layer_match is not None:
+                    raise ValueError(
+                        f"FTW bank {layer_match.group('base')!r} has duplicate layer "
+                        f"{int(layer_match.group('layer'))}"
+                    )
+                raise ValueError("FTW expert banks contain duplicate NUMA sample identity")
+            raise ValueError(f"FTW tensor {name!r} is duplicated")
+        names.add(name)
+        if not isinstance(kind, str) or not kind:
+            raise ValueError(f"FTW tensor {name!r} kind must be a non-empty string")
+        if not isinstance(dtype_name, str):
+            raise ValueError(f"FTW tensor {name!r} dtype must be a string")
+        try:
+            dtype = _dtype_of(dtype_name)
+            if not isinstance(dtype, torch.dtype):
+                raise TypeError
+            elsize = _elsize(dtype)
+        except (AttributeError, TypeError, RuntimeError) as exc:
+            raise ValueError(f"FTW tensor {name!r} has an invalid dtype") from exc
+        if not isinstance(shape, list) or any(
+            isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0 for dim in shape
+        ):
+            # Empty shape is a valid scalar tensor; all dimensions that are present must
+            # nevertheless be positive exact integers.
+            if shape != []:
+                raise ValueError(f"FTW tensor {name!r} has an invalid shape")
+        if math.prod(shape) * elsize != nbytes:
+            raise ValueError(f"FTW tensor {name!r} byte count does not match its shape")
+        if global_off % ALIGN:
+            raise ValueError(f"FTW tensor {name!r} has an unaligned global_off")
+        end = global_off + _align_up(nbytes)
+        ranges.append((global_off, end, name))
+        if logical_end is not None and end > logical_end:
+            raise ValueError(f"FTW tensor {name!r} exceeds shard ranges")
+    prior_end = -1
+    for global_off, end, name in sorted(ranges):
+        if global_off < prior_end:
+            raise ValueError(f"FTW tensor {name!r} overlaps another tensor range")
+        prior_end = end
+    return logical_end
+
+
 def prepare_ftw_host_bank_policy(
     path: str,
     *,
     num_layers: int,
     policy,
     swap_probe=None,
+    _index: dict | None = None,
 ):
-    """Preflight every FTW expert-bank allocation from index metadata only."""
+    """Validate every FTW expert-bank identity and allocation from index metadata.
+
+    Validation is independent of whether a host-bank policy was requested so the
+    legacy/default loader cannot allocate from an ambiguous index.  When ``policy``
+    is present, the same pass also prepares its bounded allocation plan.
+    """
     from freetoken.moe.numa_memory import NumaSampleIdentity
 
-    if policy is None:
-        return None
     if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers <= 0:
         raise ValueError(f"num_layers must be a positive integer, got {num_layers}")
     # Swap admission is intentionally before opening the index: an explicit
     # no-swap policy must not inspect checkpoint metadata before it can fail.
-    if policy.require_no_swap:
+    if policy is not None and policy.require_no_swap:
         swap_probe = policy.preflight_swap(probe=swap_probe)
-    with open(os.path.join(path, INDEX_NAME), encoding="utf-8") as f:
-        index = json.load(f)
-    if index.get("format") != FORMAT_TAG:
-        raise ValueError(f"not a {FORMAT_TAG}: {path}")
+    if _index is None:
+        with open(os.path.join(path, INDEX_NAME), encoding="utf-8") as f:
+            index = json.load(f)
+    else:
+        index = _index
+    logical_end = _validate_ftw_index(path, index, strict_storage=_index is not None)
     meta_layers = index.get("expert_bank_num_layers")
     if meta_layers is not None and meta_layers != num_layers:
         raise RuntimeError(
@@ -130,9 +300,40 @@ def prepare_ftw_host_bank_policy(
             f"model config says num_moe_layers={num_layers}; the checkpoint does not "
             "match its config"
         )
-    entries = [entry for entry in index.get("tensors", []) if entry.get("kind") == "experts_bank"]
+    tensors = index["tensors"]
+    entries = [entry for entry in tensors if entry.get("kind") == "experts_bank"]
+    if not entries and policy is None:
+        # Preserve the legacy probe contract: a valid FTW checkpoint without
+        # expert banks is not an expert-bank bundle.
+        return None
     if not entries:
         raise ValueError(f"{path!r} contains no experts_bank entries")
+    for entry in entries:
+        shape = entry.get("shape")
+        global_off = entry.get("global_off")
+        nbytes = entry.get("nbytes")
+        if (
+            not isinstance(shape, list)
+            or not shape
+            or any(
+                isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0
+                for dim in shape
+            )
+        ):
+            raise ValueError(f"FTW expert bank {entry.get('name')!r} has an invalid shape")
+        if (
+            isinstance(global_off, bool)
+            or not isinstance(global_off, int)
+            or global_off < 0
+            or global_off % ALIGN
+        ):
+            raise ValueError(
+                f"FTW expert bank {entry.get('name')!r} has an invalid global_off"
+            )
+        if isinstance(nbytes, bool) or not isinstance(nbytes, int) or nbytes <= 0:
+            raise ValueError(f"FTW expert bank {entry.get('name')!r} has invalid nbytes")
+        if logical_end is not None and global_off + _align_up(nbytes) > logical_end:
+            raise ValueError(f"FTW expert bank {entry.get('name')!r} exceeds shard ranges")
     alpha_entries = [entry for entry in entries if entry["name"] in _ALPHA_NAMES]
     row_entries = [entry for entry in entries if entry["name"] not in _ALPHA_NAMES]
     flat_entries = []
@@ -220,6 +421,8 @@ def prepare_ftw_host_bank_policy(
             if expected != int(entry["nbytes"]):
                 raise ValueError(f"FTW bank {base!r} layer {layer_id} byte count is invalid")
             layer_bytes[layer_id] += max(ALIGN, _align_up(expected))
+    if policy is None:
+        return None
     return policy.prepare_layer_bytes(layer_bytes, swap_probe=swap_probe)
 
 
@@ -323,7 +526,10 @@ class FTWReader:
     def __init__(self, path: str):
         with open(os.path.join(path, INDEX_NAME)) as f:
             self.index = json.load(f)
-        assert self.index.get("format") == FORMAT_TAG, f"not a {FORMAT_TAG}: {path}"
+        # Validate the parsed object before deriving sorted views or opening any shard.
+        # The loader later validates this same ``self.index`` object with its exact model
+        # layer count; reopening the JSON there would reintroduce a TOCTOU window.
+        _validate_ftw_index(path, self.index, strict_storage=True)
         self.dir = path
         self.shards = sorted(self.index["shards"], key=lambda s: s["global_off"])
         self.tensors = {t["name"]: t for t in self.index["tensors"]}
@@ -395,13 +601,28 @@ class FTWReader:
         return entry[1]
 
     def close(self) -> None:
-        for fd in self._fds.values():
-            os.close(fd)
+        first_error: BaseException | None = None
+        for fd in tuple(self._fds.values()):
+            try:
+                os.close(fd)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
         self._fds.clear()
-        for m, mv in self._maps.values():
-            mv.release()
-            m.close()
+        for m, mv in tuple(self._maps.values()):
+            try:
+                mv.release()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+            try:
+                m.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
         self._maps.clear()
+        if first_error is not None:
+            raise first_error
 
     def _pieces(self, global_off: int, nbytes: int):
         """Yield (file, file_off, dest_off, length) covering [global_off, +nbytes),
@@ -575,13 +796,58 @@ def load_ftw_banks(
 
     if host_bank_policy is not None and layer_residency is not None:
         raise ValueError("host_bank_policy and layer_residency cannot be combined")
-    if host_bank_policy is not None:
+    if layer_residency is not None and len(layer_residency) != num_layers:
+        raise ValueError(
+            f"layer_residency has {len(layer_residency)} entries, expected {num_layers}"
+        )
+    reader = None
+    bar = None
+    staging_ring = None
+    committed = False
+    cleanup_errors: list[BaseException] = []
+    closed_resources: set[int] = set()
+    sources: dict[str, list[torch.Tensor]] = {}
+    alpha_kw: dict[str, torch.Tensor] = {}
+    views: list[torch.Tensor] = []
+    raw = None
+
+    def _safe_close(resource, label: str) -> None:
+        if resource is None:
+            return
+        resource_id = id(resource)
+        if resource_id in closed_resources:
+            return
+        closed_resources.add(resource_id)
+        try:
+            resource.close()
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+            logger.warning(f"{label} cleanup failed: {exc}")
+
+    def _clear_derived_views() -> None:
+        nonlocal raw
+        sources.clear()
+        alpha_kw.clear()
+        views.clear()
+        raw = None
+
+    if host_bank_policy is not None and host_bank_policy.require_no_swap:
+        # Preserve the admission ordering: inspect swap before opening checkpoint
+        # metadata, then pass that exact observation into policy preparation.
+        swap_probe = host_bank_policy.preflight_swap(probe=swap_probe)
+    try:
+        reader = FTWReader(path)
         prepare_ftw_host_bank_policy(
             path,
             num_layers=num_layers,
             policy=host_bank_policy,
             swap_probe=swap_probe,
+            _index=reader.index,
         )
+    except BaseException:
+        _safe_close(reader, "FTW reader")
+        raise
+    if host_bank_policy is not None:
         residency = list(host_bank_policy.plan.layer_residency)
     else:
         residency = (
@@ -589,14 +855,15 @@ def load_ftw_banks(
             if layer_residency is None
             else list(layer_residency)
         )
-    assert len(residency) == num_layers, (len(residency), num_layers)
-
-    staging_ring = None
-    if (
-        host_bank_policy is not None
-        and host_bank_policy.strategy.value == "bounded-staging"
-    ):
-        staging_ring = host_bank_policy.staging_ring()
+    try:
+        if (
+            host_bank_policy is not None
+            and host_bank_policy.strategy.value == "bounded-staging"
+        ):
+            staging_ring = host_bank_policy.staging_ring()
+    except BaseException:
+        _safe_close(reader, "FTW reader")
+        raise
 
     allocated_banks: list[tuple[NumaSampleIdentity, HostBank]] = []
     numa_placement = (
@@ -613,14 +880,10 @@ def load_ftw_banks(
                 numa_placement=numa_placement if backing == "mmap" else None,
             )
         except BaseException:
-            _rollback_allocations()
             # Allocation happens after the FTW reader is opened but before the
             # read-job ``try`` block; close it here so a failed NUMA mapping
             # cannot strand the descriptor while rolling back prior banks.
-            try:
-                reader.close()
-            except (NameError, UnboundLocalError):
-                pass
+            _cleanup_owned()
             raise
         allocated_banks.append((identity, bank))
         return bank
@@ -637,23 +900,31 @@ def load_ftw_banks(
             except BaseException as exc:
                 logger.warning(f"FTW staging-ring rollback failed: {exc}")
 
-    # PINNED layers are born-pinned (cudaHostAlloc) where that wins (see born_pinned_default); LOCKED/PAGEABLE layers stay lazy mmaps
-    born = host_bank_policy is None and born_pinned_default()
+    def _cleanup_owned() -> None:
+        """Drop aliases and release every resource owned by this acquisition."""
+        _clear_derived_views()
+        _rollback_allocations()
+        _safe_close(bar, "FTW progress bar")
+        _safe_close(reader, "FTW reader")
+
+    # PINNED layers are born-pinned (cudaHostAlloc) where that wins (see
+    # born_pinned_default); LOCKED/PAGEABLE layers stay lazy mmaps.
+    try:
+        born = host_bank_policy is None and born_pinned_default()
+        bank_entries = reader.entries("experts_bank")
+    except BaseException:
+        _cleanup_owned()
+        raise
 
     def _backing(layer_id: int) -> str:
         if born and residency[layer_id] == HostResidency.PINNED.value:
             return "cuda"
         return "mmap"
 
-    try:
-        reader = FTWReader(path)
-    except BaseException:
-        if staging_ring is not None:
-            staging_ring.close()
-        raise
-    bank_entries = reader.entries("experts_bank")
     if not bank_entries:
-        reader.close()
+        _safe_close(reader, "FTW reader")
+        if cleanup_errors:
+            raise cleanup_errors[0]
         return None
 
     alpha_entries = [e for e in bank_entries if e["name"] in _ALPHA_NAMES]
@@ -661,7 +932,7 @@ def load_ftw_banks(
 
     meta_layers = reader.meta("expert_bank_num_layers")
     if meta_layers is not None and meta_layers != num_layers:
-        reader.close()
+        _cleanup_owned()
         raise RuntimeError(
             f"{path!r} was converted with {meta_layers} expert-bank layers but the "
             f"model config says num_moe_layers={num_layers}; the checkpoint does not "
@@ -745,8 +1016,14 @@ def load_ftw_banks(
             layer_jobs.append((base, bank, e, layer_id))
 
     total_bytes = sum(e["nbytes"] for e in bank_entries)
-    bar = byte_bar(total_bytes, "Loading expert banks (FTW)")
-    completed = False
+    try:
+        bar = byte_bar(total_bytes, "Loading expert banks (FTW)")
+    except BaseException:
+        _cleanup_owned()
+        raise
+    reads_completed = False
+    futures = []
+    f = None
 
     # Jobs are per (bank, layer) -- many small reads, so a wider pool; each bank pins
     # as its read completes, overlapping cudaHostRegister with the remaining reads.
@@ -756,7 +1033,11 @@ def load_ftw_banks(
 
             def _read_alpha(e):
                 bank = alpha_hb[e["name"]]
-                reader.read_into(bank.memoryview(), e, workers=workers, chunk=chunk)
+                dest = bank.memoryview()
+                try:
+                    reader.read_into(dest, e, workers=workers, chunk=chunk)
+                finally:
+                    dest.release()
                 pins.submit(
                     bank,
                     residency[0] if host_bank_policy is not None else HostResidency.PINNED.value,
@@ -765,14 +1046,26 @@ def load_ftw_banks(
 
             def _read_row(job):
                 _name, bank, win_off, win_len, layer_bytes, layer_id = job
-                reader.read_into(bank.memoryview(), {"global_off": win_off, "nbytes": win_len},
-                                 workers=workers, chunk=chunk)
+                dest = bank.memoryview()
+                try:
+                    reader.read_into(
+                        dest,
+                        {"global_off": win_off, "nbytes": win_len},
+                        workers=workers,
+                        chunk=chunk,
+                    )
+                finally:
+                    dest.release()
                 pins.submit(bank, residency[layer_id])
                 bar.update(layer_bytes)
 
             def _read_layer(job):
                 _name, bank, entry, layer_id = job
-                reader.read_into(bank.memoryview(), entry, workers=workers, chunk=chunk)
+                dest = bank.memoryview()
+                try:
+                    reader.read_into(dest, entry, workers=workers, chunk=chunk)
+                finally:
+                    dest.release()
                 pins.submit(bank, residency[layer_id])
                 bar.update(entry["nbytes"])
 
@@ -787,19 +1080,86 @@ def load_ftw_banks(
             # residency sample cannot race the loader's writes.
             for identity, bank in allocated_banks:
                 host_bank_policy.sample_numa_bank(bank, identity=identity)
-        completed = True
+        reads_completed = True
     finally:
-        bar.close()
-        reader.close()
-        if host_bank_policy is not None and not completed:
-            _rollback_allocations()
+        # A failed worker future retains its traceback and call arguments; release
+        # those exported memoryviews before closing mmap-backed HostBanks.
+        futures.clear()
+        f = None
+        if not reads_completed:
+            _cleanup_owned()
+        error_count = len(cleanup_errors)
+        _safe_close(bar, "FTW progress bar")
+        _safe_close(reader, "FTW reader")
+        new_errors = cleanup_errors[error_count:]
+        if new_errors and reads_completed:
+            _cleanup_owned()
+        if new_errors and sys.exc_info()[1] is None:
+            raise new_errors[0]
 
+    from freetoken.moe.expert_banks import ExpertBanks
+
+    sources: dict[str, list] = {}
+    alpha_kw: dict[str, torch.Tensor] = {}
     try:
-        sources: dict[str, list] = {}
+        # A failed mlock leaves a LOCKED layer pageable; the log and labels report what
+        # the banks actually settled at.
+        applied = list(residency)
+        for banks in row_hb.values():
+            for layer_id, bank in enumerate(banks):
+                if (
+                    applied[layer_id] == HostResidency.LOCKED.value
+                    and bank.residency is not HostResidency.LOCKED
+                ):
+                    applied[layer_id] = HostResidency.PAGEABLE.value
+        unpinned = [i for i, r in enumerate(applied) if r != HostResidency.PINNED.value]
+        if unpinned:
+            by_layer = [0] * num_layers
+            for banks in row_hb.values():
+                for layer_id, bank in enumerate(banks):
+                    by_layer[layer_id] += bank.nbytes
+            locked = [i for i in unpinned if applied[i] == HostResidency.LOCKED.value]
+            pageable = [i for i in unpinned if i not in set(locked)]
+            pinned_b = sum(b for i, b in enumerate(by_layer) if i not in set(unpinned))
+            locked_b = sum(by_layer[i] for i in locked)
+            pageable_part = ""
+            if pageable:
+                pageable_b = sum(by_layer[i] for i in pageable)
+                pageable_part = (
+                    f" + {pageable_b / 2**30:.2f} GiB pageable "
+                    f"(lock failed, {len(pageable)} CPU layers: {pageable})"
+                )
+            logger.info(
+                f"MoE bank split residency: {pinned_b / 2**30:.2f} GiB pinned "
+                f"({'born-pinned cudaHostAlloc' if born else 'cudaHostRegister'}, "
+                f"{num_layers - len(unpinned)} GPU layers) + "
+                f"{locked_b / 2**30:.2f} GiB OS-locked ({len(locked)} CPU layers: {locked})"
+                f"{pageable_part}"
+            )
+
+        owners = tuple(alpha_hb.values()) + tuple(
+            bank for banks in row_hb.values() for bank in banks
+        ) + (() if staging_ring is None else (staging_ring,))
+        if host_bank_policy is not None:
+            host_bank_policy.refresh_numa_accounting()
+            host_bank_policy.accounting.applied_layers = tuple(applied)
+            host_bank_policy.accounting.applied_pinned_bytes = sum(
+                bank.allocated_nbytes
+                for bank in owners
+                if getattr(bank, "residency", None) is HostResidency.PINNED
+            )
+            accounting = host_bank_policy.accounting.as_dict()
+            if host_bank_policy.strategy.value == "bounded-staging":
+                accounting["applied_staging_bytes"] = host_bank_policy.plan.staging_bytes
+        else:
+            accounting = None
+
+        # Materialize aliases only after accounting has succeeded.  On a later failure,
+        # clear every derived view before closing its mmap owner.
         for name, banks in row_hb.items():
             views = []
-            for bank, view_args in zip(banks, row_view_args[name]):
-                if view_args is None:  # per-layer entry: already shaped [num_experts, ...]
+            for bank, view_args in zip(banks, row_view_args[name], strict=True):
+                if view_args is None:
                     views.append(bank.tensor)
                     continue
                 head_pad, layer_bytes, num_experts, row_shape, dtype = view_args
@@ -807,79 +1167,23 @@ def load_ftw_banks(
                 views.append(
                     raw.view(num_experts, *row_shape) if row_shape else raw.view(num_experts)
                 )
+                raw = None
             sources[name] = views
-    except BaseException:
-        if host_bank_policy is not None:
-            _rollback_allocations()
-        raise
-
-    from freetoken.moe.expert_banks import ExpertBanks
-
-    # a failed mlock leaves a LOCKED layer pageable; the log and labels report what the banks actually settled at
-    applied = list(residency)
-    for banks in row_hb.values():
-        for layer_id, bank in enumerate(banks):
-            if (applied[layer_id] == HostResidency.LOCKED.value
-                    and bank.residency is not HostResidency.LOCKED):
-                applied[layer_id] = HostResidency.PAGEABLE.value
-    unpinned = [i for i, r in enumerate(applied) if r != HostResidency.PINNED.value]
-    if unpinned:
-        by_layer = [0] * num_layers
-        for name, banks in row_hb.items():
-            for layer_id, bank in enumerate(banks):
-                by_layer[layer_id] += bank.nbytes
-        locked = [i for i in unpinned if applied[i] == HostResidency.LOCKED.value]
-        pageable = [i for i in unpinned if i not in set(locked)]
-        pinned_b = sum(b for i, b in enumerate(by_layer) if i not in set(unpinned))
-        locked_b = sum(by_layer[i] for i in locked)
-        pageable_part = ""
-        if pageable:
-            pageable_b = sum(by_layer[i] for i in pageable)
-            pageable_part = (
-                f" + {pageable_b / 2**30:.2f} GiB pageable "
-                f"(lock failed, {len(pageable)} CPU layers: {pageable})"
-            )
-        logger.info(
-            f"MoE bank split residency: {pinned_b / 2**30:.2f} GiB pinned "
-            f"({'born-pinned cudaHostAlloc' if born else 'cudaHostRegister'}, "
-            f"{num_layers - len(unpinned)} GPU layers) + "
-            f"{locked_b / 2**30:.2f} GiB OS-locked ({len(locked)} CPU layers: {locked})"
-            f"{pageable_part}"
-        )
-
-    # alphas are the small per-expert scale vectors, distinguished by their reserved names
-    # (not a separate kind); everything else under experts_bank is a weight source.
-    alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
-    owners = tuple(alpha_hb.values()) + tuple(
-        bank for banks in row_hb.values() for bank in banks
-    ) + (() if staging_ring is None else (staging_ring,))
-    if host_bank_policy is not None:
-        host_bank_policy.refresh_numa_accounting()
-        host_bank_policy.accounting.applied_layers = tuple(applied)
-        host_bank_policy.accounting.applied_pinned_bytes = sum(
-            bank.allocated_nbytes
-            for bank in owners
-            if getattr(bank, "residency", None) is HostResidency.PINNED
-        )
-        accounting = host_bank_policy.accounting.as_dict()
-        if host_bank_policy.strategy.value == "bounded-staging":
-            # The ring is allocated below the policy gate and retained with the source owners.
-            accounting["applied_staging_bytes"] = host_bank_policy.plan.staging_bytes
-    else:
-        accounting = None
-    retained_owners = owners if host_bank_policy is not None else ()
-    try:
+            views = []
+        alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
         result = ExpertBanks(
             reader.meta("quant_format"), sources, **alpha_kw,
             layer_residency=applied,
             host_bank_accounting=accounting,
-            host_bank_owners=retained_owners,
+            # Keep the HostBank wrappers alive for both policy and legacy paths so
+            # ExpertBanks.close() can release their mappings and registrations.
+            host_bank_owners=owners,
         )
     except BaseException:
-        if host_bank_policy is not None:
-            _rollback_allocations()
+        if not committed:
+            _cleanup_owned()
         raise
-    completed = True
+    committed = True
     return result
 
 
