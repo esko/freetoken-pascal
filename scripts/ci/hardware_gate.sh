@@ -4,13 +4,14 @@ set -euo pipefail
 level="${FREETOKEN_PASCAL_TEST_LEVEL:-smoke}"
 image="${FREETOKEN_PASCAL_CUDA_IMAGE:-freetoken-pascal:cuda126}"
 smoke_gpu="${FREETOKEN_SMOKE_GPU:-0}"
+host_python="${FREETOKEN_HOST_PYTHON:-python3}"
 repo_root="$(git rev-parse --show-toplevel)"
 container_root=/workspace/freetoken-pascal
 mkdir -p results/hardware
 
 docker image inspect "$image" >/dev/null
 software_probe="$({
-  docker run --rm --gpus all "$image" python - <<'PY'
+  docker run --rm -i --gpus all "$image" python - <<'PY'
 import json
 import torch
 import triton
@@ -23,7 +24,7 @@ print(json.dumps({
 }))
 PY
 })"
-readarray -t software_fields < <(python -c '
+readarray -t software_fields < <("$host_python" -c '
 import json, sys
 data = json.loads(sys.argv[1])
 print(data["cuda_runtime"])
@@ -34,7 +35,7 @@ print(data["triton"])
 
 # PCI/NUMA/NVMe capture runs on the host; CUDA runtime identity is measured in
 # the exact container used by the bounded device tests.
-python scripts/capture_hardware_inventory.py \
+"$host_python" scripts/capture_hardware_inventory.py \
   results/hardware/inventory.json \
   --cuda-runtime "${software_fields[0]}" \
   --torch-version "${software_fields[1]}" \
@@ -45,9 +46,13 @@ minimum_gpus=1
 case "$level" in
   dual-p4|release) minimum_gpus=2 ;;
 esac
-python scripts/check_hardware_inventory.py \
-  results/hardware/inventory.json \
-  --minimum-gpus "$minimum_gpus"
+docker run --rm \
+  -v "$repo_root:$container_root" \
+  -w "$container_root" \
+  "$image" \
+  python scripts/check_hardware_inventory.py \
+    results/hardware/inventory.json \
+    --minimum-gpus "$minimum_gpus"
 
 run_single_smoke() {
   docker run --rm --gpus "device=$smoke_gpu" \
