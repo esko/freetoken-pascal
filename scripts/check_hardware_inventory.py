@@ -18,6 +18,15 @@ FORMAT_CHECKER = FormatChecker()
 def _is_rfc3339_datetime(value: object) -> bool:
     if not isinstance(value, str):
         return False
+    if (
+        re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+            r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})",
+            value,
+        )
+        is None
+    ):
+        return False
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.tzinfo is not None
 

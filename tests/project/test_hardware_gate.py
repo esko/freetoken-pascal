@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -134,6 +135,30 @@ def test_ecc_off_inventory_accepts_full_physical_memory() -> None:
     measured["gpus"][0]["memory_mib"] = 8192
 
     assert CHECK_HARDWARE.validate_pascal_inventory(measured) == []
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-08-31 20:38:18+00:00",
+        "20260831T203818+0000",
+        "2026-08-31T20:38:18+00",
+    ],
+)
+def test_measured_schema_rejects_non_rfc3339_timestamp(timestamp: str) -> None:
+    schema = json.loads(
+        (ROOT / "schemas" / "hardware-inventory.schema.json").read_text(encoding="utf-8")
+    )
+    measured = inventory(["6.1"])
+    measured["captured_at"] = timestamp
+
+    errors = list(
+        Draft202012Validator(schema, format_checker=CHECK_HARDWARE.FORMAT_CHECKER).iter_errors(
+            measured
+        )
+    )
+
+    assert any(error.validator == "format" for error in errors)
 
 
 def test_non_pascal_inventory_fails_instead_of_skipping() -> None:
