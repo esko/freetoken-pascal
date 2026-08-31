@@ -14,7 +14,10 @@
 | Interconnect | PCIe, no NVLink |
 | OS | Ubuntu Server 26.04 LTS |
 
-The P4 cards are not yet available. No issue requiring H2 or H3 evidence may be closed until the cards are installed and the self-hosted runner records the actual topology.
+Both P4 cards and the PCIe NVMe device are installed on Gorilla.
+Passive inventory and bounded one-allocation CUDA arithmetic have passed on both cards through Torch 2.11.0 with CUDA 12.6.
+The cards are intentionally throttled while airflow optimization is incomplete, so sustained-load, thermal, link-under-load, performance, H2 completion and H3 completion remain unqualified.
+The self-hosted runner is not yet configured.
 
 ## Tier contract
 
@@ -26,9 +29,9 @@ PLE reads must support mmap and positional-read backends, with batched, deduplic
 PLE measurement separates cold-cache, warm-cache, major-page-fault, and steady-state behavior.
 SSD expert execution is startup backing or an explicitly labeled experiment, while the complete expert bank remains in DDR4 for v1.
 
-## Immediate work before GPU arrival
+## Completed arrival intake
 
-The following can and should be completed now:
+The pre-arrival H0/H1 work included:
 
 - repository import and upstream pinning;
 - CUDA 12.6 container and `sm_61` compilation;
@@ -45,25 +48,25 @@ The following can and should be completed now:
 
 ## Arrival checklist
 
-When the P4s arrive:
+Current status:
 
-1. Update firmware and install the cards with correct airflow.
-2. Record:
+1. [x] Install both cards; airflow qualification remains pending.
+2. [x] Record the passive inventory:
    - `nvidia-smi -q`
    - `nvidia-smi topo -m`
    - `lspci -tv`
    - `numactl -H`
    - PCIe link width/speed
    - GPU power and application-clock capabilities
-   - thermal behavior under a sustained load
-3. Verify both GPUs report compute capability 6.1 and 8 GB VRAM.
-4. Map each GPU to its local CPU/NUMA node.
-5. Install the pinned driver and CUDA 12.6 toolchain.
-6. Register the self-hosted GitHub runner with labels:
+   - passive thermal and clock state (sustained-load qualification remains pending)
+3. [x] Verify both GPUs report compute capability 6.1 and 7,680 MiB usable VRAM.
+4. [x] Map GPU 0 to NUMA 0 and GPU 1 to NUMA 1; the NVMe is on NUMA 0.
+5. [x] Verify driver 580.173.02 with the CUDA 12.6 project container and install NVIDIA Container Toolkit 1.20.0.
+6. [ ] Register the self-hosted GitHub runner with labels:
    `self-hosted`, `linux`, `x64`, `cuda`, `sm61`.
-7. Run only the H2 smoke gate first.
-8. Add the second card only after single-card correctness passes.
-9. Attach inventory artifacts to the hardware qualification issue.
+7. [x] Run bounded identity/allocation/arithmetic on each card independently.
+8. [ ] Correct airflow and qualify one card under bounded sustained load before dual-card load.
+9. [ ] Attach the complete inventory and thermal artifacts to the hardware qualification issue.
 
 ## Memory rules
 

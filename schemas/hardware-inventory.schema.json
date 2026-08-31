@@ -37,6 +37,7 @@
           "pci_bus_id": {"type": "string", "minLength": 1},
           "driver": {"type": "string", "minLength": 1},
           "uuid": {"type": "string", "minLength": 1},
+          "ecc_mode": {"enum": ["enabled", "disabled", "n/a"]},
           "clocks": {
             "type": "object",
             "additionalProperties": false,
@@ -45,7 +46,9 @@
               "graphics_mhz": {"type": "integer", "minimum": 1},
               "memory_mhz": {"type": "integer", "minimum": 1}
             }
-          }
+          },
+          "topology": {"$ref": "#/$defs/topology"},
+          "pci_link": {"$ref": "#/$defs/gpu_pci_link"}
         }
       }
     },
@@ -55,9 +58,98 @@
       "required": ["cuda_driver", "cuda_toolkit", "torch", "triton"],
       "properties": {
         "cuda_driver": {"type": "string", "minLength": 1},
+        "cuda_runtime": {"type": "string", "minLength": 1},
         "cuda_toolkit": {"type": "string", "minLength": 1},
+        "nvidia_container_toolkit": {"type": "string", "minLength": 1},
         "torch": {"type": "string", "minLength": 1},
+        "torch_cuda_device_count": {"type": "integer", "minimum": 0},
         "triton": {"type": "string", "minLength": 1}
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nvme"],
+      "properties": {
+        "nvme": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "model", "serial", "pci_bus_id", "topology", "pci_link", "mounts"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "model": {"type": "string", "minLength": 1},
+              "serial": {"type": "string", "minLength": 1},
+              "pci_bus_id": {"type": "string", "minLength": 1},
+              "topology": {"$ref": "#/$defs/topology"},
+              "pci_link": {"$ref": "#/$defs/pci_link"},
+              "mounts": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+            }
+          }
+        }
+      }
+    },
+    "thermal_qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "load_test", "throttling", "reason"],
+      "properties": {
+        "status": {"enum": ["unqualified", "qualified"]},
+        "load_test": {"type": "string", "minLength": 1},
+        "throttling": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deterministic", "commands"],
+      "properties": {
+        "deterministic": {"type": "boolean"},
+        "commands": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    }
+  },
+  "$defs": {
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["numa_node", "pci_root", "sysfs_path"],
+      "properties": {
+        "numa_node": {"type": "integer", "minimum": 0},
+        "pci_root": {"type": "string", "minLength": 1},
+        "sysfs_path": {"type": "string", "minLength": 1}
+      }
+    },
+    "pci_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximum", "current"],
+      "properties": {
+        "maximum": {"$ref": "#/$defs/pci_link_state"},
+        "current": {"$ref": "#/$defs/pci_link_state"}
+      }
+    },
+    "gpu_pci_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximum", "current", "current_is_idle", "load_qualified", "qualification"],
+      "properties": {
+        "maximum": {"$ref": "#/$defs/pci_link_state"},
+        "current": {"$ref": "#/$defs/pci_link_state"},
+        "current_is_idle": {"type": "boolean"},
+        "load_qualified": {"type": "boolean"},
+        "qualification": {"type": "string", "minLength": 1}
+      }
+    },
+    "pci_link_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "width"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 1},
+        "width": {"type": "integer", "minimum": 1}
       }
     }
   }
