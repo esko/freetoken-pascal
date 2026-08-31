@@ -1,8 +1,8 @@
 # Qwen4 GDN backend and donor-audit ledger
 
 - Downstream issue: #93
-- Branch: `issue-93-pascal-gdn-h1`
-- Base: `71b6b46ebe` (merged PR #95)
+- H1 branch/base: `issue-93-pascal-gdn-h1` at `71b6b46ebe` (merged PR #95)
+- H2 branch/base: `issue-93-p4-gdn-h2` from `eaa8acaa97` (merged PR #112)
 - Validation class: H0 plus H1 source/compile census and bounded H2 kernel parity
 
 Issue #93 establishes the backend decision boundary for Qwen3.8-Flash-Next GatedDeltaNet.
@@ -72,8 +72,8 @@ The permanent Torch/reference seam additionally defines the H0 state semantics t
 backend must preserve. Deterministic CPU tests compare chunk evaluation with tokenwise decode from
 nonzero state, restore both convolution and recurrent state before replaying a suffix, reset and
 replay the complete sequence, exercise ragged requests mapped to noncontiguous slots, and verify
-that concurrent request updates leave unaddressed slots byte-for-byte unchanged. These checks are
-reference contracts alone do not establish FLA/Pascal checkpoint interchangeability, kernel
+that concurrent request updates leave unaddressed slots byte-for-byte unchanged. These reference
+contracts alone do not establish FLA/Pascal checkpoint interchangeability, kernel
 registration, or device concurrency; those remain issue #93 work.
 
 ## Bounded P4 parity
