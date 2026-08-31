@@ -117,9 +117,11 @@ def _index_int(index: dict, key: str, *, minimum: int | None = None) -> int | No
 def _validate_ftw_index(path: str, index, *, strict_storage: bool) -> int | None:
     """Validate one parsed FTW index snapshot and return its logical byte length.
 
-    ``strict_storage`` is false only for the legacy metadata-only policy probe.  The
-    reader and the loader always use strict validation, so they never allocate from an
-    index whose shard geometry has not also been checked.
+    ``strict_storage`` is false only for the legacy metadata-only policy probe.  A
+    non-empty shard list is still checked against the files in that probe; the relaxed
+    mode only permits the historical empty-shard metadata fixture.  The reader and
+    loader always use strict validation, so they never allocate from an index whose
+    shard geometry has not also been checked.
     """
     if not isinstance(index, dict):
         raise ValueError(f"FTW index must be an object: {path}")
@@ -149,8 +151,6 @@ def _validate_ftw_index(path: str, index, *, strict_storage: bool) -> int | None
     else:
         if not isinstance(shards, list):
             raise ValueError("FTW index shards must be a list")
-        if strict_storage and not shards:
-            raise ValueError("FTW index must contain a non-empty shard list")
         if any(not isinstance(shard, dict) for shard in shards):
             raise ValueError("FTW shard entries must be objects")
         validated_shards = []

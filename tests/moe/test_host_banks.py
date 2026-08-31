@@ -754,6 +754,38 @@ def test_ftw_default_path_preserves_empty_expert_bundle_probe(tmp_path, monkeypa
     assert tuple(host_banks._LIVE_BUFFERS) == before
 
 
+def test_ftw_default_path_preserves_fully_empty_checkpoint_probe(tmp_path, monkeypatch):
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
+    from freetoken.moe import host_banks
+
+    checkpoint = tmp_path / "fully-empty"
+    FTWWriter(str(checkpoint)).finalize({"quant_format": "bf16", "expert_bank_num_layers": 1})
+
+    def forbidden_allocation(*args, **kwargs):
+        raise AssertionError("fully empty checkpoint reached HostBank allocation")
+
+    monkeypatch.setattr(host_banks, "HostBank", forbidden_allocation)
+    before = tuple(host_banks._LIVE_BUFFERS)
+    assert load_ftw_banks(str(checkpoint), num_layers=1, workers=1) is None
+    assert tuple(host_banks._LIVE_BUFFERS) == before
+
+
+def test_ftw_policy_rejects_fully_empty_checkpoint(tmp_path):
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
+    from freetoken.moe.host_banks import HostBankPolicy
+
+    checkpoint = tmp_path / "fully-empty-policy"
+    FTWWriter(str(checkpoint)).finalize({"quant_format": "bf16", "expert_bank_num_layers": 1})
+
+    with pytest.raises(ValueError, match="no experts_bank entries"):
+        load_ftw_banks(
+            str(checkpoint),
+            num_layers=1,
+            workers=1,
+            host_bank_policy=HostBankPolicy(strategy="pageable"),
+        )
+
+
 def test_ftw_default_path_keeps_successful_allocations_live(tmp_path, monkeypatch):
     import freetoken.moe.host_banks as host_banks
     from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
