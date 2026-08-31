@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
+import os
 import shlex
 import statistics
 import subprocess
@@ -88,9 +88,7 @@ def validate_config(config: BenchmarkConfig) -> BenchmarkConfig:
     """Validate shape, GQA, and bounded timing controls without importing Torch."""
 
     if config.tokens not in SUPPORTED_TOKENS:
-        raise BenchmarkConfigError(
-            f"tokens must be one of {SUPPORTED_TOKENS}, got {config.tokens}"
-        )
+        raise BenchmarkConfigError(f"tokens must be one of {SUPPORTED_TOKENS}, got {config.tokens}")
     if config.head_dim not in SUPPORTED_HEAD_DIMS:
         raise BenchmarkConfigError(
             f"head_dim must be one of {SUPPORTED_HEAD_DIMS}, got {config.head_dim}"
@@ -161,6 +159,16 @@ def build_parser() -> argparse.ArgumentParser:
 def _git_commit() -> str:
     """Return the exact repository commit used for the report."""
 
+    injected = os.environ.get("FREETOKEN_BENCHMARK_COMMIT")
+    if injected is not None:
+        if len(injected) != 40 or any(
+            character not in "0123456789abcdef" for character in injected
+        ):
+            raise RuntimeError(
+                "FREETOKEN_BENCHMARK_COMMIT must be a 40-character lowercase Git SHA"
+            )
+        return injected
+
     try:
         completed = subprocess.run(
             ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
@@ -188,36 +196,30 @@ def _torch_reference_recurrence(
     request_ranges: list[tuple[int, int]],
     output: Any,
 ) -> Any:
-    """Run an independent scalar-equation Torch GDN recurrence.
+    """Run the repository's independent upstream-derived Torch GDN oracle.
 
     The implementation intentionally does not call the Pascal adapter or the runtime's
-    reference module.  Keeping this equation in the benchmark makes the benchmark's A/B
-    oracle independent of both the candidate JIT wrapper and any model dispatch policy.
-    ``state_pool`` and ``output`` are supplied by the caller so reset/allocation work can
-    remain outside timed CUDA events.
+    model dispatch policy. ``state_pool`` and ``output`` are supplied by the caller so
+    reset/allocation work can remain outside timed CUDA events.
     """
+
+    from freetoken.models.qwen4_exp.gdn_reference import recurrent_gated_delta_rule
 
     if len(request_slots) != len(request_ranges):
         raise BenchmarkConfigError("request slot/range lengths differ")
     ratio = int(v.shape[1]) // int(q.shape[1])
     for request, slot in enumerate(request_slots):
         start, end = request_ranges[request]
-        for token in range(start, end):
-            for value_head in range(int(v.shape[1])):
-                key_head = value_head // ratio
-                q_vector = q[token, key_head]
-                k_vector = k[token, key_head]
-                q_vector = q_vector * torch.rsqrt(torch.sum(q_vector * q_vector) + 1.0e-6)
-                k_vector = k_vector * torch.rsqrt(torch.sum(k_vector * k_vector) + 1.0e-6)
-                q_vector = q_vector / math.sqrt(int(q.shape[2]))
-
-                state = state_pool[slot, value_head]
-                decay = torch.exp(g[token, value_head])
-                state.mul_(decay)
-                predicted = torch.mv(state.transpose(0, 1), k_vector)
-                delta = (v[token, value_head] - predicted) * beta[token, value_head]
-                state.add_(torch.outer(k_vector, delta))
-                output[token, value_head].copy_(torch.mv(state.transpose(0, 1), q_vector))
+        result, final_state = recurrent_gated_delta_rule(
+            q[start:end].repeat_interleave(ratio, dim=1).unsqueeze(0),
+            k[start:end].repeat_interleave(ratio, dim=1).unsqueeze(0),
+            v[start:end].unsqueeze(0),
+            g[start:end].unsqueeze(0),
+            beta[start:end].unsqueeze(0),
+            initial_state=state_pool[slot].unsqueeze(0),
+        )
+        output[start:end].copy_(result[0])
+        state_pool[slot].copy_(final_state[0])
     return output
 
 
@@ -289,9 +291,7 @@ def run_benchmark(
     device = torch.device("cuda", config.device)
     major, minor = torch.cuda.get_device_capability(device)
     if (int(major), int(minor)) != (6, 1):
-        raise RuntimeError(
-            f"Pascal GDN benchmark requires sm_61, got sm_{int(major)}{int(minor)}"
-        )
+        raise RuntimeError(f"Pascal GDN benchmark requires sm_61, got sm_{int(major)}{int(minor)}")
     if candidate is None:
         from freetoken.kernel.gdn_pascal import pascal_gdn_recurrence
 
@@ -307,17 +307,24 @@ def run_benchmark(
     v = torch.randn(
         config.tokens, config.value_heads, config.head_dim, device=device, generator=generator
     )
-    g = -torch.rand(
-        config.tokens, config.value_heads, device=device, generator=generator
-    ) * 0.2
+    g = -torch.rand(config.tokens, config.value_heads, device=device, generator=generator) * 0.2
     beta = torch.sigmoid(
         torch.randn(config.tokens, config.value_heads, device=device, generator=generator)
     )
     # The additive term makes the non-zero-state invariant explicit even in the vanishingly
     # unlikely event that a pseudo-random draw contains only zeros.
-    baseline_state = torch.randn(
-        1, config.value_heads, config.head_dim, config.head_dim, device=device, generator=generator
-    ) * 0.01 + 0.001
+    baseline_state = (
+        torch.randn(
+            1,
+            config.value_heads,
+            config.head_dim,
+            config.head_dim,
+            device=device,
+            generator=generator,
+        )
+        * 0.01
+        + 0.001
+    )
     slot_indices = torch.zeros(1, device=device, dtype=torch.int32)
     cu_seqlens = torch.tensor([0, config.tokens], device=device, dtype=torch.int32)
     request_slots = [0]
@@ -440,6 +447,7 @@ def run_benchmark(
             "candidate": _summary(candidate_samples),
             "reference": _summary(reference_samples),
         },
+        "timing_scope": "CUDA-event device work; host validation and dispatch are excluded",
         "metadata": {
             "commit": _git_commit(),
             "command": command,

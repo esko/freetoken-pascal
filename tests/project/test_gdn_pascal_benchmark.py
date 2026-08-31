@@ -110,3 +110,18 @@ def test_summary_keeps_raw_samples_and_reports_median_min_max() -> None:
         "min_ms": 1.0,
         "max_ms": 3.0,
     }
+
+
+def test_injected_commit_supports_gitless_runtime(monkeypatch) -> None:
+    commit = "a" * 40
+    monkeypatch.setenv("FREETOKEN_BENCHMARK_COMMIT", commit)
+
+    assert BENCHMARK._git_commit() == commit
+
+
+@pytest.mark.parametrize("commit", ["A" * 40, "a" * 39, "z" * 40])
+def test_injected_commit_rejects_noncanonical_sha(monkeypatch, commit) -> None:
+    monkeypatch.setenv("FREETOKEN_BENCHMARK_COMMIT", commit)
+
+    with pytest.raises(RuntimeError, match="40-character lowercase Git SHA"):
+        BENCHMARK._git_commit()
