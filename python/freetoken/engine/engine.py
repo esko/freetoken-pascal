@@ -1440,7 +1440,10 @@ def _validate_qwen_gguf_cpu_engine_config(config: EngineConfig) -> None:
         raise ValueError("Qwen GGUF CPU Engine attachment does not support CUDA graphs")
     threads = getattr(config, "moe_cpu_threads", 0)
     if isinstance(threads, bool) or not isinstance(threads, int) or threads < 0:
-        raise ValueError(f"Qwen GGUF CPU Engine moe_cpu_threads must be non-negative, got {threads!r}")
+        raise ValueError(
+            "Qwen GGUF CPU Engine moe_cpu_threads must be non-negative, "
+            f"got {threads!r}"
+        )
 
 
 def _guard_qwen_gguf_engine_setup(config: EngineConfig) -> None:
