@@ -36,7 +36,7 @@ def test_gguf_fixture_manifest_matches_bytes() -> None:
     manifest = load_json(FIXTURES / "gguf" / "manifest.json")
 
     assert manifest["license"] == "Apache-2.0"
-    assert len(manifest["files"]) == 9
+    assert len(manifest["files"]) == 10
     for entry in manifest["files"]:
         data = (FIXTURES / "gguf" / entry["name"]).read_bytes()
         assert len(data) == entry["size"]

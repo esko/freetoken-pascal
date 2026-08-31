@@ -49,6 +49,11 @@ state are seeded regression values from the tiny fixture, not independent HF
 equivalence evidence. This is an H0 model-composition oracle only: it does not
 claim Engine, scheduler, API-serving, GGUF/PLE-mmap, CUDA, or P4 evidence.
 
+Issue #16 adds `test_real_qwen_gguf_decode_matches_resident_reference`, which opens the deterministic `qwen4-tiny-experts.gguf` through the real `QwenGGUFCpuExpertBundle` and uses the retained scalar Q4_K decoder to materialize those exact packed rows into the same model's resident reference experts.
+It runs one cache-zero decode through real eager model attachment and compares the resulting model logits with explicit tolerances.
+The test records the selected scalar/native Q4_K census and execution telemetry, rejects prefill, grouped and graph modes, and verifies detach restores the original experts while the caller retains bundle ownership.
+This remains an H0 tiny-model seam test and makes no full production model, CLI, serving, performance or P4 claim.
+
 Issue #18 also provides a bounded host-resource lifecycle observation:
 
 ```text

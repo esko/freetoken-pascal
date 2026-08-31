@@ -23,6 +23,7 @@ from freetoken.models.qwen4_exp.moe import Qwen4ExpMoE
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests" / "fixtures" / "qwen4-tiny"
+EXPERT_FIXTURE = ROOT / "tests" / "fixtures" / "gguf" / "qwen4-tiny-experts.gguf"
 
 
 class _LastTokenMetadata:
@@ -34,8 +35,12 @@ class _LastTokenMetadata:
         return torch.tensor([self.last_index], dtype=torch.long)
 
 
-def _fixture_config():
+def _fixture_config(*, model_geometry: int | None = None):
     raw = json.loads((FIXTURE / "config.json").read_text(encoding="utf-8"))
+    if model_geometry is not None:
+        raw["text_config"]["hidden_size"] = model_geometry
+        raw["text_config"]["moe_intermediate_size"] = model_geometry
+        raw["text_config"]["shared_expert_intermediate_size"] = model_geometry
     raw["text_config"] = SimpleNamespace(**raw["text_config"])
     # The fixture's manifest declares float32-reference tensors.  Keep its published geometry
     # and use an explicit unquantized model config so the tiny CPU oracle does not pretend to
@@ -105,6 +110,28 @@ def _batch(tokens: list[int], *, phase: str, cached_len: int = 0, slot: int = 1)
 def _run(model, context, batch):
     with context.forward_batch(batch):
         return model.forward().detach().clone()
+
+
+def _install_resident_q4_reference_experts(model, bundle) -> None:
+    """Decode the bundle's packed rows with the retained scalar reference path."""
+    from freetoken.moe.q4_k import dequantize_q4_k
+
+    for layer_id in range(model._config.num_layers):
+        experts = model.model.layers.op_list[layer_id].mlp.experts
+        gate_bank = bundle.host.experts.bank(layer_id, "gate")
+        up_bank = bundle.host.experts.bank(layer_id, "up")
+        down_bank = bundle.host.experts.bank(layer_id, "down")
+        for expert_id in range(model._config.num_experts):
+            gate = dequantize_q4_k(gate_bank.expert_packed(expert_id))
+            up = dequantize_q4_k(up_bank.expert_packed(expert_id))
+            down = dequantize_q4_k(down_bank.expert_packed(expert_id))
+            experts.gate_up_proj[expert_id, : model._config.moe_intermediate_size].copy_(
+                torch.from_numpy(gate)
+            )
+            experts.gate_up_proj[expert_id, model._config.moe_intermediate_size :].copy_(
+                torch.from_numpy(up)
+            )
+            experts.down_proj[expert_id].copy_(torch.from_numpy(down))
 
 
 @pytest.fixture
@@ -254,3 +281,66 @@ def test_qwen4_cpu_reference_rejects_quantized_expert_layout():
     )
     with pytest.raises(RuntimeError, match="unquantized resident expert weights"):
         moe.forward(torch.zeros(1, 4))
+
+
+def test_real_qwen_gguf_decode_matches_resident_reference():
+    """Exercise one real GGUF bundle through the attached model forward path."""
+    config = _fixture_config(model_geometry=256)
+    model = _new_model(config, seed=23)
+    context = _new_runtime(config)
+    model.load_host_weights("fixture", dummy=True)
+    resident_experts = tuple(layer.mlp.experts for layer in model.model.layers.op_list)
+
+    from freetoken.moe.gguf_cpu import open_qwen_gguf_cpu_expert_bundle
+
+    bundle = open_qwen_gguf_cpu_expert_bundle(
+        EXPERT_FIXTURE,
+        top_k=config.num_experts_per_tok,
+        mode="auto",
+        max_tokens=1,
+        max_routes=config.num_experts_per_tok,
+    )
+    try:
+        _install_resident_q4_reference_experts(model, bundle)
+        resident = _run(model, context, _batch([7], phase="decode"))
+        model.attach_gguf_cpu_eager_bridge(bundle)
+        context.linear_state_pool.reset(1)
+        attached = _run(model, context, _batch([7], phase="decode"))
+        torch.testing.assert_close(attached, resident, rtol=2e-4, atol=2e-5)
+
+        telemetry = model.gguf_cpu_expert_telemetry()
+        assert tuple(telemetry) == (0, 1)
+        for layer_id, layer_telemetry in telemetry.items():
+            assert layer_telemetry["source"] == "gguf-mmap"
+            assert layer_telemetry["memory"]["expert_mapped_bytes"] > 0
+            census = tuple(layer_telemetry["kernel_census"])
+            assert census in (("q4_k_scalar",), ("q4_k_avx2",))
+            execution = layer_telemetry["execution_telemetry"]
+            assert execution is not None
+            assert execution["backend"] == census[0]
+            assert execution["layer_id"] == layer_id
+            assert execution["tokens_non_padded"] == 1
+            assert execution["routes_executed"] == config.num_experts_per_tok
+            assert execution["thread_count"] == 1
+
+        with pytest.raises(ValueError, match="decode-only"):
+            _run(model, context, _batch([7], phase="prefill"))
+
+        grouped = _batch([7], phase="decode")
+        grouped.reqs = [grouped.reqs[0], grouped.reqs[0]]
+        grouped.padded_reqs = grouped.reqs
+        with pytest.raises(ValueError, match="one request"):
+            _run(model, context, grouped)
+
+        graph = _batch([7], phase="decode")
+        graph.graph_capture = True
+        with pytest.raises(ValueError, match="graph capture"):
+            _run(model, context, graph)
+    finally:
+        model.detach_gguf_cpu_expert_bundle()
+        assert tuple(layer.mlp.experts for layer in model.model.layers.op_list) == resident_experts
+        assert model.gguf_cpu_expert_telemetry() == {}
+        assert not bundle.closed
+        bundle.close()
+        assert bundle.closed
+        model.close_host_resources()
