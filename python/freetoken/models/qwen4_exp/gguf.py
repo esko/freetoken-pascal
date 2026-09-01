@@ -60,7 +60,10 @@ def _grouped_to_tiled_indices(
     values_per_key: int,
     head_dim: int,
 ) -> torch.Tensor:
-    grouped = torch.arange(num_key_heads * values_per_key * head_dim)
+    # Model construction runs under a temporary meta-device context.  This is
+    # immutable operator metadata, not a model parameter, and must contain real
+    # values before GGUFInputPermutedLinear stores its CPU copy.
+    grouped = torch.arange(num_key_heads * values_per_key * head_dim, device="cpu")
     return grouped.reshape(num_key_heads, values_per_key, head_dim).permute(1, 0, 2).flatten()
 
 
@@ -93,7 +96,13 @@ def _merge_hyperconnection_parts(down_tensor, inject_tensor, args, *, name: str)
     pad_rows = (-(args.hc_lowrank + args.hc_count)) % 16
     parts = [down, inject]
     if pad_rows:
-        parts.append(torch.zeros((pad_rows, expected_width), dtype=torch.bfloat16))
+        parts.append(
+            torch.zeros(
+                (pad_rows, expected_width),
+                dtype=torch.bfloat16,
+                device=down.device,
+            )
+        )
     return torch.cat(parts, dim=0)
 
 
@@ -144,9 +153,15 @@ def iter_gguf_weights(
         assert multipliers is not None and vocab_sizes is not None and offsets is not None
         for layer_id in args.ple_layer_ids:
             prefix = f"model.layers.{layer_id}.ple.ple_embedding"
-            yield f"{prefix}.layer_multipliers", torch.tensor(multipliers, dtype=torch.int64)
-            yield f"{prefix}.ngram_heads_vocab_sizes", torch.tensor(vocab_sizes, dtype=torch.int64)
-            yield f"{prefix}.ngram_heads_offsets", torch.tensor(offsets, dtype=torch.int64)
+            yield f"{prefix}.layer_multipliers", torch.tensor(
+                multipliers, dtype=torch.int64, device="cpu"
+            )
+            yield f"{prefix}.ngram_heads_vocab_sizes", torch.tensor(
+                vocab_sizes, dtype=torch.int64, device="cpu"
+            )
+            yield f"{prefix}.ngram_heads_offsets", torch.tensor(
+                offsets, dtype=torch.int64, device="cpu"
+            )
     values_per_key = linear_group.num_value_heads // linear_group.num_key_heads
     qk_rows = 2 * linear_group.num_key_heads * linear_group.key_head_dim
     value_rows = linear_group.num_value_heads * linear_group.value_head_dim
