@@ -102,6 +102,86 @@ def test_cpu_reference_selection_has_stable_topk_and_causal_tail():
     assert torch.equal(got[:, 5:], torch.full_like(got[:, 5:], -1))
 
 
+def test_cpu_reference_selection_tied_blocks_choose_lowest_block_first():
+    fixture = _cpu_reference_fixture(budget=8)
+    backend = fixture.backend
+    req = fixture.req(0, 0, 16)
+    fixture.pool.cmp_k_cache(0).zero_()
+    md = fixture.batch([req], "prefill").attn_metadata
+    md.positions = torch.tensor([15], dtype=torch.int32)
+    md.token_to_req = torch.zeros(1, dtype=torch.int32)
+    md.seq_lens = torch.tensor([16], dtype=torch.int32)
+    md.block_table = torch.tensor([[0]], dtype=torch.int32)
+    index = SimpleNamespace(
+        q=torch.zeros(1, backend.index_heads, backend.index_head_dim, dtype=torch.bfloat16),
+        q_norm_weight=torch.zeros(backend.index_head_dim, dtype=torch.bfloat16),
+        eps=1.0e-6,
+    )
+
+    got = backend._select(index, md, 0)
+
+    assert torch.equal(got[0, :8], torch.arange(8, dtype=torch.int32))
+    assert torch.equal(got[0, 8:], torch.full((3,), -1, dtype=torch.int32))
+
+
+def test_cpu_reference_attention_isolates_two_requests_by_physical_page():
+    fixture = _cpu_reference_fixture()
+    backend = fixture.backend
+    q = torch.zeros(2, 4, 256, dtype=torch.bfloat16)
+    k_cache = torch.zeros(2, 64, 2, 256, dtype=torch.bfloat16)
+    v_cache = torch.empty_like(k_cache)
+    v_cache[0].fill_(11)
+    v_cache[1].fill_(22)
+    indices = torch.zeros(2, 1, dtype=torch.int32)
+    block_table = torch.tensor([[1], [0]], dtype=torch.int32)
+    token_to_req = torch.tensor([0, 1], dtype=torch.int32)
+
+    got = backend._attend_torch(q, k_cache, v_cache, indices, block_table, token_to_req)
+
+    torch.testing.assert_close(got[0], torch.full_like(got[0], 22))
+    torch.testing.assert_close(got[1], torch.full_like(got[1], 11))
+
+
+@pytest.mark.parametrize("physical_page", [-1, 2])
+def test_cpu_reference_attention_rejects_negative_or_out_of_range_physical_page(
+    physical_page: int,
+):
+    fixture = _cpu_reference_fixture()
+    backend = fixture.backend
+    q = torch.zeros(1, 4, 256, dtype=torch.bfloat16)
+    k_cache = torch.zeros(2, 64, 2, 256, dtype=torch.bfloat16)
+    indices = torch.zeros(1, 1, dtype=torch.int32)
+    block_table = torch.tensor([[physical_page]], dtype=torch.int32)
+    token_to_req = torch.zeros(1, dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="selected physical row is out of bounds"):
+        backend._attend_torch(q, k_cache, k_cache, indices, block_table, token_to_req)
+
+
+def test_cpu_reference_select_dispatches_to_torch_reference(monkeypatch):
+    fixture = _cpu_reference_fixture()
+    backend = fixture.backend
+    expected = torch.tensor([[7]], dtype=torch.int32)
+    seen = {}
+
+    def fake_select_torch(index, md, slot):
+        seen["args"] = (index, md, slot)
+        return expected
+
+    monkeypatch.setattr(backend, "_select_torch", fake_select_torch)
+    got = backend._select(object(), object(), 3)
+
+    assert got is expected
+    assert seen["args"][2] == 3
+
+
+def test_cpu_reference_capture_graph_is_eager_only():
+    fixture = _cpu_reference_fixture()
+
+    with pytest.raises(NotImplementedError, match="eager-only"):
+        fixture.backend.init_capture_graph(max_seq_len=128, bs_list=[1])
+
+
 def test_cpu_reference_paged_gqa_uses_page_table_and_matches_dense_oracle():
     fixture = _cpu_reference_fixture()
     attn = fixture.layer(QSA_LAYER, seed=31)
