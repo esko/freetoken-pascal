@@ -9,6 +9,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from statistics import median, pstdev
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker, SchemaError
@@ -1027,7 +1028,7 @@ def _qwen38_router_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
     return errors
 
 
-def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
+def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any], *, schema_dir: Path) -> list[str]:
     """Validate QSA sweep bindings and derived raw timing/allocator fields."""
     errors: list[str] = []
     inventory = document["hardware_inventory"]
@@ -1038,6 +1039,49 @@ def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
         errors.append("hardware_inventory.gpu_identity.index must match gpu_index")
     if identity["ecc_mode"] != expected_ecc:
         errors.append("hardware_inventory.gpu_identity.ecc_mode must match profile_id")
+    if document["evidence_status"] == "measured":
+        inventory_path = Path(inventory["path"])
+        if not inventory_path.is_absolute():
+            inventory_path = schema_dir.resolve().parent / inventory_path
+        try:
+            inventory_bytes = inventory_path.read_bytes()
+            measured_inventory = _strict_json_loads(inventory_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            errors.append(f"unable to read measured QSA hardware inventory: {error}")
+        else:
+            if hashlib.sha256(inventory_bytes).hexdigest() != inventory["sha256"]:
+                errors.append("hardware_inventory.sha256 must match the measured inventory file")
+            if not isinstance(measured_inventory, dict):
+                errors.append("measured QSA hardware inventory must contain an object")
+            else:
+                if measured_inventory.get("commit") != document["repository_commit"]:
+                    errors.append(
+                        "measured QSA hardware inventory commit must match repository_commit"
+                    )
+                if measured_inventory.get("profile_id") != profile:
+                    errors.append("measured QSA hardware inventory profile must match profile_id")
+                measured_gpus = [
+                    gpu
+                    for gpu in measured_inventory.get("gpus", [])
+                    if isinstance(gpu, dict) and gpu.get("index") == inventory["gpu_index"]
+                ]
+                if len(measured_gpus) != 1:
+                    errors.append("measured QSA hardware inventory must contain selected GPU once")
+                else:
+                    measured_gpu = measured_gpus[0]
+                    for field in (
+                        "index",
+                        "name",
+                        "compute_capability",
+                        "memory_mib",
+                        "uuid",
+                        "pci_bus_id",
+                        "ecc_mode",
+                    ):
+                        if measured_gpu.get(field) != identity[field]:
+                            errors.append(
+                                f"hardware_inventory.gpu_identity.{field} must match inventory file"
+                            )
 
     profile_record = document["profile"]
     selected_path = profile_record["selected_path"]
@@ -1103,6 +1147,11 @@ def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
             errors.append(f"samples[{index}].phase_events path must match profile.selected_path")
         if set(event["phase"] for event in events) != set(sample["phase_elapsed_ns"]):
             errors.append(f"samples[{index}] phase events must cover every composite phase")
+        event_keys = [(event["phase"], event["layer_id"], event["slot"]) for event in events]
+        if len(event_keys) != len(set(event_keys)):
+            errors.append(f"samples[{index}] phase events must have unique phase/layer/slot keys")
+        if {(event["layer_id"], event["slot"]) for event in events} != {(3, 0)}:
+            errors.append(f"samples[{index}] phase events must identify tiny QSA layer 3 slot 0")
         before = sample["allocator_before"]
         after = sample["allocator_after"]
         for label, snapshot in (("before", before), ("after", after)):
@@ -1135,6 +1184,19 @@ def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
             or statistic["total"]["max_ns"] != max(total_values)
         ):
             errors.append(f"timing_statistics {key} total bounds must match raw samples")
+        if total_values:
+            expected_median = int(median(total_values))
+            average = sum(total_values) / len(total_values)
+            expected_cv = 0.0 if average == 0 else pstdev(total_values) / average
+            if statistic["total"]["median_ns"] != expected_median:
+                errors.append(f"timing_statistics {key} total median must match raw samples")
+            if not math.isclose(
+                statistic["total"]["coefficient_of_variation"],
+                expected_cv,
+                rel_tol=1e-12,
+                abs_tol=1e-15,
+            ):
+                errors.append(f"timing_statistics {key} total CV must match raw samples")
         expected_phase_names = {
             "store_kv",
             "index_cache_composite",
@@ -1154,6 +1216,21 @@ def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
                 phase_stat["min_ns"] != min(values) or phase_stat["max_ns"] != max(values)
             ):
                 errors.append(f"timing_statistics {key} {phase_name} bounds must match raw samples")
+            if values:
+                expected_median = int(median(values))
+                average = sum(values) / len(values)
+                expected_cv = 0.0 if average == 0 else pstdev(values) / average
+                if phase_stat["median_ns"] != expected_median:
+                    errors.append(
+                        f"timing_statistics {key} {phase_name} median must match raw samples"
+                    )
+                if not math.isclose(
+                    phase_stat["coefficient_of_variation"],
+                    expected_cv,
+                    rel_tol=1e-12,
+                    abs_tol=1e-15,
+                ):
+                    errors.append(f"timing_statistics {key} {phase_name} CV must match raw samples")
 
     plan_keys = [(item["context_tokens"], item["phase"]) for item in document["workspace_plans"]]
     if len(plan_keys) != len(set(plan_keys)):
@@ -1318,7 +1395,9 @@ def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
     elif schema_name == "qwen38-router-h2-evidence.schema.json":
         errors.extend(_qwen38_router_h2_semantic_errors(document))
     elif schema_name == "qwen38-qsa-h2-evidence.schema.json":
-        errors.extend(_qwen38_qsa_h2_semantic_errors(document))
+        errors.extend(_qwen38_qsa_h2_semantic_errors(document, schema_dir=schema_dir))
+        if document["evidence_status"] == "measured" and document["repository_commit"] == "0" * 40:
+            errors.append("measured QSA evidence cannot use the placeholder repository_commit")
     if document.get("evidence_status") == "measured" and document.get("commit") == "0" * 40:
         errors.append("measured evidence cannot use the placeholder commit")
     return errors

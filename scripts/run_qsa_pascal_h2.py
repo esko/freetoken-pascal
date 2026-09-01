@@ -312,9 +312,10 @@ def _workspace_record(fixture: Any, context_tokens: int, phase: str) -> dict[str
         num_index_layers=len(group.layer_ids),
         num_req_slots=fixture.num_req_slots,
         ring_capacity=fixture.pool.ring_capacity,
-        num_pages=int(fixture.page_table.shape[1] // fixture.page_size),
+        # The cache pool includes one physical dummy page beyond the usable page table.
+        num_pages=int(fixture.page_table.shape[1] // fixture.page_size) + 1,
         max_position=group.rotary_config.max_position,
-        rotary_dim=fixture.config.rotary_config.rotary_dim,
+        rotary_dim=group.rotary_config.rotary_dim,
         batch_size=1,
         phase="eager",
         topk_backend=topk_backend,
@@ -574,6 +575,11 @@ def build_evidence(
                 "or thermal qualification",
                 "startup canary, cancellation, checkpoint restore, truncation, chunked "
                 "prefill, and graph capture were not measured",
+                "batch construction, host-to-device metadata copies, CPU scalar extraction, "
+                "host synchronization, and allocation/copy subcosts outside the four observed "
+                "composites were not isolated",
+                "workspace plans are advisory accounting only; capacity validation, reservation, "
+                "reuse, controlled exhaustion, and backoff were not exercised",
                 "the selected Pascal path is the eager Torch FP32 reference and does not "
                 "qualify an optimized kernel",
             ],

@@ -303,6 +303,9 @@ bash scripts/ci/hardware_gate.sh
 The output is `results/hardware/qwen38-qsa-h2-${profile_id}.json` and validates against `schemas/qwen38-qsa-h2-evidence.schema.json` before publication.
 It retains raw per-forward samples, composite phase sums, selected path and top-k backend, workspace plans, allocator allocation/reserve/high-water checkpoints, exact inventory identity, ECC profile, commit, clocks, temperature, and power telemetry.
 It explicitly labels startup canary, cancellation/restore, truncation, chunked prefill, graph capture, full-model serving, sustained load, thermal qualification, and performance as unmeasured or unclaimed.
+It also leaves batch construction, metadata copies, CPU scalar extraction, host synchronization,
+fine-grained allocation/copy overhead, workspace reservation/reuse, and controlled workspace
+exhaustion/backoff explicitly unmeasured; the serialized workspace plans are advisory accounting.
 The expected Pascal path is the eager Torch FP32 reference, so this slice does not qualify an optimized QSA kernel or change any default.
 
 ## Statistics

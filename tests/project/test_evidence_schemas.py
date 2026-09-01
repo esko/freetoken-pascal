@@ -249,6 +249,14 @@ def test_qsa_h2_fixture_is_synthetic_bounded_and_explicitly_unmeasured() -> None
             lambda value: value["samples"][0].update(total_elapsed_ns=1),
             "total_elapsed_ns is below composite phase sum",
         ),
+        (
+            lambda value: value["samples"][0]["phase_events"][0].update(layer_id=4),
+            "must identify tiny QSA layer 3 slot 0",
+        ),
+        (
+            lambda value: value["timing_statistics"][0]["total"].update(median_ns=1),
+            "total median must match raw samples",
+        ),
     ),
 )
 def test_qsa_h2_semantics_reject_forged_evidence(
@@ -260,6 +268,16 @@ def test_qsa_h2_semantics_reject_forged_evidence(
     errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=SCHEMA_DIR)
 
     assert any(message in error for error in errors), errors
+
+
+def test_measured_qsa_h2_requires_bound_inventory_file() -> None:
+    invalid = copy.deepcopy(load("qwen38-qsa-h2-evidence.json"))
+    invalid["evidence_status"] = "measured"
+    invalid["hardware_inventory"]["path"] = "results/hardware/does-not-exist.json"
+
+    errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=SCHEMA_DIR)
+
+    assert any("unable to read measured QSA hardware inventory" in error for error in errors)
 
 
 @pytest.mark.parametrize(

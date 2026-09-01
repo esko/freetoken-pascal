@@ -206,6 +206,7 @@ def test_workspace_record_uses_resolved_qsa_rotary_limit(monkeypatch: pytest.Mon
 
     def fake_calculate(request: object) -> _Plan:
         captured["max_position"] = getattr(request, "max_position")
+        captured["num_pages"] = getattr(request, "num_pages")
         return _Plan()
 
     workspace_module = SimpleNamespace(
@@ -248,6 +249,7 @@ def test_workspace_record_uses_resolved_qsa_rotary_limit(monkeypatch: pytest.Mon
 
     assert record["plan"] == {}
     assert captured["max_position"] == group.rotary_config.max_position
+    assert captured["num_pages"] == 65
 
 
 def test_hardware_gate_has_a_profile_bound_bounded_qsa_level() -> None:
