@@ -5,6 +5,7 @@ import json
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -126,9 +127,10 @@ def test_hard_deadline_can_be_cancelled_without_killing_process() -> None:
     deadline.cancel()
 
     assert process.terminated is True
-    assert "SIGKILL" in commands[0][2]
-    assert "prctl" in commands[0][2]
-    assert "getppid" in commands[0][2]
+    assert commands[0][0] == sys.executable
+    assert commands[0][1] == str(SCRIPT)
+    assert commands[0][2] == "--watchdog"
+    assert commands[0][-1] == "1"
 
 
 def test_hard_deadline_expires_in_a_separate_victim_process() -> None:
@@ -143,9 +145,41 @@ deadline.start()
 time.sleep(10)
 """
 
-    completed = subprocess.run([sys.executable, "-c", code], check=False, timeout=5)
+    victim = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    returncode = victim.wait(timeout=5)
 
-    assert completed.returncode == -signal.SIGKILL
+    assert returncode == -signal.SIGKILL
+
+
+def test_watchdog_exits_when_parent_dies_before_deadline() -> None:
+    code = f"""
+import importlib.util
+spec = importlib.util.spec_from_file_location('warm_parent_death_victim', {str(SCRIPT)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+deadline = module._HardDeadline(30)
+deadline.start()
+print(deadline._process.pid, flush=True)
+"""
+    victim = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    watchdog_pid = int(victim.stdout.strip())
+
+    deadline = time.monotonic() + 3
+    while Path(f"/proc/{watchdog_pid}").exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert not Path(f"/proc/{watchdog_pid}").exists()
 
 
 def test_model_shard_verification_rejects_same_size_content_drift(tmp_path: Path) -> None:

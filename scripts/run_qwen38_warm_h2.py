@@ -12,10 +12,13 @@ makes no steady-state TPS or thermal claim.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -263,18 +266,16 @@ class _HardDeadline:
         if self._process is not None:
             raise RuntimeError("hard deadline already started")
         parent_pid = os.getpid()
-        code = (
-            "import ctypes,os,signal,time;"
-            f"parent={parent_pid};"
-            "libc=ctypes.CDLL(None,use_errno=True);"
-            "result=libc.prctl(1,signal.SIGTERM);"
-            "result == 0 or (_ for _ in ()).throw(OSError(ctypes.get_errno(),'prctl'));"
-            "os.getppid() == parent or (_ for _ in ()).throw(SystemExit(0));"
-            f"time.sleep({self.seconds});"
-            "os.getppid() == parent and os.kill(parent,signal.SIGKILL)"
-        )
+        parent_start_time = Path(f"/proc/{parent_pid}/stat").read_text(encoding="ascii").split()[21]
         self._process = self._popen(
-            [sys.executable, "-c", code],
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--watchdog",
+                str(parent_pid),
+                parent_start_time,
+                str(self.seconds),
+            ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -290,6 +291,43 @@ class _HardDeadline:
             self._process.kill()
             self._process.wait(timeout=5)
         self._process = None
+
+
+def _process_start_time(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()[21]
+    except (FileNotFoundError, IndexError, OSError):
+        return None
+
+
+def _watchdog_main(parent_pid: int, expected_start: str, seconds: int) -> int:
+    """Kill only the exact producer process after the GPU-ownership deadline."""
+    if _process_start_time(parent_pid) != expected_start:
+        return 0
+    try:
+        pidfd = os.pidfd_open(parent_pid)
+    except OSError as error:
+        if error.errno != errno.ENOSYS:
+            raise
+        pidfd = None
+    if _process_start_time(parent_pid) != expected_start:
+        return 0
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGTERM) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG)")
+    if os.getppid() != parent_pid:
+        return 0
+    time.sleep(seconds)
+    if pidfd is not None:
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+            return 0
+        except OSError as error:
+            if error.errno != errno.ENOSYS:
+                raise
+    if _process_start_time(parent_pid) == expected_start:
+        os.kill(parent_pid, signal.SIGKILL)
+    return 0
 
 
 def _counter_delta(after: Mapping[str, Any], before: Mapping[str, Any], key: str) -> int:
@@ -545,6 +583,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "--watchdog":
+        if len(argv) != 4:
+            raise SystemExit("watchdog requires parent PID, start time, and seconds")
+        return _watchdog_main(int(argv[1]), argv[2], int(argv[3]))
     parser = argparse.ArgumentParser(description="Run bounded single-P4 warm-cache evidence")
     parser.add_argument("--full-h2", type=Path, required=True)
     parser.add_argument("--inventory", type=Path, required=True)
