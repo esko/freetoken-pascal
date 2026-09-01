@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import importlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from freetoken.attention.linear import build_fla_metadata
+from freetoken.core import Batch, Context, Req, SamplingParams
+from freetoken.distributed import set_tp_info, try_get_tp_info
+from freetoken.kvcache.linear_state_pool import LinearStatePool
+from freetoken.models.config import LinearGatedDeltaGroupConfig
+from freetoken.models.qwen4_exp.gdn import Qwen4ExpGatedDeltaNet
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "python/freetoken/kernel/csrc/jit/gdn_pascal.cu"
@@ -68,6 +75,47 @@ def _inputs(*, duplicate_slots: bool = False, bad_offsets: bool = False, tokens:
     return q, k, v, g, beta, state, indices, offsets
 
 
+def _proven_decode_metadata():
+    reqs = [
+        Req(
+            input_ids=torch.tensor([1, 2], dtype=torch.int32),
+            table_idx=slot,
+            cached_len=1,
+            output_len=2,
+            uid=slot,
+            sampling_params=SamplingParams(),
+            cache_handle=None,
+        )
+        for slot in (1, 2)
+    ]
+    batch = Batch(reqs=reqs, phase="decode")
+    batch.padded_reqs = reqs
+    batch.linear_table_idx = torch.tensor([1, 2], dtype=torch.int32)
+    batch.linear_table_idx_host = (1, 2)
+    metadata = build_fla_metadata(batch, torch.device("cpu"))
+    operator = object.__new__(Qwen4ExpGatedDeltaNet)
+    operator._ensure_pascal_metadata_proof(metadata, torch.device("cpu"))
+    return metadata
+
+
+def _proven_prefill_metadata(*, initial_values=(True,)):
+    req = Req(
+        input_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+        table_idx=1,
+        cached_len=1 if initial_values[0] else 0,
+        output_len=3,
+        uid=1,
+        sampling_params=SamplingParams(),
+        cache_handle=None,
+    )
+    batch = Batch(reqs=[req], phase="prefill")
+    batch.padded_reqs = [req]
+    metadata = build_fla_metadata(batch, torch.device("cpu"))
+    operator = object.__new__(Qwen4ExpGatedDeltaNet)
+    operator._ensure_pascal_metadata_proof(metadata, torch.device("cpu"))
+    return metadata
+
+
 def test_validator_accepts_ragged_gqa_pool_layout_and_pre_sigmoided_beta() -> None:
     launch = _require_adapter().validate_pascal_gdn_inputs(*_inputs())
 
@@ -77,6 +125,357 @@ def test_validator_accepts_ragged_gqa_pool_layout_and_pre_sigmoided_beta() -> No
     assert launch.num_k_heads == 1
     assert launch.num_v_heads == 2
     assert launch.num_slots == 4
+
+
+def test_scheduler_metadata_proof_avoids_duplicate_device_to_host_validation(monkeypatch) -> None:
+    adapter = _require_adapter()
+    assert not hasattr(adapter, "make_pascal_gdn_metadata_proof")
+    inputs = _inputs(tokens=2)
+    proof = _proven_decode_metadata().pascal_metadata_proof
+    assert proof is not None
+
+    def unexpected_sync(*_args, **_kwargs):
+        raise AssertionError("bound metadata must not be copied to the host")
+
+    monkeypatch.setattr(adapter, "_cpu_int_values", unexpected_sync)
+    launch = adapter.validate_pascal_gdn_inputs(
+        *inputs[:6], proof.slot_indices, proof.cu_seqlens, metadata_proof=proof
+    )
+    assert launch.num_tokens == 2
+
+
+def test_metadata_proof_rejects_forgery_tensor_replacement_and_mutation() -> None:
+    adapter = _require_adapter()
+    inputs = _inputs(tokens=2)
+    proof = _proven_decode_metadata().pascal_metadata_proof
+    assert proof is not None
+
+    with pytest.raises(TypeError, match="dataclass instances"):
+        replace(proof, slot_values=(2, 1))
+
+    replacement = proof.slot_indices.clone()
+    with pytest.raises(adapter.PascalGdnContractError, match="stale or unbound"):
+        proof.values_for(replacement, proof.cu_seqlens)
+
+    proof.slot_indices[0] = 0
+    with pytest.raises(adapter.PascalGdnContractError, match="stale or unbound"):
+        adapter.validate_pascal_gdn_inputs(
+            *inputs[:6], proof.slot_indices, proof.cu_seqlens, metadata_proof=proof
+        )
+
+
+def test_metadata_proof_retains_fail_closed_slot_and_offset_checks() -> None:
+    proof = _proven_decode_metadata().pascal_metadata_proof
+    assert proof is not None
+    with pytest.raises(TypeError, match="dataclass instances"):
+        replace(proof, slot_values=(4, 2))
+    with pytest.raises(TypeError, match="dataclass instances"):
+        replace(proof, offset_values=(0, 2, 1))
+
+
+def test_metadata_builder_distinguishes_cold_and_scheduler_proven_decode_paths(monkeypatch) -> None:
+    adapter = _require_adapter()
+    batch = Batch(reqs=[], phase="decode")
+    batch.padded_reqs = []
+    batch.linear_table_idx = torch.empty(0, dtype=torch.int32)
+
+    # An absent host tuple leaves a direct caller on the old synchronous path.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            adapter,
+            "_issue_pascal_gdn_metadata_proof",
+            lambda *_args, **_kwargs: pytest.fail("unproven metadata must not issue a proof"),
+        )
+        cold = build_fla_metadata(batch, torch.device("cpu"))
+    assert cold.pascal_metadata_proof is None
+
+    proven = _proven_decode_metadata()
+    assert proven.pascal_metadata_proof is not None
+    operator = object.__new__(Qwen4ExpGatedDeltaNet)
+    assert (
+        operator._ensure_pascal_metadata_proof(proven, torch.device("cpu"))
+        is proven.pascal_metadata_proof
+    )
+    slots, offsets, initial = proven.pascal_metadata_proof.values_for(
+        proven.pascal_metadata_proof.slot_indices, proven.pascal_metadata_proof.cu_seqlens
+    )
+    assert slots == [1, 2]
+    assert offsets == [0, 1, 2]
+    assert initial is None
+
+
+def test_proof_is_independent_from_mismatched_generic_tensor_and_prefill_dtype() -> None:
+    metadata = _proven_decode_metadata()
+    proof = metadata.pascal_metadata_proof
+    assert proof is not None
+    metadata.cache_indices[0] = 99
+    assert metadata.cache_indices.tolist() == [99, 2]
+    assert proof.slot_indices.tolist() == [1, 2]
+
+    req = Req(
+        input_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+        table_idx=1,
+        cached_len=1,
+        output_len=2,
+        uid=0,
+        sampling_params=SamplingParams(),
+        cache_handle=None,
+    )
+    batch = Batch(reqs=[req], phase="prefill")
+    batch.padded_reqs = [req]
+    prefill = build_fla_metadata(batch, torch.device("cpu"))
+    assert prefill.cu_seqlens.dtype == torch.int64
+    assert prefill.pascal_metadata_proof is None
+    object.__new__(Qwen4ExpGatedDeltaNet)._ensure_pascal_metadata_proof(
+        prefill, torch.device("cpu")
+    )
+    assert prefill.pascal_metadata_proof is not None
+    assert prefill.pascal_metadata_proof.cu_seqlens.dtype == torch.int32
+
+
+@pytest.mark.parametrize(
+    ("slot_values", "offset_values", "message"),
+    [((4, 2), (0, 1, 2), "out-of-range"), ((1, 2), (0, 2, 1), "nondecreasing")],
+)
+def test_semantic_proof_validation_rejects_invalid_slot_or_offset_before_launch(
+    slot_values, offset_values, message
+) -> None:
+    adapter = _require_adapter()
+    inputs = _inputs(tokens=2)
+    proof = adapter._issue_pascal_gdn_metadata_proof(
+        torch.device("cpu"), slot_values, offset_values
+    )
+    with pytest.raises(adapter.PascalGdnContractError, match=message):
+        adapter.validate_pascal_gdn_inputs(
+            *inputs[:6], proof.slot_indices, proof.cu_seqlens, metadata_proof=proof
+        )
+
+
+def test_metadata_proof_rejects_int32_overflow_before_tensor_staging() -> None:
+    adapter = _require_adapter()
+    with pytest.raises(adapter.PascalGdnContractError, match="int32 ABI range"):
+        adapter._issue_pascal_gdn_metadata_proof(torch.device("cpu"), (2**31,), (0, 1))
+
+    overflowing_slots = torch.tensor([2**31], dtype=torch.int64)
+    offsets = torch.tensor([0, 1], dtype=torch.int64)
+    with pytest.raises(adapter.PascalGdnContractError, match="int32 ABI range"):
+        adapter.validate_pascal_gdn_metadata(
+            overflowing_slots,
+            offsets,
+            num_slots=4,
+            num_tokens=1,
+        )
+
+
+def test_initial_state_proof_requires_bound_tensor_and_matching_length() -> None:
+    adapter = _require_adapter()
+    with pytest.raises(adapter.PascalGdnContractError, match="length"):
+        adapter._issue_pascal_gdn_metadata_proof(
+            torch.device("cpu"), (1, 2), (0, 1, 2), initial_values=(True,)
+        )
+
+    metadata = _proven_prefill_metadata()
+    proof = metadata.pascal_metadata_proof
+    assert proof is not None and proof.initial_state is not None
+    with pytest.raises(adapter.PascalGdnContractError, match="requires its bound tensor"):
+        proof.values_for(proof.slot_indices, proof.cu_seqlens)
+    proof.initial_state[0] = False
+    with pytest.raises(adapter.PascalGdnContractError, match="stale or unbound"):
+        proof.values_for(proof.slot_indices, proof.cu_seqlens, proof.initial_state)
+
+
+def test_pascal_decode_uses_proof_owned_effective_slots_when_generic_metadata_changes() -> None:
+    metadata = _proven_decode_metadata()
+    proof = metadata.pascal_metadata_proof
+    assert proof is not None
+    metadata.cache_indices[0] = 3
+    operator = object.__new__(Qwen4ExpGatedDeltaNet)
+    effective_slots, effective_offsets, initial = operator._validate_pascal_metadata(
+        metadata, num_slots=4, num_tokens=2
+    )
+    assert effective_slots is proof.slot_indices
+    assert effective_offsets is proof.cu_seqlens
+    assert effective_slots.tolist() == [1, 2]
+    assert effective_offsets.tolist() == [0, 1, 2]
+    assert initial is None
+
+
+def test_pascal_metadata_proof_rejects_replay_on_another_metadata_owner() -> None:
+    first = _proven_decode_metadata()
+    second = _proven_decode_metadata()
+    second.pascal_metadata_proof = first.pascal_metadata_proof
+    operator = object.__new__(Qwen4ExpGatedDeltaNet)
+    with pytest.raises(_require_adapter().PascalGdnContractError, match="another forward"):
+        operator._validate_pascal_metadata(second, num_slots=4, num_tokens=2)
+
+
+@pytest.mark.parametrize(
+    ("offsets", "initial", "message"),
+    [
+        ([0, 2, 2], None, r"exactly \[0\.\.B\]"),
+        ([0, 1, 2], [False, True], "must not provide initial-state"),
+    ],
+)
+def test_pascal_decode_requires_one_token_offsets_and_no_initial_flags(offsets, initial, message):
+    adapter = _require_adapter()
+    slots = torch.tensor([1, 2], dtype=torch.int32)
+    cu_seqlens = torch.tensor(offsets, dtype=torch.int32)
+    initial_state = None if initial is None else torch.tensor(initial, dtype=torch.bool)
+    with pytest.raises(adapter.PascalGdnContractError, match=message):
+        adapter.validate_pascal_gdn_metadata(
+            slots,
+            cu_seqlens,
+            num_slots=4,
+            num_tokens=2,
+            initial_state=initial_state,
+            phase="decode",
+        )
+
+
+def _cpu_forward_fixture(monkeypatch, *, phase: str, slots=(1, 2), cached=(1, 1)):
+    """Build the real model forward seam with a CPU recurrence stand-in."""
+
+    if try_get_tp_info() is None:
+        set_tp_info(0, 1)
+    group = LinearGatedDeltaGroupConfig(
+        name="linear",
+        layer_ids=(0,),
+        num_key_heads=1,
+        num_value_heads=2,
+        key_head_dim=2,
+        value_head_dim=2,
+        conv_kernel_dim=3,
+        output_gate="sigmoid",
+    )
+    pool = LinearStatePool(group, 4, torch.float32, torch.device("cpu"), tp_size=1)
+    ctx = Context(page_size=64)
+    ctx.linear_state_pool = pool
+    import freetoken.core as core
+
+    core._GLOBAL_CTX = ctx
+    op = Qwen4ExpGatedDeltaNet(
+        hidden_size=4,
+        num_k_heads=1,
+        num_v_heads=2,
+        head_k_dim=2,
+        head_v_dim=2,
+        conv_kernel_size=3,
+        rms_norm_eps=1e-6,
+        layer_id=0,
+        gdn_mode="pascal-fp32",
+        gdn_pascal_available=True,
+    )
+    with torch.no_grad():
+        for value in op.state_dict().values():
+            value.normal_(0.0, 0.1)
+
+    seen: list[torch.Tensor] = []
+
+    def recurrence(q, k, v, g, beta, state_pool, slot_indices, cu_seqlens, **kwargs):
+        seen.append(slot_indices.detach().clone())
+        return torch.zeros_like(v)
+
+    gdn_module = importlib.import_module("freetoken.models.qwen4_exp.gdn")
+    pascal_module = importlib.import_module("freetoken.kernel.gdn_pascal")
+    monkeypatch.setattr(gdn_module, "_device_capability", lambda _device: (6, 1))
+    monkeypatch.setattr(pascal_module, "pascal_gdn_recurrence", recurrence)
+    reqs = [
+        Req(
+            input_ids=torch.arange(2, dtype=torch.int32),
+            table_idx=int(slot),
+            cached_len=int(prefix),
+            output_len=2,
+            uid=index,
+            sampling_params=SamplingParams(),
+            cache_handle=None,
+        )
+        for index, (slot, prefix) in enumerate(zip(slots, cached, strict=True))
+    ]
+    batch = Batch(reqs=reqs, phase=phase)
+    batch.padded_reqs = reqs
+    batch.graph_capture = False
+    if phase == "decode":
+        batch.linear_table_idx = torch.tensor(slots, dtype=torch.int32)
+        batch.linear_table_idx_host = tuple(int(slot) for slot in slots)
+        hidden = torch.randn(len(reqs), 4)
+    else:
+        hidden = torch.randn(sum(req.extend_len for req in reqs), 4)
+    return op, ctx, batch, hidden, pool, seen
+
+
+def test_real_pascal_forward_decode_uses_proof_owned_slots_for_two_requests(monkeypatch) -> None:
+    op, ctx, batch, hidden, _pool, seen = _cpu_forward_fixture(
+        monkeypatch, phase="decode", slots=(1, 2)
+    )
+    with ctx.forward_batch(batch):
+        op.forward(hidden)
+    assert seen and seen[0].tolist() == [1, 2]
+
+
+def test_real_pascal_forward_rejects_malformed_decode_before_convolution(monkeypatch) -> None:
+    op, ctx, batch, hidden, pool, _seen = _cpu_forward_fixture(
+        monkeypatch, phase="decode", slots=(1, 2)
+    )
+    batch.fla_metadata = build_fla_metadata(batch, torch.device("cpu"))
+    batch.fla_metadata.cu_seqlens = torch.tensor([0, 2, 2], dtype=torch.int64)
+    batch.fla_metadata._pascal_host_offset_values = (0, 2, 2)
+    before_conv = pool.conv_states.clone()
+    before_recurrent = pool.recurrent_states.clone()
+    op._reference_conv_decode = lambda *_args: pytest.fail("convolution ran before preflight")
+    with pytest.raises((ValueError, RuntimeError), match=r"exactly \[0\.\.B\]"):
+        with ctx.forward_batch(batch):
+            op.forward(hidden)
+    torch.testing.assert_close(pool.conv_states, before_conv)
+    torch.testing.assert_close(pool.recurrent_states, before_recurrent)
+
+
+def test_real_pascal_forward_rejects_attached_proof_for_replaced_pool(monkeypatch) -> None:
+    op, ctx, batch, hidden, pool, _seen = _cpu_forward_fixture(
+        monkeypatch, phase="decode", slots=(1, 2)
+    )
+    with ctx.forward_batch(batch):
+        op.forward(hidden)
+    pool.conv_states = pool.conv_states.clone()
+    with pytest.raises(_require_adapter().PascalGdnContractError, match="state pool mismatch"):
+        op._ensure_pascal_metadata_proof(
+            batch.fla_metadata,
+            torch.device("cpu"),
+            pool=pool,
+            phase="decode",
+        )
+
+
+def test_real_pascal_forward_prefill_resets_proof_owned_fresh_slot(monkeypatch) -> None:
+    op, ctx, batch, hidden, pool, seen = _cpu_forward_fixture(
+        monkeypatch, phase="prefill", slots=(1, 2), cached=(0, 1)
+    )
+    pool.recurrent_states[0, 1].fill_(7.0)
+    pool.recurrent_states[0, 2].fill_(9.0)
+    with ctx.forward_batch(batch):
+        batch.fla_metadata = build_fla_metadata(batch, torch.device("cpu"))
+        # An adversarial generic reset list must not override proof-owned slot/initial pairs.
+        batch.fla_metadata.fresh_state_indices = torch.tensor([2], dtype=torch.long)
+        op.forward(hidden)
+    assert seen
+    assert torch.count_nonzero(pool.recurrent_states[0, 1]).item() == 0
+    assert torch.count_nonzero(pool.recurrent_states[0, 2]).item() > 0
+
+
+@pytest.mark.parametrize("invalid", ("metadata", "pool"))
+def test_real_pascal_forward_fails_before_convolution_mutation(monkeypatch, invalid) -> None:
+    op, ctx, batch, hidden, pool, _seen = _cpu_forward_fixture(
+        monkeypatch, phase="decode", slots=(1, 2)
+    )
+    if invalid == "metadata":
+        batch.linear_table_idx_host = (99, 2)
+    else:
+        pool.conv_states = pool.conv_states.to(torch.float64)
+    before = pool.conv_states.clone()
+    op._reference_conv_decode = lambda *_args: pytest.fail("convolution ran before preflight")
+    with pytest.raises((ValueError, RuntimeError), match=r"Pascal GDN|pascal-fp32|slot_indices"):
+        with ctx.forward_batch(batch):
+            op.forward(hidden)
+    torch.testing.assert_close(pool.conv_states, before)
 
 
 @pytest.mark.parametrize(

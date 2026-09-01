@@ -66,9 +66,15 @@ projection, causal convolution, gate, recurrence, gated norm, and output project
 prefill and one-token decode, with nonzero carried state and correctness checked first. The
 fixed Qwen3.8 geometry is `hidden=2560/D=128/HK=16/HV=48`; it is explicit-only, thermally constrained,
 and not a complete-model or release benchmark. The host wall clock includes Python dispatch and
-synchronous Pascal metadata validation; device-scoped CUDA events include device work plus any
-stream idle caused by that synchronous dispatch. Paired sample order alternates. Keep the run short,
-and capture `nvidia-smi` telemetry separately:
+synchronous Pascal metadata validation when the cold fallback is selected; scheduler-issued
+metadata proofs avoid that repeated device-to-host validation. Device-scoped CUDA events include
+device work plus any stream idle caused by synchronous dispatch. Paired sample order alternates.
+The report's `selected_behavior.metadata_validation` identifies the selected path. The
+`metadata_proof_timings` block separately labels allocator-cold proof construction (after
+emptying PyTorch's caching allocator, without resetting the CUDA runtime), allocator-warm proof
+reissues, and warm semantic proof validation
+for both prefill and decode. Keep the
+run short, and capture `nvidia-smi` telemetry separately:
 
 Every timed sample also contains phase-level CUDA-event and host-wall intervals plus aggregate
 `phase_statistics`. The required phases are layer total, projection, convolution, qkv preparation,

@@ -35,7 +35,14 @@ pool's `[slots, value_heads, K, V]` layout, consumes pre-sigmoided beta, and add
 requests with unique slot IDs and `cu_seqlens`. The FLA recurrent-state view is [V,K] while the
 pool view is [K,V]; equal dimensions only make these views shape-compatible, so axis-order and
 nonzero-state parity remain H2 work. Backend switching and checkpoint parity are not claimed by
-H0, and factory activation remains disabled.
+H0, and factory activation remains disabled. For eager Pascal forwards, scheduler-issued host
+tuples are validated for integer range, slot ownership, ragged offsets and initial-state binding
+before projection or convolution can mutate a state pool. The preflight also binds the proof to the
+current metadata owner, batch phase, device, and state-pool slabs. Prefill reset slots are derived
+from proof-owned slots and initial-state flags; raw `fresh_state_indices` is not trusted. Decode
+requires one token per request with offsets exactly `[0..B]` and no initial-state flags. The
+proof-owned slot tensor is also the effective decode-convolution index source, so later changes to
+generic FLA staging metadata cannot redirect convolution or recurrence state.
 
 QSA retains full-resolution K/V and stores one compressed index key per configured token group.
 Before the token budget is reached, selection is dense-equivalent. Beyond it, the indexer selects

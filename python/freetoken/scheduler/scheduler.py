@@ -797,10 +797,12 @@ class Scheduler(SchedulerIOMixin):
                     pool = self.engine.linear_state_pool
                     slots = [r.linear_slot_idx if r.linear_slot_idx is not None
                              else pool.padding_slot for r in batch.padded_reqs]
+                    batch.linear_table_idx_host = tuple(int(slot) for slot in slots)
                     batch.linear_table_idx = torch.tensor(
                         slots, dtype=torch.int32, device="cpu", pin_memory=True
                     ).to(self.device, non_blocking=True)
                 else:
+                    batch.linear_table_idx_host = tuple(int(r.table_idx) for r in batch.padded_reqs)
                     batch.linear_table_idx = input_mapping[0].to(torch.int32)
             # Per-forward GDN metadata (cu_seqlens / cache_indices / continuation flags),
             # built once here instead of rebuilt in each of the 30 GDN layers. For decode

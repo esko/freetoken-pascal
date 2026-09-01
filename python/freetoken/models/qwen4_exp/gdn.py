@@ -281,11 +281,20 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         li = pool.local_index(self.layer_id)
         state_len = pool.conv_states.shape[-1]
         weight = self._conv_weight().unsqueeze(1)
-        starts = fla.cu_seqlens.detach().cpu().tolist()
-        slots = fla.cache_indices.detach().cpu().tolist()
-        has_initial_state = (
-            None if fla.has_initial_state is None else fla.has_initial_state.detach().cpu().tolist()
-        )
+        proof = getattr(fla, "pascal_metadata_proof", None)
+        if proof is None:
+            starts = fla.cu_seqlens.detach().cpu().tolist()
+            slots = fla.cache_indices.detach().cpu().tolist()
+            has_initial_state = (
+                None
+                if fla.has_initial_state is None
+                else fla.has_initial_state.detach().cpu().tolist()
+            )
+        else:
+            slots, starts, proof_initial = proof.values_for(
+                proof.slot_indices, proof.cu_seqlens, proof.initial_state
+            )
+            has_initial_state = proof_initial
         result = torch.empty_like(conv_in)
         for index, slot in enumerate(slots):
             start, end = int(starts[index]), int(starts[index + 1])
@@ -430,8 +439,126 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 "pascal-fp32 cannot determine CUDA graph-capture state"
             ) from error
 
-    def _validate_pascal_metadata(self, fla) -> None:
-        """Reject scheduler checkpoint metadata the standalone recurrence cannot preserve."""
+    def _ensure_pascal_metadata_proof(
+        self, fla, device: torch.device, *, pool=None, phase: str | None = None
+    ):
+        """Lazily issue one private Pascal proof for all layers sharing this metadata."""
+
+        owner = getattr(fla, "_pascal_metadata_owner", None)
+        proof_phase = phase if phase is not None else getattr(fla, "_pascal_metadata_phase", None)
+        pool_tensors = None
+        if pool is not None:
+            recurrent = getattr(pool, "recurrent_states", None)
+            convolution = getattr(pool, "conv_states", None)
+            if isinstance(recurrent, torch.Tensor) and isinstance(convolution, torch.Tensor):
+                pool_tensors = (recurrent, convolution)
+        proof = getattr(fla, "pascal_metadata_proof", None)
+        if proof is not None:
+            proof.validate_context(
+                owner_token=owner,
+                phase=proof_phase,
+                device=device,
+                pool_tensors=pool_tensors,
+                expected_slot_values=getattr(fla, "_pascal_host_slot_values", None),
+                expected_offset_values=getattr(fla, "_pascal_host_offset_values", None),
+                expected_initial_values=getattr(fla, "_pascal_host_initial_values", None),
+            )
+            return proof
+        slots = getattr(fla, "_pascal_host_slot_values", None)
+        offsets = getattr(fla, "_pascal_host_offset_values", None)
+        if slots is None or offsets is None:
+            return None
+        from freetoken.kernel.gdn_pascal import _issue_pascal_gdn_metadata_proof
+
+        proof = _issue_pascal_gdn_metadata_proof(
+            device,
+            slots,
+            offsets,
+            initial_values=getattr(fla, "_pascal_host_initial_values", None),
+            owner_token=owner,
+            phase=proof_phase,
+            pool_tensors=pool_tensors,
+        )
+        fla.pascal_metadata_proof = proof
+        return proof
+
+    def _validate_pascal_pool(self, pool, device: torch.device) -> None:
+        """Validate both state-pool slabs before projection or any in-place update."""
+
+        if pool is None:
+            raise GdnDispatchError("pascal-fp32 requires a linear state pool")
+        recurrent = getattr(pool, "recurrent_states", None)
+        convolution = getattr(pool, "conv_states", None)
+        if not isinstance(recurrent, torch.Tensor) or not isinstance(convolution, torch.Tensor):
+            raise GdnDispatchError("pascal-fp32 requires recurrent_states and conv_states tensors")
+        if recurrent.device != device or convolution.device != device:
+            raise GdnDispatchError("pascal-fp32 state pool must be on the hidden-state device")
+        if recurrent.dtype != torch.float32:
+            raise GdnDispatchError("pascal-fp32 requires an FP32 recurrent state pool")
+        if convolution.dtype != self.conv1d.weight.dtype:
+            raise GdnDispatchError(
+                "pascal-fp32 convolution state dtype must match the convolution weight"
+            )
+        if recurrent.ndim != 5:
+            raise GdnDispatchError(
+                "pascal-fp32 recurrent state pool must have shape [layers, slots, heads, K, V]"
+            )
+        if convolution.ndim != 4:
+            raise GdnDispatchError(
+                "pascal-fp32 convolution state pool must have shape [layers, slots, channels, K-1]"
+            )
+        if recurrent.shape[1] <= 0 or convolution.shape[1] != recurrent.shape[1]:
+            raise GdnDispatchError("pascal-fp32 state pool has an invalid slot dimension")
+        if tuple(recurrent.shape[2:]) != (
+            self.num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+        ):
+            raise GdnDispatchError("pascal-fp32 recurrent state pool has incompatible geometry")
+        if tuple(convolution.shape[2:]) != (self.conv_dim, self.conv_kernel_size - 1):
+            raise GdnDispatchError("pascal-fp32 convolution state pool has incompatible geometry")
+        try:
+            pool.local_index(self.layer_id)
+        except (AttributeError, KeyError, IndexError) as error:
+            raise GdnDispatchError(
+                f"pascal-fp32 state pool has no local row for layer {self.layer_id}"
+            ) from error
+
+    @staticmethod
+    def _pascal_fresh_reset_slots(fla, effective_slots, initial_values):
+        """Return proof-owned fresh slots; generic ``fresh_state_indices`` is never trusted."""
+
+        if initial_values is None:
+            return None
+        proof = getattr(fla, "pascal_metadata_proof", None)
+        slots = (
+            proof.slot_values
+            if proof is not None
+            else getattr(fla, "_pascal_host_slot_values", None)
+        )
+        if slots is None:
+            slots = [int(value) for value in effective_slots.detach().cpu().tolist()]
+        fresh = [int(slot) for slot, initial in zip(slots, initial_values) if not initial]
+        if not fresh:
+            return None
+        return torch.tensor(fresh, dtype=torch.long, device=effective_slots.device)
+
+    def _validate_pascal_metadata(
+        self,
+        fla,
+        *,
+        num_slots: int | None = None,
+        num_tokens: int | None = None,
+        device: torch.device | None = None,
+        phase: str | None = None,
+        pool=None,
+    ):
+        """Validate Pascal metadata before projection/convolution/state mutation.
+
+        The returned slot and offset tensors are the proof-owned effective metadata when a
+        scheduler-issued proof is present. Generic FLA metadata remains the direct-call
+        fallback and is synchronously checked for ABI range and ragged semantics.
+        """
 
         observer = getattr(self, "_gdn_phase_observer", None)
         if observer is not None:
@@ -447,6 +574,63 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 raise GdnDispatchError(
                     "pascal-fp32 does not support GDN tracking/checkpoint-boundary metadata"
                 )
+            if num_slots is None or num_tokens is None:
+                return None
+            phase = phase if phase is not None else getattr(fla, "_pascal_metadata_phase", None)
+            if phase not in ("prefill", "decode"):
+                raise GdnDispatchError(f"pascal-fp32 requires a valid phase, got {phase!r}")
+            metadata_phase = getattr(fla, "_pascal_metadata_phase", None)
+            if metadata_phase is not None and metadata_phase != phase:
+                raise GdnDispatchError("pascal-fp32 metadata phase does not match the batch")
+            for name in ("cache_indices", "cu_seqlens"):
+                value = getattr(fla, name, None)
+                if not isinstance(value, torch.Tensor):
+                    raise GdnDispatchError(f"pascal-fp32 {name} must be a tensor")
+                if value.ndim != 1 or not value.is_contiguous():
+                    raise GdnDispatchError(f"pascal-fp32 {name} must be contiguous rank-1")
+                if value.dtype not in (torch.int32, torch.int64):
+                    raise GdnDispatchError(
+                        f"pascal-fp32 {name} must use int32 or int64 metadata"
+                    )
+                if device is not None and value.device != device:
+                    raise GdnDispatchError(f"pascal-fp32 {name} must be on the model device")
+            initial_state = getattr(fla, "has_initial_state", None)
+            if phase == "decode":
+                if initial_state is not None or getattr(fla, "fresh_state_indices", None) is not None:
+                    raise GdnDispatchError(
+                        "pascal-fp32 decode must not include initial-state or fresh-slot metadata"
+                    )
+            else:
+                if not isinstance(initial_state, torch.Tensor):
+                    raise GdnDispatchError("pascal-fp32 prefill requires initial-state metadata")
+                if (
+                    initial_state.dtype != torch.bool
+                    or initial_state.ndim != 1
+                    or not initial_state.is_contiguous()
+                    or (device is not None and initial_state.device != device)
+                ):
+                    raise GdnDispatchError(
+                        "pascal-fp32 prefill initial-state metadata must be contiguous bool [B]"
+                    )
+            if pool is not None:
+                self._validate_pascal_pool(pool, device or fla.cache_indices.device)
+            from freetoken.kernel.gdn_pascal import validate_pascal_gdn_metadata
+
+            proof = getattr(fla, "pascal_metadata_proof", None)
+            return validate_pascal_gdn_metadata(
+                fla.cache_indices,
+                fla.cu_seqlens,
+                num_slots=num_slots,
+                num_tokens=num_tokens,
+                initial_state=fla.has_initial_state,
+                metadata_proof=proof,
+                phase=phase,
+                owner_token=getattr(fla, "_pascal_metadata_owner", None),
+                pool_tensors=(pool.recurrent_states, pool.conv_states) if pool is not None else None,
+                expected_slot_values=getattr(fla, "_pascal_host_slot_values", None),
+                expected_offset_values=getattr(fla, "_pascal_host_offset_values", None),
+                expected_initial_values=getattr(fla, "_pascal_host_initial_values", None),
+            )
         finally:
             if observer is not None:
                 observer("metadata_validation", "end")
@@ -502,8 +686,16 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         if observer is not None:
             observer("metadata_validation", "begin")
         try:
-            cache_indices = int32_metadata("cache_indices", fla.cache_indices)
-            cu_seqlens = int32_metadata("cu_seqlens", fla.cu_seqlens)
+            metadata_proof = getattr(fla, "pascal_metadata_proof", None)
+            if metadata_proof is None:
+                cache_indices = int32_metadata("cache_indices", fla.cache_indices)
+                cu_seqlens = int32_metadata("cu_seqlens", fla.cu_seqlens)
+            else:
+                # A scheduler-issued proof owns dedicated int32 tensors built from its host
+                # tuples. The kernel validates their versioned identity without another
+                # synchronous device-to-host copy; generic FLA tensors remain untouched.
+                cache_indices = metadata_proof.slot_indices
+                cu_seqlens = metadata_proof.cu_seqlens
         finally:
             if observer is not None:
                 observer("metadata_validation", "end")
@@ -523,6 +715,7 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 state_source,
                 cache_indices,
                 cu_seqlens,
+                metadata_proof=metadata_proof,
             ).unsqueeze(0)
         finally:
             if observer is not None:
@@ -588,7 +781,36 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             fla = build_fla_metadata(batch, hidden_states.device)
             batch.fla_metadata = fla
         if decision.selected_implementation == "pascal-fp32":
-            self._validate_pascal_metadata(fla)
+            self._ensure_pascal_metadata_proof(
+                fla,
+                hidden_states.device,
+                pool=pool,
+                phase=batch.phase,
+            )
+            pascal_effective_metadata = self._validate_pascal_metadata(
+                fla,
+                num_slots=(
+                    int(pool.recurrent_states.shape[1])
+                    if isinstance(getattr(pool, "recurrent_states", None), torch.Tensor)
+                    else 0
+                ),
+                num_tokens=int(total),
+                device=hidden_states.device,
+                phase=batch.phase,
+                pool=pool,
+            )
+            pascal_reset_slots = (
+                self._pascal_fresh_reset_slots(
+                    fla,
+                    pascal_effective_metadata[0],
+                    pascal_effective_metadata[2],
+                )
+                if batch.is_prefill
+                else None
+            )
+        else:
+            pascal_effective_metadata = None
+            pascal_reset_slots = None
 
         observer = getattr(self, "_gdn_phase_observer", None)
         if observer is not None:
@@ -612,7 +834,11 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             observer("convolution", "begin")
         try:
             if batch.is_decode:
-                if decision.selected_implementation in ("torch-reference", "pascal-fp32"):
+                if decision.selected_implementation == "pascal-fp32":
+                    assert pascal_effective_metadata is not None
+                    effective_slots = pascal_effective_metadata[0]
+                    mixed = self._reference_conv_decode(conv_in, effective_slots, pool)
+                elif decision.selected_implementation == "torch-reference":
                     mixed = self._reference_conv_decode(conv_in, fla.cache_indices, pool)
                 else:
                     # Fused fla decode kernel: gating + in-kernel l2norm + recurrent update +
@@ -715,7 +941,10 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             beta = beta.float().reshape(1, total, self.num_v_heads)
             # The chunk kernel reads + writes back initial_state[cache_indices] in place;
             # fresh sequences (cached_len==0) must start from a zeroed slot.
-            if fla.fresh_state_indices is not None:
+            if decision.selected_implementation == "pascal-fp32":
+                if pascal_reset_slots is not None:
+                    pool.recurrent_states[li].index_fill_(0, pascal_reset_slots, 0.0)
+            elif fla.fresh_state_indices is not None:
                 pool.recurrent_states[li].index_fill_(0, fla.fresh_state_indices, 0.0)
             observe_recurrence = (
                 observer is not None and decision.selected_implementation != "pascal-fp32"

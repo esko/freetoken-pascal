@@ -420,6 +420,38 @@ def validate_report_format(report: dict[str, Any]) -> None:
                 raise ValueError(
                     f"timings {case} {side} missing phase statistics: {sorted(missing_statistics)}"
                 )
+    proof_timings = report.get("metadata_proof_timings")
+    if not isinstance(proof_timings, dict):
+        raise ValueError("benchmark report missing metadata_proof_timings")
+    for case in ("prefill", "decode"):
+        block = proof_timings.get(case)
+        if not isinstance(block, dict):
+            raise ValueError(f"metadata proof timings missing {case} case")
+        for phase in (
+            "allocator_cold_proof_construction",
+            "allocator_warm_proof_reissue",
+            "warm_proof_validation",
+        ):
+            timing = block.get(phase)
+            if not isinstance(timing, dict):
+                raise ValueError(f"metadata proof timings {case} missing {phase}")
+            samples = timing.get("samples")
+            if not isinstance(samples, list) or not samples:
+                raise ValueError(f"metadata proof timings {case} {phase} missing samples")
+            for sample in samples:
+                if not isinstance(sample, dict):
+                    raise ValueError(
+                        f"metadata proof timing {case} {phase} sample must be a mapping"
+                    )
+                for clock in ("cuda_event_ms", "host_wall_ms"):
+                    value = float(sample.get(clock, float("nan")))
+                    if not math.isfinite(value) or value < 0:
+                        raise ValueError(
+                            f"invalid {clock} for metadata proof timing {case} {phase}"
+                        )
+            statistics_block = timing.get("statistics")
+            if not isinstance(statistics_block, dict):
+                raise ValueError(f"metadata proof timings {case} {phase} missing statistics")
     json.dumps(report, allow_nan=False)
 
 
@@ -569,9 +601,23 @@ def _make_batch(
     batch.padded_reqs = [request]
     if phase == "decode":
         batch.linear_table_idx = torch.tensor([1], dtype=torch.int32, device=device)
+        # Mirror scheduler-owned eager metadata. A direct caller that omits this host tuple
+        # remains on the cold/unproven validation path and is covered by hosted tests.
+        batch.linear_table_idx_host = (1,)
     core._GLOBAL_CTX = context
     batch.fla_metadata = build_fla_metadata(batch, device)
     return batch
+
+
+def _metadata_validation_mode(batch: Any) -> str:
+    """Return the visible Pascal metadata validation mode for benchmark evidence."""
+
+    metadata = getattr(batch, "fla_metadata", None)
+    if metadata is None:
+        return "unbuilt"
+    if getattr(metadata, "pascal_metadata_proof", None) is not None:
+        return "scheduler-issued-proof"
+    return "synchronous-fallback"
 
 
 def _set_global_context(core: Any, context: Any) -> None:
@@ -726,6 +772,85 @@ def _timed_call(torch: Any, device: Any, operation: Callable[[], Any]) -> tuple[
     cuda_event_ms = float(start_event.elapsed_time(end_event))
     del result
     return cuda_event_ms, host_wall_ms
+
+
+def _measure_metadata_proof(
+    torch: Any,
+    device: Any,
+    *,
+    operator: Any,
+    context: Any,
+    batch: Any,
+    num_tokens: int,
+    repeats: int,
+) -> dict[str, Any]:
+    """Measure allocator-cold construction, allocator-warm reissue, and warm validation."""
+
+    metadata = getattr(batch, "fla_metadata", None)
+    if metadata is None:
+        raise RuntimeError("metadata proof benchmark requires prebuilt FLA metadata")
+    slots = int(context.linear_state_pool.recurrent_states.shape[1])
+
+    def construct() -> None:
+        with torch.inference_mode():
+            proof = operator._ensure_pascal_metadata_proof(
+                metadata,
+                device,
+                pool=context.linear_state_pool,
+                phase=batch.phase,
+            )
+        if proof is None:
+            raise RuntimeError("scheduler metadata did not produce a Pascal proof")
+
+    # Empty the CUDA allocator before the first issue. This makes the allocation cold relative
+    # to PyTorch's caching allocator, but does not reset the CUDA context, driver, or JIT state;
+    # the prefill case also runs before decode. Subsequent proof reissues intentionally observe
+    # allocator reuse and are reported separately.
+    metadata.pascal_metadata_proof = None
+    torch.cuda.empty_cache()
+    cuda_ms, wall_ms = _timed_call(torch, device, construct)
+    allocator_cold_samples = [{"index": 0, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}]
+
+    allocator_warm_samples: list[dict[str, float | int]] = []
+    for index in range(max(1, repeats)):
+        metadata.pascal_metadata_proof = None
+        cuda_ms, wall_ms = _timed_call(torch, device, construct)
+        allocator_warm_samples.append(
+            {"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
+        )
+
+    if getattr(metadata, "pascal_metadata_proof", None) is None:
+        raise RuntimeError("cold metadata proof construction did not leave a proof")
+    warm_samples: list[dict[str, float | int]] = []
+    for index in range(repeats):
+
+        def validate() -> None:
+            with torch.inference_mode():
+                operator._validate_pascal_metadata(
+                    metadata,
+                    num_slots=slots,
+                    num_tokens=num_tokens,
+                    device=device,
+                    phase=batch.phase,
+                    pool=context.linear_state_pool,
+                )
+
+        cuda_ms, wall_ms = _timed_call(torch, device, validate)
+        warm_samples.append({"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms})
+    return {
+        "allocator_cold_proof_construction": {
+            "samples": allocator_cold_samples,
+            "statistics": _summary(allocator_cold_samples),
+        },
+        "allocator_warm_proof_reissue": {
+            "samples": allocator_warm_samples,
+            "statistics": _summary(allocator_warm_samples),
+        },
+        "warm_proof_validation": {
+            "samples": warm_samples,
+            "statistics": _summary(warm_samples),
+        },
+    }
 
 
 def _time_case(
@@ -951,6 +1076,27 @@ def run_benchmark(
         torch, core, reference_context, device, phase="decode", tokens=config.prefill_tokens
     )
 
+    metadata_proof_timings = {
+        "prefill": _measure_metadata_proof(
+            torch,
+            device,
+            operator=pascal,
+            context=pascal_context,
+            batch=prefill_batch_pascal,
+            num_tokens=config.prefill_tokens,
+            repeats=config.repeats,
+        ),
+        "decode": _measure_metadata_proof(
+            torch,
+            device,
+            operator=pascal,
+            context=pascal_context,
+            batch=decode_batch_pascal,
+            num_tokens=1,
+            repeats=config.repeats,
+        ),
+    }
+
     correctness, pascal_post_prefill, reference_post_prefill = _correctness(
         torch,
         core,
@@ -1041,9 +1187,16 @@ def run_benchmark(
             "factory_or_auto_enabled": False,
             "default_path": "automatic GDN dispatch remains unchanged",
             "fallback_path": "torch-reference remains available",
+            "metadata_validation": {
+                "prefill_candidate": _metadata_validation_mode(prefill_batch_pascal),
+                "prefill_reference": _metadata_validation_mode(prefill_batch_reference),
+                "decode_candidate": _metadata_validation_mode(decode_batch_pascal),
+                "decode_reference": _metadata_validation_mode(decode_batch_reference),
+            },
         },
         "correctness": correctness,
         "timings": {"prefill": prefill_timing, "decode": decode_timing},
+        "metadata_proof_timings": metadata_proof_timings,
         "timing_scope": (
             "Single-layer model boundary. The device-scoped CUDA-event interval includes GPU "
             "work plus stream-idle time caused by synchronous validation/dispatch; host wall "
