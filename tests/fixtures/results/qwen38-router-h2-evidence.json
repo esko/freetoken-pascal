@@ -1,0 +1,145 @@
+{
+  "schema_name": "qwen38-router-h2-evidence.schema.json",
+  "schema_version": 1,
+  "evidence_status": "synthetic",
+  "evidence_kind": "qwen38-pascal-router-ab",
+  "claim_status": "bounded-router-only",
+  "repository_commit": "1111111111111111111111111111111111111111",
+  "donor": {
+    "id": "freetoken-qwen4-pr257-merge",
+    "repository": "https://github.com/FlashML-org/FreeToken",
+    "pull_request": 257,
+    "ref": "bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40",
+    "license": "Apache-2.0",
+    "method": "upstream-arbitrary-k-router-reference"
+  },
+  "software": {
+    "python": "3.12.0",
+    "torch": "2.11.0+cu126",
+    "cuda_runtime": "12.6",
+    "triton": "3.6.0"
+  },
+  "hardware_inventory": {
+    "path": "results/hardware/inventory-ecc-off-router-p4.json",
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "profile_id": "ecc-off",
+    "gpu_index": 0,
+    "gpu_identity": {
+      "index": 0,
+      "name": "Tesla P4",
+      "compute_capability": "6.1",
+      "memory_mib": 8192,
+      "uuid": "GPU-00000000-0000-0000-0000-000000000000",
+      "pci_bus_id": "0000:02:00.0",
+      "ecc_mode": "disabled",
+      "pci_root": "pci0000:00",
+      "numa_node": 0
+    }
+  },
+  "workload": {
+    "model": "Qwen3.8-Flash-Next",
+    "num_experts": 512,
+    "topk": 10,
+    "dtypes": ["float16"],
+    "token_counts": [1],
+    "renormalize": [false],
+    "repeats": 5,
+    "matrix_complete": false,
+    "max_duration_seconds": 300
+  },
+  "auto_control": {
+    "requested_mode": "auto",
+    "selected_implementation": "torch-reference",
+    "topk": 10,
+    "num_experts": 512,
+    "renormalize": false,
+    "fallback_reason": "candidate-not-qualified",
+    "default_changed": false,
+    "end_to_end_claim": false
+  },
+  "cases": [
+    {
+      "id": "random-float16-m1-renorm0",
+      "kind": "random",
+      "dtype": "float16",
+      "token_count": 1,
+      "renormalize": false,
+      "padded": false,
+      "num_token_non_padded": null,
+      "input_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "reference": {
+        "mode": "torch-reference",
+        "status": "passed",
+      "initial_call_elapsed_ns": 1000,
+      "may_include_jit": false,
+        "ids_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "weights_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "candidate": {
+        "eligible": true,
+        "mode": "triton-candidate",
+        "status": "passed",
+      "initial_call_elapsed_ns": 2000,
+      "may_include_jit": true,
+        "ids_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "weights_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "failure": null
+      },
+      "comparison": {
+        "ids_exact": true,
+        "max_abs_error": 0.0,
+        "relative_rms": 0.0,
+        "atol": 0.000001,
+        "rtol": 0.00001,
+        "weights_within_tolerance": true,
+        "passed": true
+      },
+      "steady_samples": [
+        {"repeat": 0, "order": "reference_then_candidate", "reference": {"status": "passed", "elapsed_ns": 6000, "synchronized": true, "ids_exact": true, "weights_within_tolerance": true}, "candidate": {"status": "passed", "elapsed_ns": 1000, "synchronized": true, "ids_exact": true, "weights_within_tolerance": true}},
+        {"repeat": 1, "order": "candidate_then_reference", "reference": {"status": "passed", "elapsed_ns": 6100, "synchronized": true, "ids_exact": true, "weights_within_tolerance": true}, "candidate": {"status": "passed", "elapsed_ns": 1100, "synchronized": true, "ids_exact": true, "weights_within_tolerance": true}},
+        {"repeat": 2, "order": "reference_then_candidate", "reference": {"status": "passed", "elapsed_ns": 5900, "synchronized": true, "ids_exact": true, "weights_within_tolerance": true}, "candidate": {"status": "passed", "elapsed_ns": 900, "synchronized": true, "ids_exact": true, "weights_within_tolerance": true}},
+        {"repeat": 3, "order": "candidate_then_reference", "reference": {"status": "passed", "elapsed_ns": 6200, "synchronized": true, "ids_exact": true, "weights_within_tolerance": true}, "candidate": {"status": "passed", "elapsed_ns": 1200, "synchronized": true, "ids_exact": true, "weights_within_tolerance": true}},
+        {"repeat": 4, "order": "reference_then_candidate", "reference": {"status": "passed", "elapsed_ns": 6050, "synchronized": true, "ids_exact": true, "weights_within_tolerance": true}, "candidate": {"status": "passed", "elapsed_ns": 1050, "synchronized": true, "ids_exact": true, "weights_within_tolerance": true}}
+      ]
+    }
+  ],
+  "telemetry": [
+    {
+      "captured_at": "2026-09-01T00:00:00Z",
+      "index": 0,
+      "name": "Tesla P4",
+      "uuid": "GPU-00000000-0000-0000-0000-000000000000",
+      "compute_capability": "6.1",
+      "memory_mib": 8192,
+      "pci_bus_id": "0000:02:00.0",
+      "ecc_mode": "disabled",
+      "clocks": {"graphics_mhz": 885, "memory_mhz": 2999},
+      "temperature_celsius": 40,
+      "power_watts": 25,
+      "power_limit_watts": 75
+    }
+  ],
+  "duration_seconds": 0.1,
+  "hard_timeout_seconds": 300,
+  "summary": {
+    "case_count": 1,
+    "reference_case_count": 1,
+    "candidate_eligible_case_count": 1,
+    "candidate_passed_case_count": 1,
+    "candidate_failed_case_count": 0,
+    "candidate_not_run_case_count": 0,
+    "all_candidate_parity_passed": true,
+    "performance_claim": false,
+    "end_to_end_claim": false,
+    "default_changed": false
+  },
+  "claims": {
+    "router_only": true,
+    "exact_ids": true,
+    "weight_tolerance": true,
+    "auto_enabled": false,
+    "end_to_end_performance": false,
+    "thermal_qualification": false,
+    "dual_p4_policy": false
+  }
+}

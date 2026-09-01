@@ -26,14 +26,14 @@ def load(name: str) -> dict:
 def test_all_example_evidence_is_schema_valid() -> None:
     paths = sorted(RESULT_DIR.glob("*.json"))
 
-    assert len(paths) == 8
+    assert len(paths) == 9
     assert VALIDATE_EVIDENCE.validate_paths(paths, schema_dir=SCHEMA_DIR) == []
 
 
 def test_all_evidence_schemas_are_valid_draft_2020_12() -> None:
     schemas = sorted(SCHEMA_DIR.glob("*.schema.json"))
 
-    assert len(schemas) == 9
+    assert len(schemas) == 10
     for path in schemas:
         Draft202012Validator.check_schema(json.loads(path.read_text(encoding="utf-8")))
 
@@ -185,6 +185,97 @@ def test_dual_p4_device_evidence_rejects_identity_mismatches(
     errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=SCHEMA_DIR)
 
     assert any(message in error for error in errors), errors
+
+
+def test_router_h2_fixture_is_synthetic_bounded_and_default_off() -> None:
+    evidence = load("qwen38-router-h2-evidence.json")
+
+    assert VALIDATE_EVIDENCE.validate_document(evidence, schema_dir=SCHEMA_DIR) == []
+    assert evidence["evidence_status"] == "synthetic"
+    assert evidence["auto_control"]["selected_implementation"] == "torch-reference"
+    assert evidence["claims"]["auto_enabled"] is False
+    assert evidence["claims"]["end_to_end_performance"] is False
+    assert len(evidence["cases"][0]["steady_samples"]) == 5
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    (
+        (
+            lambda value: value["hardware_inventory"]["gpu_identity"].update(ecc_mode="enabled"),
+            "ecc_mode must match profile_id",
+        ),
+        (
+            lambda value: value["telemetry"][0].update(uuid="GPU-different"),
+            "must match hardware inventory",
+        ),
+        (
+            lambda value: value["summary"].update(candidate_passed_case_count=0),
+            "summary.candidate_passed_case_count",
+        ),
+        (
+            lambda value: value["cases"][0]["comparison"].update(ids_exact=False),
+            "comparison.passed must match parity predicates",
+        ),
+        (
+            lambda value: value["cases"][0]["steady_samples"].pop(),
+            "steady_samples must match workload.repeats",
+        ),
+        (
+            lambda value: value["cases"][0]["steady_samples"][0]["candidate"].update(
+                status="failed", elapsed_ns=None
+            ),
+            "must be a passed timed observation",
+        ),
+        (
+            lambda value: value["cases"][0]["steady_samples"][0].update(
+                order="candidate_then_reference"
+            ),
+            "order must alternate",
+        ),
+        (
+            lambda value: value["claims"].update(exact_ids=False),
+            "claims.exact_ids must match",
+        ),
+    ),
+)
+def test_router_h2_semantics_reject_forged_evidence(
+    mutate: Callable[[dict], None], message: str
+) -> None:
+    invalid = copy.deepcopy(load("qwen38-router-h2-evidence.json"))
+    mutate(invalid)
+
+    errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=SCHEMA_DIR)
+
+    assert any(message in error for error in errors), errors
+
+
+def test_measured_router_h2_requires_complete_target_matrix() -> None:
+    invalid = copy.deepcopy(load("qwen38-router-h2-evidence.json"))
+    invalid["evidence_status"] = "measured"
+
+    errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=SCHEMA_DIR)
+
+    assert any("complete matrix" in error for error in errors)
+    assert any("BF16, FP16, and FP32" in error for error in errors)
+    assert any("every target token count" in error for error in errors)
+    assert any("both renormalization modes" in error for error in errors)
+    assert any("exact 108-case matrix" in error for error in errors)
+
+
+def test_measured_router_h2_rejects_declared_full_matrix_without_cases() -> None:
+    invalid = copy.deepcopy(load("qwen38-router-h2-evidence.json"))
+    invalid["evidence_status"] = "measured"
+    invalid["workload"].update(
+        dtypes=["bfloat16", "float16", "float32"],
+        token_counts=[1, 2, 4, 8, 32, 128],
+        renormalize=[False, True],
+        matrix_complete=True,
+    )
+
+    errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=SCHEMA_DIR)
+
+    assert "measured router evidence requires the exact 108-case matrix" in errors
 
 
 def test_benchmark_requires_selected_runtime_behavior() -> None:

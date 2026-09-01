@@ -265,6 +265,24 @@ sampling held fixed. The candidate remains default-off until H1/H2 evidence qual
 a router microbenchmark alone cannot enable the fused default, and the same-workload
 end-to-end result must improve outside run-to-run noise.
 
+The bounded component-only H2 probe is invoked through the hardware gate:
+
+```bash
+FREETOKEN_PASCAL_TEST_LEVEL=router-p4 \
+FREETOKEN_PASCAL_PROFILE_ID=ecc-off \
+FREETOKEN_SMOKE_GPU=0 \
+bash scripts/ci/hardware_gate.sh
+```
+
+It binds one container-visible P4 to the measured ECC-profile inventory, forces the
+Torch and Triton implementations over the 512-expert/top-10 matrix, retains separate
+initial-call and five alternating synchronized steady observations, and records
+padding, exceptional-value, dtype, token-count, and renormalization cases. The outer
+process timeout is 300 seconds. Its evidence is router-only: it does not qualify
+thermals, end-to-end token throughput, dual-P4 placement, or `auto` dispatch. While
+Gorilla cooling remains provisional, instantaneous clocks, temperature, power, and
+the 75 W cap are context rather than a stable performance baseline.
+
 Use the exact same model bytes where the runtime permits. If formats differ, state that the comparison is not a codec-controlled A/B.
 
 ## Statistics
