@@ -318,6 +318,10 @@ def test_qwen_cache_zero_composition_exposes_bundle_when_cleanup_close_fails(mon
     )
 
     class FailingModel(_Model):
+        def attach_gguf_cpu_host_resources(self, value):
+            del value
+            return 1
+
         def attach_gguf_cpu_eager_bridge(self, value, *, transfer=None):
             del value, transfer
             raise RuntimeError("adapter construction failed")
