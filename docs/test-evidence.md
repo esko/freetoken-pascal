@@ -49,6 +49,10 @@ cooling qualification and any self-hosted runner remain pending. The local hardw
 `scripts/check_hardware_inventory.py`; zero GPUs, a non-6.1 device, or fewer than two devices for a
 dual-P4 level is a hard failure before pytest starts. Verified environment flags then unlock the
 `sm61` and `dual_p4` markers. Otherwise pytest reports an explicit deferred skip reason.
+Measured inventory may additionally bind the immutable `ecc-on` or `ecc-off` profile. When a
+profile is requested, every GPU's current and pending ECC state must agree with it; mixed modes or
+a profile mismatch fail before device tests start. The current Gorilla operating profile is
+`ecc-off`. Earlier ECC-on observations remain separate historical evidence.
 
 Artifact retention is:
 
@@ -101,7 +105,8 @@ match are recorded without claiming a cryptographic content check. The dedicated
 The complete 77.0 GiB expert bank was mapped/file-backed for this slice. No evidence was collected
 that all expert pages were prefaulted into DDR4 or protected from swap, so this run must not be
 described as proving resident/no-swap expert-bank behavior. The H2 run also did not provide cold-cache
-fault/read-amplification or model-shard cryptographic-hash evidence.
+fault/read-amplification evidence. The clean-tip pread rerun did provide model-shard cryptographic
+hash evidence; the earlier mmap/pread observations did not.
 
 The earlier clean-branch commit mappings establish source equivalence for the warm mmap/pread
 observations. Commit `3c9dc0422a` supplies the independent clean-tip cryptographic and execution
@@ -112,3 +117,16 @@ The reported approximately 0.18 output tokens per second divides two output toke
 prompt-plus-generation call and must not be presented as steady-state decode TPS. Cold-cache PLE
 fault/read-amplification, ECC-on comparison, long-context, and sustained thermal evidence remain
 separate required profiles.
+
+The short-evidence profiles deliberately keep these claims separate:
+
+- a warm-cache single-P4 request may reuse the canonical full-H2 model-shard identities instead of
+  streaming the roughly 100 GiB model split again, but Engine startup still performs its mandatory
+  dedicated-PLE integrity validation;
+- a direct dual-P4 probe measures only two-device identity, bounded allocation/arithmetic, topology,
+  and instantaneous telemetry, and must identify itself as non-serving;
+- neither profile establishes steady-state TPS, a selected dual-P4 policy, or thermal qualification.
+
+Each short profile binds the exact hardware inventory by SHA-256, including ECC profile, UUIDs,
+PCI roots, and NUMA nodes. The full H2 artifact remains authoritative for model, PLE, repository,
+and cache-zero execution identity.

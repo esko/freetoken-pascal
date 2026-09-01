@@ -16,9 +16,10 @@
 
 Both P4 cards and the PCIe NVMe device are installed on Gorilla.
 Passive inventory and bounded one-allocation CUDA arithmetic have passed on both cards through Torch 2.11.0 with CUDA 12.6.
-ECC is currently enabled, yielding about 7,599 MiB of Torch-visible memory per card from the nominal 7,680 MiB.
-The intended performance profile may disable ECC, but usable memory and correctness must be recaptured after the required reset rather than combined with the ECC-on evidence.
-The cards are intentionally throttled while airflow optimization is incomplete, so sustained-load, thermal, link-under-load, performance, H2 completion and H3 completion remain unqualified.
+ECC is currently disabled under the approved `ecc-off` profile, yielding 8,192 MiB per card; current and pending ECC state must agree before that profile is accepted.
+The earlier `ecc-on` observations remain a separate historical profile and must not be combined with ECC-off capacity, correctness, or timing evidence.
+The cards are intentionally limited to 75 W while airflow optimization is incomplete.
+Short H2 correctness runs are permitted and the cache-zero Qwen GGUF path has passed on one P4, but sustained-load thermal qualification, steady-state performance, and dual-model H3 completion remain unqualified.
 The self-hosted runner is not yet configured.
 
 ## Tier contract
@@ -61,13 +62,14 @@ Current status:
    - PCIe link width/speed
    - GPU power and application-clock capabilities
    - passive thermal and clock state (sustained-load qualification remains pending)
-3. [x] Verify both GPUs report compute capability 6.1 and 7,680 MiB usable VRAM.
+3. [x] Verify both GPUs report compute capability 6.1 and capture ECC-dependent capacity separately: 7,680 MiB nominal under the earlier ECC-on profile and 8,192 MiB under the current ECC-off profile.
 4. [x] Map GPU 0 to NUMA 0 and GPU 1 to NUMA 1; the NVMe is on NUMA 0.
 5. [x] Verify driver 580.173.02 with the CUDA 12.6 project container and install NVIDIA Container Toolkit 1.20.0.
 6. [ ] Register the self-hosted GitHub runner with labels:
    `self-hosted`, `linux`, `x64`, `cuda`, `sm61`.
 7. [x] Run bounded identity/allocation/arithmetic on each card independently.
    A seconds-long FP32 characterization also exercised both links at Gen3 ×16 without exceeding 36 °C, but is explicitly non-qualifying while clocks and airflow are provisional.
+   The single-P4 cache-zero Qwen GGUF H2 path also passed under ECC-off; its cold-after-verification timing is correctness evidence, not steady-state throughput.
 8. [ ] Correct airflow and qualify one card under bounded sustained load before dual-card load.
 9. [ ] Attach the complete inventory and thermal artifacts to the hardware qualification issue.
 
