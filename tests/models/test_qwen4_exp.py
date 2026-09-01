@@ -467,6 +467,51 @@ def test_qwen4_gguf_centered_norm_subtracts_before_bf16_narrowing():
         shape=(2,),
     )
 
+
+def test_qwen4_gguf_merges_hyperconnection_down_inject_and_zero_pad(monkeypatch):
+    from freetoken.models.qwen4_exp import gguf as qwen_gguf
+
+    down_source = object()
+    inject_source = object()
+    down = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.bfloat16)
+    inject = torch.tensor([[7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.bfloat16)
+    monkeypatch.setattr(
+        qwen_gguf,
+        "_to_dense",
+        lambda tensor, dtype: (down if tensor is down_source else inject).to(dtype),
+    )
+
+    merged = qwen_gguf._merge_hyperconnection_parts(
+        down_source,
+        inject_source,
+        SimpleNamespace(ple_state_width=3, hc_lowrank=2, hc_count=3),
+        name="hc.attn.0",
+    )
+
+    assert merged.dtype == torch.bfloat16
+    assert merged.shape == (16, 3)
+    torch.testing.assert_close(merged[:2], down)
+    torch.testing.assert_close(merged[2:5], inject)
+    assert torch.count_nonzero(merged[5:]) == 0
+
+
+def test_qwen4_gguf_rejects_malformed_hyperconnection_parts(monkeypatch):
+    from freetoken.models.qwen4_exp import gguf as qwen_gguf
+
+    monkeypatch.setattr(
+        qwen_gguf,
+        "_to_dense",
+        lambda tensor, dtype: torch.zeros(tensor, dtype=dtype),
+    )
+
+    with pytest.raises(ValueError, match="invalid hyperconnection geometry"):
+        qwen_gguf._merge_hyperconnection_parts(
+            (2, 4),
+            (3, 3),
+            SimpleNamespace(ple_state_width=3, hc_lowrank=2, hc_count=3),
+            name="hc.ffn.0",
+        )
+
     centered = _centered_norm(tensor)
 
     assert centered.dtype == torch.bfloat16
