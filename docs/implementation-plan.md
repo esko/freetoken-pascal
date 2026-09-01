@@ -71,23 +71,27 @@ After P4 installation, one-P4 GDN end-to-end qualification, PLE I/O behavior, an
 
 The ABI slice precedes AVX2 kernels. It defines immutable heterogeneous expert-bank descriptors, prepare/execute/group/cancel/telemetry contracts, caller-owned partial accumulation, bounded workspace and explicit decoder/thread-pool/NUMA hooks. Its microbenchmark interface records raw repeated timings for the supplied production geometry and every requested miss width from 1 through top-k; it does not by itself constitute a performance claim. The issue #16 threaded route adapter is opt-in, native-only, and census-gated per layer; it keeps serial execution for scalar, unsupported, and mixed-reference configurations.
 
-The standalone Qwen GGUF CPU bridge is decode-only and owns its mapped host weights for the
-life of its heterogeneous CPU layout and Q4 executor. The CUDA engine rejects this GGUF
-combination until the production layer ABI can consume per-projection mappings without a
-homogeneous GPU cache; this is an integration blocker, not a hardware-performance claim.
+The Qwen GGUF CPU bridge owns its mapped host weights for the life of its heterogeneous CPU
+layout and Q4 executor, and serves one-request prefill and decode serially. Engine startup
+uses a cache-zero composition for this model: routed expert tensors are omitted from the
+dense resident load, the bundle is the sole expert-plus-PLE owner, and no homogeneous GPU
+cache is created. The Engine startup slice requires the dedicated `--ple-artifact-path`
+and honors its mmap/pread, warm, and planner settings; it does not silently use embedded
+GGUF PLE bytes. Startup rollback and shutdown close the bundle after detaching model
+adapters.
 
-The H0 `QwenGGUFCpuMoELayer` is an explicit CPU-only adapter around that bundle. It supports routed decode with the exact full-softmax Torch reference when CPU router logits are supplied, plus precomputed routes for direct parity tests. Its Qwen default preserves the model's unrenormalized selected probabilities. Calls require phase `decode` and group size one. It does not provide prefill, grouped, CUDA, TP>1 or performance evidence.
+The H0 `QwenGGUFCpuMoELayer` is an explicit CPU-only adapter around that bundle. It supports routed prefill and decode with the exact full-softmax Torch reference when CPU router logits are supplied, plus precomputed routes for direct parity tests. Its Qwen default preserves the model's unrenormalized selected probabilities. Calls require group size one. It does not provide grouped, CUDA, TP>1 or performance evidence.
 
 The H0 model-graph bridge transactionally replaces routed experts only for construction, lifecycle and correctness tests. The bundle remains caller-owned. This foundation does not make the CUDA-oriented trunk, router, shared expert, or LM head CPU-runnable and does not remove the Engine guard.
 
 An initialized Engine may explicitly borrow the same bundle through
 `Engine.attach_qwen_gguf_cpu_expert_bundle()` and its matching detach method after its
-model is available, provided the registration is TP1, cache-free, decode-only,
-graph-free, and one-request. The Engine detaches its owned bridge wrappers during
-cleanup while the caller closes the bundle. Startup, CLI defaults, GGUF opening,
-prefill, graphs, serving and the homogeneous-cache guard remain unchanged.
+model is available, provided the registration is TP1, cache-free, graph-free, and
+one-request. The Engine detaches its bridge wrappers during cleanup; the explicit seam
+continues to borrow the caller's bundle. The automatic Qwen GGUF startup path owns and
+closes its bundle transactionally.
 
-The standalone `GGUFCpuEagerBridge` is an explicit experimental H0/H1 wrapper around the CPU layer. It rejects prefill, grouped requests, graph capture and caller workspaces before transfer. CPU inputs use the adapter directly; non-CPU inputs use an injected blocking transfer seam, execute the adapter once, and copy the independent routed result back. It makes no stream, pinned-memory, overlap or performance claim. Real CUDA transfer behavior is H2-unverified.
+The standalone `GGUFCpuEagerBridge` is an explicit experimental H0/H1 wrapper around the CPU layer. It accepts one prefill or decode request and rejects grouped requests, graph capture and caller workspaces before transfer. CPU inputs use the adapter directly; non-CPU inputs use an injected blocking transfer seam, execute the adapter once, and copy the independent routed result back. It makes no stream, pinned-memory, overlap or performance claim. Real CUDA transfer behavior is H2-unverified.
 
 ### Exit gate
 

@@ -164,11 +164,10 @@ class GGUFEagerBridgeTelemetry:
 class GGUFCpuEagerBridge:
     """Borrow a CPU GGUF layer and expose an explicit eager device boundary.
 
-    The wrapped layer and its bundle remain caller-owned.  The bridge is
-    decode-only, one request at a time, cache-free, TP1-only, and never closes
-    the wrapped object.  ``phase`` is intentionally required on both request
-    methods so a caller cannot accidentally route an unlabelled prefill call
-    through this decode-only seam.
+    The wrapped layer and its bundle remain caller-owned.  The bridge accepts
+    one prefill or decode request at a time, is cache-free and TP1-only, and
+    never closes the wrapped object.  ``phase`` is intentionally required on
+    both request methods so the caller labels the CPU boundary explicitly.
     """
 
     _BACKEND = "qwen_gguf_eager_cpu_bridge"
@@ -519,9 +518,9 @@ class GGUFCpuEagerBridge:
         graph_capture: bool,
         workspace: Any,
     ) -> None:
-        if phase != "decode":
+        if phase not in ("prefill", "decode"):
             raise UnsupportedGGUFCpuConfiguration(
-                f"GGUF eager bridge is decode-only; phase={phase!r} is unsupported"
+                f"GGUF eager bridge requires phase='prefill' or 'decode'; got {phase!r}"
             )
         if isinstance(group_size, bool) or not isinstance(group_size, Integral):
             raise UnsupportedGGUFCpuConfiguration(

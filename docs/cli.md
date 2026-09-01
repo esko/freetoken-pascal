@@ -93,7 +93,10 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
 
-The standalone Qwen GGUF CPU bridge is not registered by `ft serve` yet, so
+For Qwen GGUF models, `ft serve` resolves the cache-zero CPU composition during
+Engine startup. The dedicated `--ple-artifact-path` is required for this startup
+path; the embedded GGUF PLE range is not silently substituted. `--ple-backend`,
+`--ple-warm-mode`, and the planner flags apply to that owned mapping, so
 `--moe-cpu-threads` does not change that bridge.  Its explicit Python
 `num_threads` argument uses a separate safe policy: omitted or `0` means one
 serial worker, while a positive value must fit within the process's
@@ -105,12 +108,12 @@ Pin/read-back failure drains the request and reruns the serial reference path;
 telemetry reports the requested and observed CPUs, errors, and explicit fallback.
 Caller-supplied pools are not accepted with this explicit plan.  This is an H0
 CPU-affinity check only; it does not change the owner mask or claim NUMA placement.
-The Engine exposes the same bridge as an explicit integration seam for an already
-initialized TP1/cache-free, decode-only, graph-free Engine model through
+The Engine also exposes the same bridge as an explicit integration seam for an already
+initialized TP1/cache-free, graph-free Engine model through
 `Engine.attach_qwen_gguf_cpu_expert_bundle()` and its matching detach method.  The
 seams borrow the caller's bundle, install the eager bridge wrappers, and detach them
-during Engine cleanup; they do not open GGUF weights, alter Engine startup, register a
-CLI backend, or claim prefill, graphs, serving, CUDA-transfer, P4, H2, or H3 support.
+during Engine cleanup. Startup owns its bundle and closes it transactionally; the seam
+does not claim grouped, graph, CUDA-transfer, P4, H2, or H3 support.
 
 For the compiled CPU/hybrid executor, `0` plans one worker per visible physical
 core using the process affinity mask and a positive count is exact; requests above

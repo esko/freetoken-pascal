@@ -323,8 +323,10 @@ def test_real_qwen_gguf_decode_matches_resident_reference():
             assert execution["routes_executed"] == config.num_experts_per_tok
             assert execution["thread_count"] == 1
 
-        with pytest.raises(ValueError, match="decode-only"):
-            _run(model, context, _batch([7], phase="prefill"))
+        context.linear_state_pool.reset(1)
+        prefilled = _run(model, context, _batch([7], phase="prefill"))
+        assert prefilled.shape == resident.shape
+        assert torch.isfinite(prefilled).all()
 
         grouped = _batch([7], phase="decode")
         grouped.reqs = [grouped.reqs[0], grouped.reqs[0]]
@@ -344,3 +346,74 @@ def test_real_qwen_gguf_decode_matches_resident_reference():
         bundle.close()
         assert bundle.closed
         model.close_host_resources()
+
+
+def test_engine_startup_seam_qwen_gguf_cache_zero_prefill_then_decode(tmp_path: Path):
+    """The Engine startup composition owns one bundle and runs both request phases."""
+    from freetoken.engine.engine import _initialize_qwen_gguf_cpu_composition
+
+    config = _fixture_config(model_geometry=256)
+    # The expert-only fixture uses production PLE row geometry (20 heads x 160 values).
+    # The generic tiny config is intentionally smaller, so make its PLE shape agree before
+    # constructing the model while retaining the tiny hidden/expert dimensions.
+    object.__setattr__(config, "qwen4_args", type(config.qwen4_args)(
+        **{
+            **config.qwen4_args.__dict__,
+            "ple_embed_dim": 3200,
+            "heads_per_ngram": 10,
+        }
+    ))
+    object.__setattr__(config, "expert_quant", "gguf")
+    object.__setattr__(config, "moe_weight_format", "gguf")
+    object.__setattr__(config, "gguf_model_path", None)
+    model = _new_model(config, seed=29)
+    context = _new_runtime(config)
+    # The Engine's resident load must remain strict: omitted routed-expert keys are valid
+    # only because the GGUF model graph has no dense expert tensors to consume them.
+    state = {name: value.clone() for name, value in model.state_dict().items()}
+    model.load_state_dict(state)
+    assert not any(".experts." in name for name in model.state_dict())
+    model.load_host_weights("fixture", dummy=True)
+    # The expert-only fixture intentionally has 32 PLE rows, not the full model's hash
+    # vocabulary.  Keep the real mapped PLE attachment in the seam test while constraining
+    # this tiny request's synthetic hash constants to that fixture geometry.
+    for layer in model.model.ple_layers:
+        layer.ple_embedding.layer_multipliers.zero_()
+        layer.ple_embedding.ngram_heads_vocab_sizes.fill_(1)
+        layer.ple_embedding.ngram_heads_offsets.zero_()
+    engine_config = SimpleNamespace(
+        model_path=str(EXPERT_FIXTURE),
+        ple_artifact_path=str(tmp_path / "ple-artifact"),
+        ple_backend="mmap",
+        ple_warm_mode="cold",
+        ple_planner_mode="vectorized",
+        ple_planner_direct_threshold=8,
+        model_config=config,
+        moe_backend="cpu",
+        moe_cache_size=0,
+        moe_cache_auto=False,
+        moe_cache_rate=None,
+        moe_cpu_layers=None,
+        moe_cpu_threads=0,
+        max_running_req=1,
+        max_forward_len=4,
+        tp_info=SimpleNamespace(size=1),
+    )
+    from freetoken.gguf_host import convert_gguf_ple_to_artifact
+
+    convert_gguf_ple_to_artifact(EXPERT_FIXTURE, engine_config.ple_artifact_path)
+
+    bundle, host_bytes = _initialize_qwen_gguf_cpu_composition(model, engine_config)
+    try:
+        assert host_bytes == bundle.host.ple.descriptor.tensor_bytes
+        assert not hasattr(model.model.layers.op_list[0].mlp.experts, "gate_up_proj")
+        prefill = _run(model, context, _batch([7, 8], phase="prefill"))
+        assert prefill.shape == (1, config.vocab_size)
+        assert torch.isfinite(prefill).all()
+        decode = _run(model, context, _batch([7, 8, 9], phase="decode", cached_len=2))
+        assert decode.shape == (1, config.vocab_size)
+        assert torch.isfinite(decode).all()
+    finally:
+        model.detach_gguf_cpu_expert_bundle()
+        model.close_host_resources()
+        bundle.close()

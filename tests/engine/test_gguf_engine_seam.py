@@ -22,6 +22,10 @@ def _config(**overrides):
         "moe_cache_rate": None,
         "moe_cpu_threads": 0,
         "ple_warm_mode": "cold",
+        "ple_artifact_path": "/ple-artifact",
+        "ple_backend": "mmap",
+        "ple_planner_mode": "vectorized",
+        "ple_planner_direct_threshold": 8,
         "moe_cpu_layers": None,
         "max_running_req": 1,
         "tp_info": SimpleNamespace(size=1),
@@ -138,6 +142,26 @@ def test_engine_cleanup_detaches_before_closing_owned_bundle():
     assert bundle.close_calls == 0
 
 
+def test_engine_cleanup_closes_startup_owned_bundle_after_detach():
+    from freetoken.engine.engine import Engine
+
+    engine = Engine.__new__(Engine)
+    engine.model = _Model()
+    bundle = _Bundle()
+    engine._gguf_cpu_expert_bundle = bundle
+    engine._gguf_cpu_expert_bundle_owned = True
+    engine.config = _config()
+    engine.moe_offload_cache = None
+    engine.cpu_moe_executor = None
+    engine._expert_banks = None
+
+    engine._cleanup_host_bank_resources()
+
+    assert engine.model.detached == 1
+    assert engine._gguf_cpu_expert_bundle is None
+    assert bundle.close_calls == 1
+
+
 def test_engine_cleanup_keeps_tracking_when_detach_fails():
     from freetoken.engine.engine import Engine
 
@@ -163,7 +187,6 @@ def test_engine_cleanup_keeps_tracking_when_detach_fails():
 @pytest.mark.parametrize(
     "changes",
     [
-        {"prefill": True},
         {"grouped": True},
         {"cuda_graph_bs": [1]},
         {"cuda_graph_max_bs": 1},
@@ -185,3 +208,90 @@ def test_engine_telemetry_exposes_attached_gguf_cpu_layers():
     engine = Engine.__new__(Engine)
     engine.model = _Model()
     assert engine.gguf_cpu_expert_telemetry() == {0: {"source": "synthetic"}}
+
+
+def test_qwen_cache_zero_startup_composes_one_bundle_and_ple_owner(monkeypatch):
+    from freetoken.engine.engine import _initialize_qwen_gguf_cpu_composition
+
+    events = []
+    bundle = _Bundle()
+
+    def open_bundle(path, **kwargs):
+        events.append(("open", path, kwargs))
+        return bundle
+
+    monkeypatch.setattr(
+        "freetoken.moe.gguf_cpu.open_qwen_gguf_cpu_expert_bundle", open_bundle
+    )
+
+    class StartupModel(_Model):
+        def attach_gguf_cpu_host_resources(self, value):
+            events.append(("ple", value))
+            return 37
+
+        def attach_gguf_cpu_eager_bridge(self, value, *, transfer=None):
+            del transfer
+            events.append(("experts", value))
+            self.attached.append(value)
+
+    config = _config(max_forward_len=8)
+    model = StartupModel()
+    composed, host_bytes = _initialize_qwen_gguf_cpu_composition(model, config)
+
+    assert composed is bundle
+    assert host_bytes == 37
+    assert [event[0] for event in events] == ["open", "ple", "experts"]
+    assert events[0][2]["cache_size"] == 0
+    assert events[0][2]["max_tokens"] == 1
+    assert model.attached == [bundle]
+    assert bundle.close_calls == 0
+
+
+def test_qwen_cache_zero_startup_rolls_back_bundle_when_attachment_fails(monkeypatch):
+    from freetoken.engine.engine import _initialize_qwen_gguf_cpu_composition
+
+    bundle = _Bundle()
+
+    monkeypatch.setattr(
+        "freetoken.moe.gguf_cpu.open_qwen_gguf_cpu_expert_bundle",
+        lambda *_args, **_kwargs: bundle,
+    )
+
+    class FailingModel(_Model):
+        def attach_gguf_cpu_host_resources(self, value):
+            assert value is bundle
+            return 0
+
+        def attach_gguf_cpu_eager_bridge(self, value, *, transfer=None):
+            del value, transfer
+            raise RuntimeError("adapter construction failed")
+
+        def close_host_resources(self):
+            return None
+
+    with pytest.raises(RuntimeError, match="adapter construction"):
+        _initialize_qwen_gguf_cpu_composition(FailingModel(), _config())
+    assert bundle.close_calls == 1
+
+
+def test_qwen_cache_zero_startup_requires_dedicated_ple_artifact():
+    from freetoken.engine.engine import _initialize_qwen_gguf_cpu_composition
+
+    with pytest.raises(ValueError, match="dedicated PLE"):
+        _initialize_qwen_gguf_cpu_composition(
+            _Model(), _config(ple_artifact_path=None)
+        )
+
+
+def test_engine_attachment_accepts_single_request_prefill():
+    from freetoken.engine.engine import Engine
+
+    engine = Engine.__new__(Engine)
+    engine.model = _Model()
+    engine.moe_offload_cache = None
+    engine.config = _config(prefill=True)
+    bundle = _Bundle()
+
+    engine.attach_qwen_gguf_cpu_expert_bundle(bundle)
+
+    assert engine._gguf_cpu_expert_bundle is bundle

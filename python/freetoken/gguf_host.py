@@ -2024,6 +2024,8 @@ def open_qwen_host_weights(
     path: str | Path,
     *,
     supported_expert_types: Collection[int] | None = None,
+    ple_artifact_path: str | Path | None = None,
+    ple_backend: str = "mmap",
     ple_warm_mode: str = "cold",
     ple_prefetch_max_rows: int = 4096,
     ple_prefetch_chunk_rows: int = 64,
@@ -2031,6 +2033,12 @@ def open_qwen_host_weights(
     ple_planner_mode: str = "vectorized",
     ple_planner_direct_threshold: int = 8,
 ) -> QwenGGUFHostWeights:
+    """Open expert mappings and exactly one selected PLE mapping.
+
+    ``ple_artifact_path`` selects the dedicated serving artifact and is validated against the
+    source GGUF descriptor before the host owner is returned. When omitted, the embedded GGUF
+    PLE range remains available to standalone compatibility callers.
+    """
     _validate_prefetch_config(ple_prefetch_max_rows, ple_prefetch_chunk_rows)
     resolved_planner = _resolve_planner_config(
         ple_planner_config,
@@ -2042,37 +2050,53 @@ def open_qwen_host_weights(
         supported_expert_types=supported_expert_types,
     )
     experts = MappedExpertBanks(layout.experts)
-    ple_mapping: MappedFileRange | None = None
     ple: MappedPLETable | None = None
     try:
-        ple_mapping = MappedFileRange(
-            layout.ple.shard_path,
-            offset=layout.ple.data_offset,
-            length=layout.ple.tensor_bytes,
-            rows=layout.ple.rows,
-            row_bytes=layout.ple.row_bytes,
-        )
-        ple = MappedPLETable(
-            layout.ple,
-            ple_mapping,
-            model_shard_paths=layout.shard_paths,
-            prefetch_max_rows=ple_prefetch_max_rows,
-            prefetch_chunk_rows=ple_prefetch_chunk_rows,
-            planner_config=resolved_planner,
-        )
-        ple.source_kind = "gguf-mmap"
-        ple._apply_random_advice()
-        ple.set_warm_mode(ple_warm_mode)
+        if ple_artifact_path is None:
+            ple = MappedPLETable.open_from_gguf(
+                path,
+                warm_mode=ple_warm_mode,
+                backend=ple_backend,
+                prefetch_max_rows=ple_prefetch_max_rows,
+                prefetch_chunk_rows=ple_prefetch_chunk_rows,
+                planner_config=resolved_planner,
+            )
+        else:
+            ple = MappedPLETable.open_from_artifact(
+                ple_artifact_path,
+                warm_mode=ple_warm_mode,
+                backend=ple_backend,
+                prefetch_max_rows=ple_prefetch_max_rows,
+                prefetch_chunk_rows=ple_prefetch_chunk_rows,
+                planner_config=resolved_planner,
+            )
+            source = layout.ple
+            mapped = ple.descriptor
+            identity = (
+                "tensor_name",
+                "quant_type",
+                "quant_name",
+                "rows",
+                "elements_per_row",
+                "row_bytes",
+                "tensor_bytes",
+                "codec",
+            )
+            mismatches = [
+                name
+                for name in identity
+                if getattr(mapped, name) != getattr(source, name)
+            ]
+            if mismatches:
+                raise ValueError(
+                    "dedicated PLE artifact does not match source GGUF descriptor: "
+                    + ", ".join(mismatches)
+                )
     except BaseException:
         try:
             if ple is not None:
                 try:
                     ple.close()
-                except BaseException:
-                    pass
-            elif ple_mapping is not None:
-                try:
-                    ple_mapping.close()
                 except BaseException:
                     pass
         finally:

@@ -417,13 +417,13 @@ def test_adapter_rejects_invalid_routes_and_runtime_modes(bundle) -> None:
             torch.zeros((1, 1), dtype=torch.int32),
             num_token_non_padded=2,
         )
-    with pytest.raises(ValueError, match="decode-only"):
-        layer.routed_forward(
-            hidden,
-            weights,
-            torch.zeros((1, 1), dtype=torch.int32),
-            phase="prefill",
-        )
+    prefill = layer.routed_forward(
+        hidden,
+        weights,
+        torch.zeros((1, 1), dtype=torch.int32),
+        phase="prefill",
+    )
+    assert prefill.shape == hidden.shape
     with pytest.raises(ValueError, match="grouped"):
         layer.routed_forward(
             hidden,

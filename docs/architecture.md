@@ -279,7 +279,7 @@ without a plan retain the existing pool behavior, and caller-supplied pools
 cannot be combined with an explicit plan. This is H0 affinity verification
 only: it changes no owner mask and makes no NUMA or performance claim.
 
-The standalone `QwenGGUFCpuExpertBundle` owns a `QwenGGUFHostWeights` mapping, builds the exact heterogeneous `CpuExpertLayout`, and owns a `Q4KExecutor` for decode-only CPU use.
+The standalone `QwenGGUFCpuExpertBundle` owns a `QwenGGUFHostWeights` mapping, builds the exact heterogeneous `CpuExpertLayout`, and owns a `Q4KExecutor` for serial one-request prefill and decode.
 Its Torch adapter accepts only CPU tensors, copies through explicit NumPy float32/int32 buffers, and returns a CPU tensor in the hidden-state dtype.
 Its bridge-local thread policy resolves an omitted request or `num_threads=0` to one
 serial worker, and rejects a positive request above the physical-core count visible
@@ -291,19 +291,18 @@ only. For a positive request, the Q4 runner also reports requested and observed
 worker CPUs, per-worker affinity errors, and `planned-unverified`, `verified`,
 `not-applicable`, or `fallback` status. Only its internally owned pool is pinned;
 the bridge never changes the owner mask or claims NUMA placement.
-It rejects GPU, hybrid, offload, nonzero-cache, prefill, grouped, and closed-mapping requests before execution.
-The CUDA `Engine` registration seam fails closed for Qwen GGUF rather than constructing the homogeneous `OffloadMoeCache`.
+It rejects GPU, hybrid, offload, nonzero-cache, grouped, and closed-mapping requests before execution.
+Qwen GGUF Engine startup resolves to this cache-zero composition rather than constructing the homogeneous `OffloadMoeCache`; it requires the explicitly configured dedicated PLE artifact and honors its mmap/pread policy.
 An initialized Engine exposes explicit `attach_qwen_gguf_cpu_expert_bundle()` and
 `detach_qwen_gguf_cpu_expert_bundle()` seams for a caller-owned bundle when the model is
-already TP1, cache-free, decode-only, one-request, and graph-free.  It installs the
-existing eager bridge wrappers and detaches them during cleanup, but does not open
-weights, change startup or CLI defaults, enable prefill or graphs, or weaken the
-homogeneous-cache guard.
+already TP1, cache-free, one-request, and graph-free. It installs the existing eager
+bridge wrappers and detaches them during cleanup. Startup owns and closes its one bundle
+transactionally; explicit attachment continues to borrow a caller-owned bundle.
 The standalone `QwenGGUFCpuMoELayer` adapts one layer's bundle to the existing routed-expert
-interface for H0 CPU decode probes. It accepts explicit CPU router logits or a precomputed
+interface for H0 CPU probes. It accepts explicit CPU router logits or a precomputed
 CPU route, preserves full-softmax and observer semantics (Qwen's default is no selected-
 route renormalization), and returns the bundle's CPU result without creating a cache.
-The adapter requires an explicit decode phase and a single request group. It is an explicit test/reference seam only: it is not
+The adapter requires an explicit prefill or decode phase and a single request group. It is an explicit test/reference seam only: it is not
 attached implicitly during Qwen model construction, does not transfer CUDA tensors, and
 does not enable the serving Engine. An explicit
 `Qwen4ExpModel.attach_gguf_cpu_expert_bundle()` (and the matching
@@ -315,9 +314,9 @@ model's CPU adapter does not make its CUDA-oriented trunk, router, shared expert
 LM head CPU-runnable, and the Engine registration guard remains in place.
 
 The standalone `GGUFCpuEagerBridge` is an explicit, model-neutral H0/H1 seam for a
-caller that already owns a Qwen GGUF CPU layer. Every call must name `phase="decode"`
-and uses `group_size=1`, TP1 and `cache_size=0`; prefill, grouped work, caller
-workspaces and CUDA graph capture fail before any transfer. CPU tensors call the
+caller that already owns a Qwen GGUF CPU layer. Every call must name `phase="prefill"`
+or `phase="decode"` and uses `group_size=1`, TP1 and `cache_size=0`; grouped work,
+caller workspaces and CUDA graph capture fail before any transfer. CPU tensors call the
 adapter directly. Device tensors use an injected blocking transfer seam (or the
 blocking `Tensor.to` default) to copy hidden states and either router logits or prepared
 routes to CPU, execute the adapter exactly once, then copy the independent routed result
