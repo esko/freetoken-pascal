@@ -8,9 +8,9 @@ import torch
 import torch.nn.functional as F
 
 from freetoken.kernel.triton.moe_shared_gate import shared_gate_mul_add, shared_gate_sigmoid
-from freetoken.layers import silu_and_mul
-from freetoken.layers.moe import make_moe_layer
-from freetoken.models.qwen3_5_moe.moe import Qwen3_5MoE
+from freetoken.layers import LinearReplicated, silu_and_mul
+from freetoken.layers.moe import MoELayer, make_moe_layer
+from freetoken.models.qwen3_5_moe.moe import Qwen3_5MoE, _SharedExpert
 
 if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
@@ -23,6 +23,31 @@ class Qwen4ExpMoE(Qwen3_5MoE):
     """
 
     def __init__(self, config: ModelConfig, layer_id: int | None = None) -> None:
+        if (
+            getattr(config, "expert_quant", "none") == "gguf"
+            or getattr(config, "moe_weight_format", None) == "gguf"
+        ):
+            # GGUF routed projections are heterogeneous host mappings.  Do not let the
+            # generic CPU backend construct its homogeneous OffloadMoELayer (or allocate
+            # dense resident expert tensors); the Engine attaches the explicit CPU adapter
+            # after loading the non-expert state.
+            self.experts = MoELayer(
+                num_experts=config.num_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                renormalize=config.norm_topk_prob,
+                activation="silu",
+                allocate_experts=False,
+                weight_format="gguf",
+            )
+            self.gate = LinearReplicated(config.hidden_size, config.num_experts, has_bias=False)
+            self.shared_expert = _SharedExpert(
+                config, config.hidden_size, config.shared_expert_intermediate_size
+            )
+            self.shared_expert_gate = LinearReplicated(config.hidden_size, 1, has_bias=False)
+            self.experts.layer_id = layer_id
+            return
         if getattr(config, "expert_quant", "none") != "fp8_block":
             super().__init__(config, layer_id=layer_id)
             return

@@ -2,8 +2,8 @@
 
 The regular engine's :class:`~freetoken.moe.offload_cache.OffloadMoeCache` owns a
 homogeneous GPU slot layout.  Qwen GGUF expert banks are intentionally heterogeneous,
-so this module keeps the mapped source as the source of truth and stops at a decode-only
-CPU boundary until the model layer can consume that boundary directly.
+so this module keeps the mapped source as the source of truth and exposes a serial
+CPU boundary for one-request prefill and decode.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ class GGUFCpuBridgeError(RuntimeError):
 
 
 class UnsupportedGGUFCpuConfiguration(ValueError):
-    """A requested runtime mode is outside the decode-only bridge contract."""
+    """A requested runtime mode is outside the one-request CPU bridge contract."""
 
 
 _SUPPORTED_QUANTS = frozenset({"Q4_K", "Q5_K", "Q5_1", "Q8_0", "IQ3_XXS", "IQ4_NL", "IQ4_XS"})
@@ -184,13 +184,9 @@ def _validate_cpu_bridge_config(
         raise UnsupportedGGUFCpuConfiguration(
             "Qwen GGUF CPU bridge requires cache_size=0; GPU slot allocation is unsupported"
         )
-    if prefill:
-        raise UnsupportedGGUFCpuConfiguration(
-            "Qwen GGUF CPU bridge currently supports decode only; prefill is unsupported"
-        )
     if grouped:
         raise UnsupportedGGUFCpuConfiguration(
-            "Qwen GGUF CPU bridge currently supports one decode request; "
+            "Qwen GGUF CPU bridge currently supports one request; "
             "grouped execution is unsupported"
         )
 
@@ -210,7 +206,8 @@ class QwenGGUFCpuExpertBundle:
     """Owned Qwen GGUF host mappings, heterogeneous CPU layout, and Q4 executor.
 
     The bundle owns ``host`` for its entire lifetime.  Its public runtime operation is
-    one decode request at a time; prefill and grouped execution remain explicit errors.
+    one request at a time; prefill and decode share the serial correctness path while
+    grouped execution remains an explicit error.
     """
 
     def __init__(
@@ -505,6 +502,18 @@ class QwenGGUFCpuExpertBundle:
         hidden_np = hidden_states.detach().contiguous().to(dtype=torch.float32).numpy()
         weights_np = topk_weights.detach().contiguous().to(dtype=torch.float32).numpy()
         ids_np = topk_ids.detach().contiguous().to(dtype=torch.int32).numpy()
+        # The first request is normally prepared by startup, but a correctness-first
+        # single-request prefill may be longer than the decode-sized workspace.  The eager
+        # bridge serializes calls, so growing the bounded workspace here is transactional
+        # and cannot race an execution.
+        plan = self.workspace_plan
+        requested_tokens = int(hidden_states.shape[0])
+        requested_routes = int(ids_np.shape[1])
+        if requested_tokens > int(plan.max_tokens) or requested_routes > int(plan.max_routes):
+            self.prepare(
+                max_tokens=max(requested_tokens, int(plan.max_tokens)),
+                max_routes=max(requested_routes, int(plan.max_routes)),
+            )
         try:
             result = self.executor.execute(
                 layer_id,
@@ -523,10 +532,22 @@ class QwenGGUFCpuExpertBundle:
             dtype=hidden_states.dtype,
         )
 
-    def prefill(self, *_args: Any, **_kwargs: Any) -> None:
-        self._require_open()
-        raise UnsupportedGGUFCpuConfiguration(
-            "Qwen GGUF CPU bridge currently supports decode only; prefill is unsupported"
+    def prefill(
+        self,
+        layer_id: int,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        *,
+        num_token_non_padded: int | None = None,
+    ) -> torch.Tensor:
+        """Execute one prefill token matrix through the same serial CPU ABI as decode."""
+        return self.decode(
+            layer_id,
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            num_token_non_padded=num_token_non_padded,
         )
 
     def execute_group(self, *_args: Any, **_kwargs: Any) -> None:
@@ -543,8 +564,13 @@ class QwenGGUFCpuExpertBundle:
     def host_weight_telemetry(self) -> dict[str, object]:
         self._require_open()
         execution = self._last_execution_telemetry
+        ple = self.host.ple
+        ple_telemetry = getattr(ple, "telemetry", None)
+        ple_telemetry = ple_telemetry() if callable(ple_telemetry) else {}
         return {
-            "source": "gguf-mmap",
+            "source": getattr(ple, "source_kind", "gguf-mmap"),
+            "ple_backend": getattr(ple, "backend", "mmap"),
+            "ple_codec_identity": ple_telemetry.get("codec_identity"),
             "memory": self.host.memory_report(),
             "kernel_census": self.kernel_census,
             "requested_num_threads": self._requested_num_threads,
@@ -597,6 +623,8 @@ def open_qwen_gguf_cpu_expert_bundle(
     prefill: bool = False,
     grouped: bool = False,
     supported_expert_types: Collection[int] | None = None,
+    ple_artifact_path: str | Path | None = None,
+    ple_backend: str = "mmap",
     ple_warm_mode: str = "cold",
     ple_planner_mode: str = "vectorized",
     ple_planner_direct_threshold: int = 8,
@@ -613,6 +641,8 @@ def open_qwen_gguf_cpu_expert_bundle(
     host = open_qwen_host_weights(
         path,
         supported_expert_types=supported_expert_types,
+        ple_artifact_path=ple_artifact_path,
+        ple_backend=ple_backend,
         ple_warm_mode=ple_warm_mode,
         ple_planner_mode=ple_planner_mode,
         ple_planner_direct_threshold=ple_planner_direct_threshold,
@@ -648,8 +678,8 @@ def register_qwen_gguf_cpu_expert_bundle(
 ) -> QwenGGUFCpuExpertBundle:
     """Narrow registration seam for callers that can provide a CPU-only config.
 
-    The regular CUDA engine must not call this until its model MoE layer accepts the bundle;
-    registering it today is deliberately explicit and never creates a homogeneous cache.
+    The explicit registration helper never creates a homogeneous cache. Engine startup uses
+    its own transactional composition seam so it can also attach the dedicated PLE owner.
     """
     bridge_config_kwargs = {
         name: kwargs[name]

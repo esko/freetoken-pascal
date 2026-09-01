@@ -3,8 +3,8 @@
 This module is deliberately narrower than the CUDA ``OffloadMoELayer``.  It
 adapts an already-owned :class:`QwenGGUFCpuExpertBundle` to the routed-expert
 layer shape, without creating a homogeneous cache or moving tensors between
-devices.  The explicit CPU boundary is useful for H0 correctness probes while
-the production Engine registration seam remains fail-closed.
+devices.  The explicit CPU boundary is useful for H0 correctness probes and
+the cache-zero Qwen startup composition.
 """
 
 from __future__ import annotations
@@ -408,9 +408,9 @@ class QwenGGUFCpuMoELayer:
 
     @staticmethod
     def _validate_request_mode(phase: str, group_size: int) -> None:
-        if phase != "decode":
+        if phase not in ("prefill", "decode"):
             raise UnsupportedGGUFCpuConfiguration(
-                f"Qwen GGUF CPU MoE layer is decode-only; phase={phase!r} is unsupported"
+                f"Qwen GGUF CPU MoE layer requires phase='prefill' or 'decode'; got {phase!r}"
             )
         if isinstance(group_size, bool) or not isinstance(group_size, Integral):
             raise UnsupportedGGUFCpuConfiguration(

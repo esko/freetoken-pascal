@@ -566,8 +566,13 @@ def test_eager_execution_context_rejects_before_router_or_shared_work():
     moe.experts = _EagerRouted()
     hidden = torch.zeros(1, 4)
 
+    events.clear()
+    result = moe.forward(hidden, execution_context=_MoeExecutionContext("prefill", 1, False))
+    assert result.shape == hidden.shape
+    assert events == ["router", "shared", "shared_gate", "routed"]
+
     for context in (
-        _MoeExecutionContext("prefill", 1, False),
+        _MoeExecutionContext("invalid", 1, False),
         _MoeExecutionContext("decode", 2, False),
         _MoeExecutionContext("decode", 1, True),
     ):

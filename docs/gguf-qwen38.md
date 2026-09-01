@@ -277,10 +277,10 @@ The H0 routed-layer adapter is available to CPU correctness probes through
 precomputed route or `forward` with CPU router logits. The adapter preserves the complete
 softmax denominator, defaults to the Qwen unrenormalized selected probabilities, accepts
 route widths up to the configured Qwen top-k, and forwards padding and bundle telemetry.
-The optional `phase` and `group_size` keywords must be `decode` and `1`. Its caller owns
+The optional `phase` and `group_size` keywords must be `prefill` or `decode`, and `1`. Its caller owns
 the shared bundle and must close it after all layer adapters finish. It rejects CUDA,
-prefill, grouped, nonzero-cache and TP>1 execution. An initialized, graph-free Engine
+grouped, nonzero-cache and TP>1 execution. An initialized, graph-free Engine
 can explicitly borrow the same bundle through `Engine.attach_qwen_gguf_cpu_expert_bundle()`
 and its matching detach method, which install and remove the eager bridge wrappers;
-startup, CLI defaults, GGUF opening, prefill, graphs, serving and the homogeneous cache
-guard remain unchanged.
+Qwen GGUF Engine startup uses the same cache-zero owner and closes it transactionally;
+graphs, grouped execution, serving claims and the homogeneous cache guard remain active.
