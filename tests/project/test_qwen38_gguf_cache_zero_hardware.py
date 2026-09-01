@@ -7,6 +7,7 @@ model, host expert banks, and dedicated PLE artifact rather than a tiny fixture.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -52,6 +53,15 @@ def _write_evidence(evidence: dict[str, Any]) -> None:
     print("QWEN38_GGUF_CACHE_ZERO_H2_EVIDENCE " + json.dumps(_jsonable(evidence), sort_keys=True))
 
 
+def _sha256_file(path: Path) -> str:
+    """Hash one pinned model shard without loading it into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(16 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _pinned_model_identity(model_path: Path) -> tuple[dict[str, Any], list[Path]]:
     from freetoken.gguf_shards import gguf_shard_paths
 
@@ -75,6 +85,21 @@ def _pinned_model_identity(model_path: Path) -> tuple[dict[str, Any], list[Path]
             "pinned Q4 GGUF shard sizes do not match the manifest: "
             f"observed={observed_sizes!r}, declared={declared_sizes!r}"
         )
+    observed_hashes = [_sha256_file(path) for path in shards]
+    declared_hashes = [str(item["sha256"]) for item in expected_shards]
+    if observed_hashes != declared_hashes:
+        mismatches = [
+            {
+                "name": path.name,
+                "expected": expected,
+                "observed": observed,
+            }
+            for path, expected, observed in zip(
+                shards, declared_hashes, observed_hashes, strict=True
+            )
+            if expected != observed
+        ]
+        pytest.fail(f"pinned Q4 GGUF shard SHA-256 mismatch: {mismatches!r}")
     return {
         "repository": manifest["repository"],
         "revision": manifest["revision"],
@@ -84,8 +109,10 @@ def _pinned_model_identity(model_path: Path) -> tuple[dict[str, Any], list[Path]
                 "name": item["name"],
                 "size": int(item["size"]),
                 "sha256": item["sha256"],
+                "observed_sha256": observed,
+                "sha256_status": "verified",
             }
-            for item in expected_shards
+            for item, observed in zip(expected_shards, observed_hashes, strict=True)
         ],
         "observed_sizes": observed_sizes,
         "quant_type_counts": variant["quant_type_counts"],
@@ -279,6 +306,16 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
             if item.get("execution_telemetry") is not None
         ]
         assert execution, "CPU expert execution telemetry was not emitted"
+        expected_cpu_threads = int(os.environ.get("FREETOKEN_PASCAL_CPU_THREADS", "8"))
+        assert len(expert_telemetry) == 48
+        assert all(str(item["backend"]) == "mixed_avx2" for item in execution)
+        assert all(int(item["thread_count"]) == expected_cpu_threads for item in execution)
+        for layer_telemetry in expert_telemetry.values():
+            affinity = layer_telemetry["affinity_telemetry"]
+            assert affinity["affinity_status"] == "verified"
+            assert affinity["verification_status"] == "verified"
+            assert affinity["affinity_verified"] is True
+            assert affinity["worker_affinity_errors"] == []
         assert all(str(item["backend"]).lower().find("ssd") < 0 for item in execution)
         assert all(str(item["backend"]).lower().find("gpu") < 0 for item in execution)
         assert any(int(item["routes_executed"]) > 0 for item in execution)
@@ -289,7 +326,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
         assert all(int(item["pinned_host_source_bytes"]) == 0 for item in memory)
 
         evidence = {
-            "schema_name": "qwen38-gguf-cache-zero-h2-evidence",
+            "schema_name": "qwen38-gguf-cache-zero-h2-evidence.schema.json",
             "schema_version": 1,
             "model": model_identity,
             "ple_artifact": ple_identity,

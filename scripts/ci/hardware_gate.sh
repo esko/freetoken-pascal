@@ -66,6 +66,23 @@ run_single_smoke() {
 }
 
 run_single_h2() {
+  if [[ -z "${FREETOKEN_PASCAL_MODEL_PATH:-}" ]]; then
+    echo "${level} level requires FREETOKEN_PASCAL_MODEL_PATH for the Qwen H2 path" >&2
+    return 1
+  fi
+  if [[ ! -f "$FREETOKEN_PASCAL_MODEL_PATH" ]]; then
+    echo "FREETOKEN_PASCAL_MODEL_PATH must name the first pinned GGUF shard" >&2
+    return 1
+  fi
+  if [[ -z "${FREETOKEN_PASCAL_PLE_ARTIFACT:-}" ]]; then
+    echo "${level} level requires FREETOKEN_PASCAL_PLE_ARTIFACT for the Qwen H2 path" >&2
+    return 1
+  fi
+  if [[ ! -d "$FREETOKEN_PASCAL_PLE_ARTIFACT" ]]; then
+    echo "FREETOKEN_PASCAL_PLE_ARTIFACT must name the dedicated PLE artifact directory" >&2
+    return 1
+  fi
+
   docker run --rm --gpus "device=$smoke_gpu" \
     -e FREETOKEN_SM61_RUNNER_VERIFIED=1 \
     -e FREETOKEN_DISABLE_KERNEL_CACHE=1 \
@@ -79,13 +96,6 @@ run_single_h2() {
 
   # Engine startup intentionally requires CUDA to be uninitialized.  Run the real-model test
   # in a fresh container after the ordinary smoke tests have completed their CUDA allocation.
-  if [[ -z "${FREETOKEN_PASCAL_MODEL_PATH:-}" ]]; then
-    return
-  fi
-  if [[ ! -f "$FREETOKEN_PASCAL_MODEL_PATH" ]]; then
-    echo "FREETOKEN_PASCAL_MODEL_PATH must name the first pinned GGUF shard" >&2
-    return 1
-  fi
   local model_dir
   model_dir="$(dirname -- "$FREETOKEN_PASCAL_MODEL_PATH")"
   local -a qwen_env=(
@@ -97,10 +107,8 @@ run_single_h2() {
     # Shard discovery needs every sibling in the pinned split, not only shard one.
     -v "$model_dir:$model_dir:ro"
   )
-  if [[ -n "${FREETOKEN_PASCAL_PLE_ARTIFACT:-}" ]]; then
-    qwen_env+=( -e "FREETOKEN_PASCAL_PLE_ARTIFACT=${FREETOKEN_PASCAL_PLE_ARTIFACT}" )
-    qwen_mounts+=( -v "$FREETOKEN_PASCAL_PLE_ARTIFACT:$FREETOKEN_PASCAL_PLE_ARTIFACT:ro" )
-  fi
+  qwen_env+=( -e "FREETOKEN_PASCAL_PLE_ARTIFACT=${FREETOKEN_PASCAL_PLE_ARTIFACT}" )
+  qwen_mounts+=( -v "$FREETOKEN_PASCAL_PLE_ARTIFACT:$FREETOKEN_PASCAL_PLE_ARTIFACT:ro" )
   docker run --rm --gpus "device=$smoke_gpu" \
     "${qwen_env[@]}" \
     -v "$repo_root:$container_root" \
