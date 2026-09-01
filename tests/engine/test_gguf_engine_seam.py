@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ def _config(**overrides):
     )
     values = {
         "model_path": "/models/qwen38.gguf",
+        "use_dummy_weight": False,
         "model_config": model_config,
         "moe_backend": "cpu",
         "moe_cache_size": 0,
@@ -184,6 +186,33 @@ def test_engine_cleanup_keeps_tracking_when_detach_fails():
     assert bundle.close_calls == 0
 
 
+def test_engine_cleanup_retries_model_close_after_fail_once():
+    from freetoken.engine.engine import Engine
+
+    calls = []
+
+    class Model(_Model):
+        def close_host_resources(self):
+            calls.append("close")
+            if len(calls) == 1:
+                raise RuntimeError("transient close failure")
+
+    engine = Engine.__new__(Engine)
+    engine.model = Model()
+    engine.moe_offload_cache = None
+    engine.cpu_moe_executor = None
+    engine._expert_banks = None
+    engine._model_host_resources_closed = False
+
+    engine._cleanup_host_bank_resources()
+    assert calls == ["close"]
+    assert engine._model_host_resources_closed is False
+
+    engine._cleanup_host_bank_resources()
+    assert calls == ["close", "close"]
+    assert engine._model_host_resources_closed is True
+
+
 @pytest.mark.parametrize(
     "changes",
     [
@@ -234,7 +263,7 @@ def test_qwen_cache_zero_startup_composes_one_bundle_and_ple_owner(monkeypatch):
             events.append(("experts", value))
             self.attached.append(value)
 
-    config = _config(max_forward_len=8)
+    config = _config(max_forward_len=8, max_extend_tokens=3)
     model = StartupModel()
     composed, host_bytes = _initialize_qwen_gguf_cpu_composition(model, config)
 
@@ -242,7 +271,7 @@ def test_qwen_cache_zero_startup_composes_one_bundle_and_ple_owner(monkeypatch):
     assert host_bytes == 37
     assert [event[0] for event in events] == ["open", "ple", "experts"]
     assert events[0][2]["cache_size"] == 0
-    assert events[0][2]["max_tokens"] == 1
+    assert events[0][2]["max_tokens"] == 3
     assert model.attached == [bundle]
     assert bundle.close_calls == 0
 
@@ -281,6 +310,129 @@ def test_qwen_cache_zero_startup_requires_dedicated_ple_artifact():
         _initialize_qwen_gguf_cpu_composition(
             _Model(), _config(ple_artifact_path=None)
         )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"tp_info": SimpleNamespace(size=2)}, "TP=1"),
+        ({"max_running_req": 2}, "one decode request"),
+        ({"moe_cache_size": 1}, "cache_size=0"),
+        ({"moe_cache_auto": True}, "cache_size=0"),
+        ({"cuda_graph_max_bs": 1}, "CUDA graphs"),
+        ({"ple_artifact_path": ""}, "dedicated PLE"),
+    ],
+)
+def test_engine_qwen_preflight_rejects_before_initialize(monkeypatch, changes, message):
+    from freetoken.engine.engine import Engine
+
+    calls = []
+
+    def unexpected_initialize(self, _config):
+        calls.append("initialize")
+        raise AssertionError("invalid Qwen configuration reached Engine initialization")
+
+    monkeypatch.setattr(Engine, "_initialize", unexpected_initialize)
+    with pytest.raises(ValueError, match=message):
+        Engine(_config(**changes))
+    assert calls == []
+
+
+def test_engine_load_weight_state_dict_excludes_routed_experts_and_keeps_strict_dense_load(
+    monkeypatch,
+):
+    torch = pytest.importorskip("torch")
+    from freetoken.engine.engine import Engine
+
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "gguf" / "qwen4-tiny-experts.gguf"
+    model = torch.nn.Linear(2, 2, bias=True)
+    engine = Engine.__new__(Engine)
+    engine.model = model
+    engine.device = torch.device("cpu")
+    config = _config(model_path=str(fixture))
+    calls = []
+
+    def fake_load(path, device, *, include_moe_experts):
+        calls.append((path, device, include_moe_experts))
+        assert include_moe_experts is False
+        return [("weight", torch.ones_like(model.weight))]
+
+    monkeypatch.setattr("freetoken.engine.engine.load_weight", fake_load)
+    loaded = engine._load_weight_state_dict(config)
+    assert set(loaded) == {"weight"}
+    assert not any(".experts." in key for key in loaded)
+    with pytest.raises(RuntimeError, match=r"Missing key\(s\).*bias"):
+        model.load_state_dict(loaded)
+    assert calls == [(str(fixture), torch.device("cpu"), False)]
+
+    def fake_load_with_unexpected(path, device, *, include_moe_experts):
+        assert include_moe_experts is False
+        return [
+            ("weight", torch.ones_like(model.weight)),
+            ("bias", torch.ones_like(model.bias)),
+            ("unexpected", torch.ones(1)),
+        ]
+
+    monkeypatch.setattr("freetoken.engine.engine.load_weight", fake_load_with_unexpected)
+    with pytest.raises(RuntimeError, match=r"Unexpected key\(s\).*unexpected"):
+        model.load_state_dict(engine._load_weight_state_dict(config))
+
+
+def test_engine_startup_rollback_retries_owned_bundle_after_late_failure(monkeypatch):
+    from freetoken.engine.engine import Engine
+
+    bundle = _Bundle()
+    close_attempts = []
+
+    def close_once_then_succeed():
+        close_attempts.append("close")
+        if len(close_attempts) == 1:
+            raise RuntimeError("transient bundle close failure")
+
+    bundle.close = close_once_then_succeed
+    captured = {}
+
+    class StartupModel(_Model):
+        def close_host_resources(self):
+            captured.setdefault("model_close", 0)
+            captured["model_close"] += 1
+
+    def initialize(self, config):
+        self.config = config
+        self.model = StartupModel()
+        self.moe_offload_cache = None
+        self.cpu_moe_executor = None
+        self._expert_banks = None
+        self.attach_qwen_gguf_cpu_expert_bundle(bundle)
+        self._gguf_cpu_expert_bundle_owned = True
+        captured["engine"] = self
+        raise RuntimeError("late startup failure")
+
+    monkeypatch.setattr(Engine, "_initialize", initialize)
+    with pytest.raises(RuntimeError, match="late startup failure"):
+        Engine(_config())
+
+    engine = captured["engine"]
+    assert close_attempts == ["close"]
+    assert engine._gguf_cpu_expert_bundle is bundle
+    assert engine._gguf_cpu_expert_bundle_owned is True
+    assert engine._model_host_resources_closed is True
+
+    engine._cleanup_host_bank_resources()
+    assert close_attempts == ["close", "close"]
+    assert engine._gguf_cpu_expert_bundle is None
+    assert engine._gguf_cpu_expert_bundle_owned is False
+
+
+def test_engine_qwen_cache_zero_never_enters_homogeneous_cache_constructor():
+    from freetoken.engine.engine import _should_initialize_offload_moe_cache
+
+    assert _should_initialize_offload_moe_cache(_config(moe_backend="offload")) is False
+    dense_config = _config(
+        moe_backend="offload",
+        model_config=SimpleNamespace(model_type="llama", expert_quant="none"),
+    )
+    assert _should_initialize_offload_moe_cache(dense_config) is True
 
 
 def test_engine_attachment_accepts_single_request_prefill():

@@ -460,9 +460,41 @@ def test_dedicated_ple_artifact_round_trip_and_manifest(tmp_path: Path) -> None:
     convert_gguf_ple_to_artifact(FIXTURE, artifact)
     manifest = json.loads((artifact / "manifest.json").read_text())
     assert manifest["format"] == "freetoken-pascal-ple-v1"
+    assert manifest["data_offset"] == 0
     assert manifest["tensor_bytes"] == (artifact / "ple.bin").stat().st_size
     with MappedPLETable.open_from_artifact(artifact) as table:
         assert table.lookup(np.array([0, 31])).shape == (2, 160)
+
+
+@pytest.mark.parametrize("backend", ["mmap", "pread"])
+def test_dedicated_ple_maps_only_raw_ple_payload_at_offset_zero(
+    tmp_path: Path, backend: str
+) -> None:
+    artifact = tmp_path / backend
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+
+    with MappedPLETable.open_from_artifact(artifact, backend=backend) as table:
+        assert table.descriptor.data_offset == 0
+        assert table.descriptor.shard_path == str(artifact / "ple.bin")
+        assert table._model_shard_paths == (str(artifact / "ple.bin"),)
+        if backend == "mmap":
+            assert table.mapping is not None
+            assert table.mapping.path == artifact / "ple.bin"
+            assert table.mapping._prefix == 0
+            assert table.mapping.length == table.descriptor.tensor_bytes
+        else:
+            assert table.mapping is None
+
+
+def test_dedicated_ple_rejects_nonzero_artifact_data_offset(tmp_path: Path) -> None:
+    artifact = tmp_path / "bad-offset"
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+    manifest_path = artifact / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["data_offset"] = 1
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="data_offset must be zero"):
+        MappedPLETable.open_from_artifact(artifact)
 
 
 @pytest.mark.parametrize("backend", ["mmap", "pread"])
