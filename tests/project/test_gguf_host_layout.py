@@ -272,22 +272,22 @@ def test_validated_ple_handoff_reuses_checksum_and_rechecks_file_identity(
     calls = 0
     real_hash = gguf_host._sha256_file
 
-    def counting_hash(path: Path, *args: object, **kwargs: object) -> str:
+    def replacing_hash(path: Path | int, *args: object, **kwargs: object) -> str:
         nonlocal calls
         calls += 1
-        return real_hash(path, *args, **kwargs)
+        result = real_hash(path, *args, **kwargs)
+        if calls == 1:
+            replacement = artifact / "ple.replacement"
+            replacement.write_bytes(b"\x00" * (artifact / "ple.bin").stat().st_size)
+            os.replace(replacement, artifact / "ple.bin")
+        return result
 
-    monkeypatch.setattr("freetoken.gguf_host._sha256_file", counting_hash)
+    monkeypatch.setattr("freetoken.gguf_host._sha256_file", replacing_hash)
     handoff = validate_ple_artifact_handoff(artifact, source_path=FIXTURE)
     assert calls == 1
-    with MappedPLETable.open_from_artifact(artifact, validated_artifact=handoff):
-        pass
-    assert calls == 1
-
-    payload = artifact / "ple.bin"
-    payload.touch()
     with pytest.raises(ValueError, match="payload changed"):
         MappedPLETable.open_from_artifact(artifact, validated_artifact=handoff)
+    assert calls == 1
 
 
 def test_source_ple_rejects_unknown_backend_before_opening() -> None:

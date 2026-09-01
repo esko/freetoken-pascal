@@ -325,8 +325,19 @@ def _resolve_planner_config(
     return resolved
 
 
-def _sha256_file(path: Path, chunk_size: int = 8 << 20) -> str:
+def _sha256_file(path: Path | int, chunk_size: int = 8 << 20) -> str:
     digest = hashlib.sha256()
+    if isinstance(path, int):
+        size = os.fstat(path).st_size
+        os.lseek(path, 0, os.SEEK_SET)
+        offset = 0
+        while offset < size:
+            chunk = os.read(path, min(chunk_size, size - offset))
+            if not chunk:
+                raise ValueError("file shortened while calculating sha256")
+            digest.update(chunk)
+            offset += len(chunk)
+        return digest.hexdigest()
     with path.open("rb") as source:
         while chunk := source.read(chunk_size):
             digest.update(chunk)
@@ -913,7 +924,9 @@ def inspect_qwen_host_layout(
     )
 
 
-def _read_validated_ple_artifact(path: str | Path) -> PLEDescriptor:
+def _read_validated_ple_artifact(
+    path: str | Path,
+) -> tuple[PLEDescriptor, str, PLEFileIdentity]:
     """Read and validate a dedicated PLE artifact without opening any mapping.
 
     This is deliberately a pure file/metadata operation.  It is used by Engine
@@ -973,37 +986,48 @@ def _read_validated_ple_artifact(path: str | Path) -> PLEDescriptor:
         raise ValueError(f"invalid PLE artifact geometry: {error}") from error
     payload = root / str(manifest.get("payload", "ple.bin"))
     try:
-        payload_size = payload.stat().st_size
+        payload_fd = os.open(payload, os.O_RDONLY)
     except OSError as error:
         raise ValueError("PLE artifact payload is missing") from error
-    if not payload.is_file() or payload_size != tensor_bytes:
-        raise ValueError("PLE artifact payload is truncated or has a gap")
+    try:
+        payload_identity = PLEFileIdentity.from_fd(payload_fd)
+        if payload_identity.size != tensor_bytes:
+            raise ValueError("PLE artifact payload is truncated or has a gap")
+        if not payload.is_file():
+            raise ValueError("PLE artifact payload is not a regular file")
+    except BaseException:
+        os.close(payload_fd)
+        raise
     if not isinstance(manifest["sha256"], str) or not re.fullmatch(
         r"[0-9a-f]{64}", manifest["sha256"]
     ):
+        os.close(payload_fd)
         raise ValueError("invalid PLE artifact sha256")
-    before_hash_identity = PLEFileIdentity.from_path(payload)
-    actual_sha256 = _sha256_file(payload)
-    # A checksum is only useful for the bytes that were actually opened.  Reject
-    # replacement/truncation while hashing instead of handing a moving file to
-    # the mapper.
-    if PLEFileIdentity.from_path(payload) != before_hash_identity:
-        raise ValueError("PLE artifact payload changed while hashing")
-    if actual_sha256 != manifest["sha256"]:
-        raise ValueError("PLE artifact sha256 mismatch")
-    return PLEDescriptor(
-        tensor_name=str(manifest.get("tensor_name", _PLE_TENSOR)),
-        quant_type=GGML_IQ4_NL,
-        quant_name="IQ4_NL",
-        rows=rows,
-        elements_per_row=elements,
-        row_bytes=row_bytes,
-        tensor_bytes=tensor_bytes,
-        shard_index=0,
-        shard_path=str(payload),
-        data_offset=0,
-        codec=codec_descriptor,
-    )
+    try:
+        # Hash bytes through the already-open descriptor.  The before/after
+        # fstats bind the digest to one inode and catch in-place replacement,
+        # truncation, or writes that alter the file metadata during the stream.
+        actual_sha256 = _sha256_file(payload_fd)
+        if PLEFileIdentity.from_fd(payload_fd) != payload_identity:
+            raise ValueError("PLE artifact payload changed while hashing")
+        if actual_sha256 != manifest["sha256"]:
+            raise ValueError("PLE artifact sha256 mismatch")
+        descriptor = PLEDescriptor(
+            tensor_name=str(manifest.get("tensor_name", _PLE_TENSOR)),
+            quant_type=GGML_IQ4_NL,
+            quant_name="IQ4_NL",
+            rows=rows,
+            elements_per_row=elements,
+            row_bytes=row_bytes,
+            tensor_bytes=tensor_bytes,
+            shard_index=0,
+            shard_path=str(payload),
+            data_offset=0,
+            codec=codec_descriptor,
+        )
+        return descriptor, actual_sha256, payload_identity
+    finally:
+        os.close(payload_fd)
 
 
 def validate_ple_artifact(
@@ -1017,7 +1041,7 @@ def validate_ple_artifact(
     ``source_path`` is supplied, its parsed PLE descriptor must match every
     semantic field of the artifact, including codec and row geometry.
     """
-    descriptor = _read_validated_ple_artifact(path)
+    descriptor, _, _ = _read_validated_ple_artifact(path)
     if source_path is not None:
         source = inspect_qwen_host_layout(source_path).ple
         mismatches = [
@@ -1047,7 +1071,7 @@ def validate_ple_artifact_handoff(
     root = Path(path).resolve(strict=True)
     manifest = root / "manifest.json"
     manifest_before = PLEFileIdentity.from_path(manifest)
-    descriptor = _read_validated_ple_artifact(root)
+    descriptor, payload_sha256, payload_identity = _read_validated_ple_artifact(root)
     manifest_identity = PLEFileIdentity.from_path(manifest)
     if manifest_identity != manifest_before:
         raise ValueError("PLE artifact manifest changed during validation")
@@ -1063,13 +1087,12 @@ def validate_ple_artifact_handoff(
                 "dedicated PLE artifact does not match source GGUF descriptor: "
                 + ", ".join(mismatches)
             )
-    payload = Path(descriptor.shard_path)
     return ValidatedPLEArtifact(
         artifact_path=str(root),
         descriptor=descriptor,
-        payload_sha256=json.loads(manifest.read_text(encoding="utf-8"))["sha256"],
+        payload_sha256=payload_sha256,
         manifest_identity=manifest_identity,
-        payload_identity=PLEFileIdentity.from_path(payload),
+        payload_identity=payload_identity,
     )
 
 
