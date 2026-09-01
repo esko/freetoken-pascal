@@ -317,7 +317,7 @@ def test_warm_gate_is_single_device_bounded_and_reuses_full_h2_identity() -> Non
     assert "run_warm_p4" in branch
     assert "run_single_h2" not in branch
     assert "scripts/run_qwen38_warm_h2.py" in gate
-    assert 'timeout 330 python scripts/run_qwen38_warm_h2.py' in gate
+    assert 'env PYTHONPATH=python timeout 330 python scripts/run_qwen38_warm_h2.py' in gate
     assert '--full-h2 "$full_h2"' in gate
     assert '--gpus "device=$smoke_gpu"' in gate
 
