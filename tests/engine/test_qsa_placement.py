@@ -173,6 +173,23 @@ def test_projection_uses_exact_ten_qsa_categories_and_lifetimes() -> None:
     assert sum(categories.values()) == workspace.required_bytes == 1436
 
 
+def test_vectorized_projection_includes_per_head_score_tile() -> None:
+    workspace = calculate_qsa_workspace(
+        _inputs(
+            context_tokens=8192,
+            page_table_width=8192,
+            num_pages=1024,
+            qsa_selection_path="torch-fp32-vectorized-reference",
+        )
+    )
+
+    categories = derive_qsa_placement_categories(workspace)
+    score = workspace.inventory["score"].components
+
+    assert score["vector_score_heads"] > 0
+    assert categories["qsa_transient_score"] >= score["vector_score_heads"]
+
+
 def test_capture_projection_partitions_graph_and_dynamic_buffers() -> None:
     workspace = calculate_qsa_workspace(_inputs(phase="capture", capture_max_batch_size=3))
 

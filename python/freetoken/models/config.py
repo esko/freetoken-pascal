@@ -246,6 +246,13 @@ class SlotStateSpec:
     fill_value: float = 0.0
 
 
+QSASelectionPath: TypeAlias = Literal[
+    "auto",
+    "torch-fp32-reference",
+    "torch-fp32-vectorized-reference",
+]
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     num_layers: int
@@ -342,6 +349,8 @@ class ModelConfig:
     # Qwen4-Exp payload: hyper-connections, PLE host embedding geometry, and the
     # QSA exact-context ceiling. Opaque outside the qwen4_exp model package.
     qwen4_args: Any | None = None
+    # ``auto`` preserves architecture dispatch; the vectorized Torch reference is explicit-only.
+    qsa_selection_path: QSASelectionPath = "auto"
     # Generic execution-path capability flags (set by a model's parse_config) so the engine and
     # factories stay model-agnostic instead of branching on dsv4_args:
     single_stream_only: bool = False  # model runs one sequence at a time -> force bs=1

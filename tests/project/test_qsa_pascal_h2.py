@@ -153,6 +153,7 @@ def test_main_removes_stale_qsa_evidence_before_probe(
     def fake_probe(**kwargs: object) -> dict[str, object]:
         assert not output.exists()
         assert not temporary.exists()
+        assert kwargs["selection_path"] == "auto"
         return {}
 
     monkeypatch.setattr(QSA_H2, "run_probe", fake_probe)
@@ -172,6 +173,37 @@ def test_main_removes_stale_qsa_evidence_before_probe(
         )
         == 0
     )
+
+
+def test_main_passes_explicit_vectorized_selection_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_probe(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(QSA_H2, "run_probe", fake_probe)
+
+    assert (
+        QSA_H2.main(
+            [
+                "--inventory",
+                str(tmp_path / "inventory.json"),
+                "--output",
+                str(tmp_path / "evidence.json"),
+                "--expected-profile",
+                "ecc-off",
+                "--repository-commit",
+                "1" * 40,
+                "--selection-path",
+                "torch-fp32-vectorized-reference",
+            ]
+        )
+        == 0
+    )
+    assert captured["selection_path"] == "torch-fp32-vectorized-reference"
 
 
 def test_fixture_is_bound_to_qsa_registry_contract() -> None:
@@ -259,4 +291,5 @@ def test_hardware_gate_has_a_profile_bound_bounded_qsa_level() -> None:
     assert "scripts/run_qsa_pascal_h2.py" in branch
     assert '--inventory "$inventory_path"' in branch
     assert '--expected-profile "$profile_id"' in branch
-    assert "qwen38-qsa-h2-${profile_id}.json" in branch
+    assert "qwen38-qsa-h2-${profile_id}${qsa_output_suffix}.json" in branch
+    assert '--selection-path "$qsa_selection_path"' in branch

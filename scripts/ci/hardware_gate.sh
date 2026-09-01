@@ -258,6 +258,18 @@ run_qsa_p4() {
     echo "qsa-p4 currently requires FREETOKEN_SMOKE_GPU=0 for exact host/container identity" >&2
     return 1
   fi
+  qsa_selection_path="${FREETOKEN_QSA_SELECTION_PATH:-auto}"
+  case "$qsa_selection_path" in
+    auto|torch-fp32-reference|torch-fp32-vectorized-reference) ;;
+    *)
+      echo "FREETOKEN_QSA_SELECTION_PATH must be auto, torch-fp32-reference, or torch-fp32-vectorized-reference" >&2
+      return 2
+      ;;
+  esac
+  qsa_output_suffix=""
+  if [[ "$qsa_selection_path" != "auto" ]]; then
+    qsa_output_suffix="-${qsa_selection_path}"
+  fi
   docker run --rm --gpus "device=$smoke_gpu" \
     -v "$repo_root:$container_root" \
     -w "$container_root" \
@@ -270,10 +282,11 @@ run_qsa_p4() {
     env PYTHONPATH=python timeout --foreground --signal=TERM --kill-after=5s 300s \
       python scripts/run_qsa_pascal_h2.py \
       --inventory "$inventory_path" \
-      --output "results/hardware/qwen38-qsa-h2-${profile_id}.json" \
+      --output "results/hardware/qwen38-qsa-h2-${profile_id}${qsa_output_suffix}.json" \
       --gpu-index "$smoke_gpu" \
       --expected-profile "$profile_id" \
-      --repository-commit "$repository_commit"
+      --repository-commit "$repository_commit" \
+      --selection-path "$qsa_selection_path"
 }
 
 case "$level" in

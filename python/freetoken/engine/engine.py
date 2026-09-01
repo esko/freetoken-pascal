@@ -2060,6 +2060,8 @@ def _adjust_config(config: EngineConfig):
     if is_moe:
         object.__setattr__(model_config, "moe_backend", config.moe_backend)
     object.__setattr__(model_config, "nvfp4_backend", config.nvfp4_backend)
+    qsa_selection_path = getattr(config, "qsa_selection_path", "auto")
+    object.__setattr__(model_config, "qsa_selection_path", qsa_selection_path)
 
     # Must stay LAST: page_size is only final here (_adjust_dsv4_config sets P=128, the
     # TRTLLM block sets 64). Also covers the programmatic LLM(...) path that bypasses parse_args.
@@ -2095,6 +2097,7 @@ def _adjust_config(config: EngineConfig):
     # hit an "Auto-selected ..." log at all).
     resolved = [
         f"attention_backend={config.attention_backend!r}",
+        f"qsa_selection_path={qsa_selection_path!r}",
         f"cache_type={getattr(config, 'cache_type', 'radix')!r}",
         f"page_size={config.page_size}",
     ]

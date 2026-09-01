@@ -85,6 +85,9 @@ selection (`q_index`, retained indices, and one score/top-k chunk), and selected
 The selected-row phases also retain both per-forward scatter plans.
 Capture high-water accounting includes every `_graph` buffer simultaneously and the active capture
 attention allocations, including the active capture batch's scatter plans.
+The explicit `torch-fp32-vectorized-reference` selection experiment additionally accounts for one
+request-level compressed-key gather (native and FP32 views), a full FP32 query-index view, and the
+bounded stable-sort index tile; it is eager-only and disabled by `qsa_selection_path=auto`.
 The eager Torch top-k fallback is accounted separately for its Python-visible column arange,
 visibility mask, values, chosen indices, validity mask, int32 cast, and `where` output. PyTorch
 allocator fragmentation and opaque kernel-internal top-k workspace cannot be observed by this

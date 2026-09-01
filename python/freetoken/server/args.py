@@ -44,6 +44,8 @@ class ServerArgs(SchedulerConfig):
     gpu: tuple[str, ...] = ()
     # full UUIDs resolved from --gpu, entry i = TP rank i; None = NVML unavailable, each worker then resolves its raw entry against CUDA's own enumeration
     gpu_assigned: "tuple[str, ...] | None" = None
+    # QSA vectorized reference is an explicit eager experiment; ``auto`` preserves dispatch.
+    qsa_selection_path: str = "auto"
 
     @property
     def share_tokenizer(self) -> bool:
@@ -384,6 +386,21 @@ def parse_args(
         default=ServerArgs.attention_backend,
         help="The attention backend to use. If two backends are specified,"
         " the first one is used for prefill and the second one for decode.",
+    )
+
+    parser.add_argument(
+        "--qsa-selection-path",
+        choices=[
+            "auto",
+            "torch-fp32-reference",
+            "torch-fp32-vectorized-reference",
+        ],
+        default=ServerArgs.qsa_selection_path,
+        help=(
+            "QSA selection implementation. 'auto' preserves the architecture default; "
+            "'torch-fp32-vectorized-reference' is an explicit eager H0/H2 experiment "
+            "and is disabled by default."
+        ),
     )
 
     parser.add_argument(

@@ -7,6 +7,7 @@ from .config import (
     KVCacheGroupSpec,
     LinearGatedDeltaGroupConfig,
     ModelConfig,
+    QSASelectionPath,
     RotaryConfig,
     SWAAttentionGroupConfig,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "FullAttentionGroupConfig",
     "LinearGatedDeltaGroupConfig",
     "ModelConfig",
+    "QSASelectionPath",
     "RotaryConfig",
     "SWAAttentionGroupConfig",
     "KVCacheGroupSpec",

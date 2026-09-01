@@ -11,6 +11,7 @@ thermal, model-quality, or sustained-load qualification.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -295,7 +296,7 @@ def _workspace_record(fixture: Any, context_tokens: int, phase: str) -> dict[str
     args = fixture.config.qwen4_args
     group = next(group for group in fixture.config.attention_groups if group.name == "full")
     selected_path = fixture.backend.selected_path
-    topk_backend = "torch" if selected_path == "torch-fp32-reference" else "triton"
+    topk_backend = "torch" if selected_path != "triton" else "triton"
     rows = context_tokens if phase == "prefill" else 1
     request = QSAWorkspaceInputs(
         context_tokens=context_tokens,
@@ -319,6 +320,7 @@ def _workspace_record(fixture: Any, context_tokens: int, phase: str) -> dict[str
         batch_size=1,
         phase="eager",
         topk_backend=topk_backend,
+        qsa_selection_path=selected_path,
     )
     plan = calculate_qsa_workspace(request)
     return {
@@ -548,7 +550,7 @@ def build_evidence(
         "profile": {
             "attention_backend": "qsa_sparse",
             "selected_path": selected_path,
-            "reference_only": selected_path == "torch-fp32-reference",
+            "reference_only": selected_path != "triton",
             "topk_backend": topk_backend,
             "default_changed": False,
         },
@@ -626,6 +628,7 @@ def run_probe(
     expected_profile: str,
     gpu_index: int,
     repository_commit: str,
+    selection_path: str = "auto",
 ) -> dict[str, Any]:
     if gpu_index != 0:
         raise ValueError("qsa-p4 currently requires inventory GPU index 0")
@@ -652,7 +655,10 @@ def run_probe(
     checkpoints: list[dict[str, Any]] = []
     for context in CONTEXTS:
         num_pages = max(64, (context + 1 + 63) // 64 + 4)
-        fixture = Fixture(parsed_config(num_layers=4), num_pages=num_pages)
+        config = dataclasses.replace(
+            parsed_config(num_layers=4), qsa_selection_path=selection_path
+        )
+        fixture = Fixture(config, num_pages=num_pages)
         # Exercise the public registry entry; direct class construction is not the producer path.
         backend = create_attention_backend("qsa_sparse", fixture.config)
         fixture.backend = backend
@@ -738,7 +744,7 @@ def run_probe(
     if telemetry[0]["uuid"] != gpu["uuid"] or telemetry[0]["pci_bus_id"] != gpu["pci_bus_id"]:
         raise RuntimeError("QSA telemetry identity does not match inventory")
     selected_path = str(samples[0]["phase_events"][0]["path"])
-    topk_backend = "torch" if selected_path == "torch-fp32-reference" else "triton"
+    topk_backend = "torch" if selected_path != "triton" else "triton"
     document = build_evidence(
         inventory=inventory,
         inventory_path=inventory_path,
@@ -773,6 +779,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-profile", choices=("ecc-on", "ecc-off"), required=True)
     parser.add_argument("--gpu-index", type=int, default=0)
     parser.add_argument("--repository-commit", required=True)
+    parser.add_argument(
+        "--selection-path",
+        choices=("auto", "torch-fp32-reference", "torch-fp32-vectorized-reference"),
+        default="auto",
+        help="Explicit QSA selector for bounded candidate evidence; auto preserves dispatch.",
+    )
     args = parser.parse_args(argv)
     args.output.unlink(missing_ok=True)
     args.output.with_name(args.output.name + ".tmp").unlink(missing_ok=True)
@@ -786,6 +798,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_profile=args.expected_profile,
         gpu_index=args.gpu_index,
         repository_commit=args.repository_commit,
+        selection_path=args.selection_path,
     )
     print(args.output)
     return 0

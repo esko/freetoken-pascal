@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Literal
 
 import torch
 from freetoken.distributed import DistributedInfo
@@ -92,8 +92,22 @@ class EngineConfig:
     # KV capacity in tokens; resolved into num_page_override by _adjust_config once page_size
     # is final. Mutually exclusive with num_page_override.
     num_token_override: int | None = None
+    # QSA selection path. ``auto`` retains the architecture default; the vectorized FP32
+    # reference is an explicit eager experiment and remains disabled by default.
+    qsa_selection_path: Literal[
+        "auto", "torch-fp32-reference", "torch-fp32-vectorized-reference"
+    ] = "auto"
 
     def __post_init__(self) -> None:
+        if self.qsa_selection_path not in {
+            "auto",
+            "torch-fp32-reference",
+            "torch-fp32-vectorized-reference",
+        }:
+            raise ValueError(
+                "invalid qsa_selection_path; expected 'auto', 'torch-fp32-reference', or "
+                "'torch-fp32-vectorized-reference'"
+            )
         if self.ple_planner_mode not in {"vectorized", "direct", "adaptive"}:
             raise ValueError(
                 "invalid PLE planner mode "

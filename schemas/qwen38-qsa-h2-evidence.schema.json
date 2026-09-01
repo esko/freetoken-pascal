@@ -119,7 +119,7 @@
       "required": ["attention_backend", "selected_path", "reference_only", "topk_backend", "default_changed"],
       "properties": {
         "attention_backend": {"const": "qsa_sparse"},
-        "selected_path": {"enum": ["torch-fp32-reference", "triton"]},
+        "selected_path": {"enum": ["torch-fp32-reference", "torch-fp32-vectorized-reference", "triton"]},
         "reference_only": {"type": "boolean"},
         "topk_backend": {"enum": ["torch", "triton"]},
         "default_changed": {"const": false}
@@ -157,7 +157,7 @@
       "properties": {
         "context_tokens": {"enum": [128, 512, 2048]},
         "phase": {"enum": ["prefill", "decode"]},
-        "selected_path": {"enum": ["torch-fp32-reference", "triton"]},
+        "selected_path": {"enum": ["torch-fp32-reference", "torch-fp32-vectorized-reference", "triton"]},
         "topk_backend": {"enum": ["torch", "triton"]},
         "plan": {"$ref": "#/$defs/plan"}
       }
@@ -235,7 +235,7 @@
         "phase": {"enum": ["store_kv", "index_cache_composite", "selection_composite", "selected_row_attention"]},
         "layer_id": {"type": "integer", "minimum": 0},
         "slot": {"type": "integer", "minimum": 0},
-        "path": {"enum": ["torch-fp32-reference", "triton"]},
+        "path": {"enum": ["torch-fp32-reference", "torch-fp32-vectorized-reference", "triton"]},
         "elapsed_ns": {"$ref": "#/$defs/nonnegative_ns"}
       }
     },

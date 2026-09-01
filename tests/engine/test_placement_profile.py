@@ -137,6 +137,7 @@ def _identity(*, topology: tuple[GPUProfileTopology, ...] | None = None, **overr
             "capture_max_batch_size": 1,
             "phase": "eager",
             "topk_backend": "triton",
+            "qsa_selection_path": "auto",
             "dtype_bytes": 2,
         },
         "topology": topology,
@@ -465,6 +466,11 @@ def test_qsa_geometry_is_reconstructed_and_validated() -> None:
         )
     with pytest.raises(PlacementPlannerError, match="compression_ratio"):
         replace(identity, qsa_geometry={**identity.qsa_geometry, "compression_ratio": 3})
+    with pytest.raises(PlacementPlannerError, match="qsa_selection_path"):
+        replace(
+            identity,
+            qsa_geometry={**identity.qsa_geometry, "qsa_selection_path": "unknown"},
+        )
 
 
 def test_geometry_cross_fields_must_match_plan_and_backoff() -> None:

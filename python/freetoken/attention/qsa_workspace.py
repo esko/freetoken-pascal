@@ -21,6 +21,11 @@ _QSA_DTYPE = 2
 # row tile is a bounded transient; it is not the complete [token_rows, columns] matrix.
 QSA_LOGITS_WORKSPACE_BYTES = 128 << 20
 QSA_WORKSPACE_CATEGORIES = ("score", "top_k", "expand_gather", "attention", "state")
+QSA_SELECTION_PATHS = (
+    "auto",
+    "torch-fp32-reference",
+    "torch-fp32-vectorized-reference",
+)
 
 
 class QSAWorkspaceError(ValueError):
@@ -102,6 +107,21 @@ def qsa_score_chunk_rows(rows: int, columns: int) -> int:
     )
 
 
+def qsa_vectorized_score_chunk_rows(rows: int, columns: int, index_heads: int = 1) -> int:
+    """Return a row chunk bounded for per-head FP32 scores plus stable-sort indices."""
+    rows = _positive(rows, "rows")
+    columns = _positive(columns, "columns")
+    index_heads = _positive(index_heads, "index_heads")
+    # The device tile retains per-head scores until their reduction, the reduced score logits,
+    # and stable-sort indices.  Keep all three within the existing bounded score budget.
+    per_row = _mul(
+        columns,
+        index_heads * _FP32 + _FP32 + _I64,
+        label="vectorized score tile",
+    )
+    return min(rows, max(1, QSA_LOGITS_WORKSPACE_BYTES // per_row))
+
+
 def qsa_topk_scratch_width(columns: int, top_k: int, backend: str = "triton") -> int:
     """Return the runtime Triton top-k candidate width, or zero for one-program selection."""
     columns = _positive(columns, "columns")
@@ -180,11 +200,17 @@ class QSAWorkspaceInputs:
     capture_max_batch_size: int | None = None
     phase: str = "eager"
     topk_backend: str = "triton"
+    qsa_selection_path: str = "auto"
     dtype_bytes: int = _QSA_DTYPE
 
     def __post_init__(self) -> None:
         for name in self.__dataclass_fields__:
-            if name not in {"phase", "topk_backend", "capture_max_batch_size"}:
+            if name not in {
+                "phase",
+                "topk_backend",
+                "qsa_selection_path",
+                "capture_max_batch_size",
+            }:
                 object.__setattr__(self, name, _positive(getattr(self, name), name))
         capture_max = (
             self.batch_size
@@ -200,9 +226,18 @@ class QSAWorkspaceInputs:
             raise QSAWorkspaceInputError("phase must be 'eager' or 'capture'")
         if self.topk_backend not in {"triton", "torch"}:
             raise QSAWorkspaceInputError("topk_backend must be 'triton' or 'torch'")
+        if self.qsa_selection_path not in QSA_SELECTION_PATHS:
+            raise QSAWorkspaceInputError(
+                "qsa_selection_path must be 'auto', 'torch-fp32-reference', or "
+                "'torch-fp32-vectorized-reference'"
+            )
         if self.phase == "capture" and self.topk_backend == "torch":
             raise QSAWorkspaceInputError(
                 "capture phase requires Triton top-k; the torch.topk fallback is eager-only"
+            )
+        if self.phase == "capture" and self.qsa_selection_path == "torch-fp32-vectorized-reference":
+            raise QSAWorkspaceInputError(
+                "torch-fp32-vectorized-reference is eager-only and cannot be captured"
             )
         if self.query_heads % self.kv_heads:
             raise QSAWorkspaceInputError("query_heads must be divisible by kv_heads")
@@ -234,12 +269,23 @@ class QSAWorkspaceInputs:
 
     @property
     def chunk_rows(self) -> int:
+        if self.qsa_selection_path == "torch-fp32-vectorized-reference":
+            return qsa_vectorized_score_chunk_rows(
+                self.token_rows, self.score_columns, self.index_heads
+            )
         return qsa_score_chunk_rows(self.token_rows, self.score_columns)
 
     @property
     def capture_chunk_rows(self) -> int:
         """Rows reserved by ``init_capture_graph`` for its bounded logits tile."""
         return qsa_score_chunk_rows(self.capture_max_batch_size, self.score_columns)
+
+    @property
+    def request_key_rows(self) -> int:
+        """Maximum complete compressed keys in one vectorized request gather."""
+        if self.qsa_selection_path != "torch-fp32-vectorized-reference":
+            return 0
+        return min(self.context_tokens // self.compression_ratio, self.score_columns)
 
     @property
     def selection_width(self) -> int:
@@ -440,12 +486,68 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
             ),
             "logits": _mul(chunk, columns, _FP32, label="score logits"),
             "visible": _mul(chunk, _I32, label="visible blocks"),
+            "q_index_fp32": (
+                _mul(rows, request.index_heads, request.index_head_dim, _FP32, label="FP32 q_index")
+                if request.qsa_selection_path == "torch-fp32-vectorized-reference"
+                else 0
+            ),
+            "request_keys": (
+                _mul(
+                    request.request_key_rows,
+                    request.index_head_dim,
+                    _QSA_DTYPE,
+                    label="request key gather",
+                )
+                if request.qsa_selection_path == "torch-fp32-vectorized-reference"
+                else 0
+            ),
+            "request_keys_fp32": (
+                _mul(
+                    request.request_key_rows,
+                    request.index_head_dim,
+                    _FP32,
+                    label="FP32 request key gather",
+                )
+                if request.qsa_selection_path == "torch-fp32-vectorized-reference"
+                else 0
+            ),
+            "vector_score_heads": (
+                _mul(
+                    chunk,
+                    request.index_heads,
+                    request.request_key_rows,
+                    _FP32,
+                    label="vectorized per-head score tile",
+                )
+                if request.qsa_selection_path == "torch-fp32-vectorized-reference"
+                else 0
+            ),
             **metadata_components,
         },
         {
             "q_index": (rows, request.index_heads, request.index_head_dim),
             "logits": (chunk, columns),
             "visible": (chunk,),
+            "q_index_fp32": (
+                (rows, request.index_heads, request.index_head_dim)
+                if request.qsa_selection_path == "torch-fp32-vectorized-reference"
+                else (0, 0, 0)
+            ),
+            "request_keys": (
+                (request.request_key_rows, request.index_head_dim)
+                if request.qsa_selection_path == "torch-fp32-vectorized-reference"
+                else (0, 0)
+            ),
+            "request_keys_fp32": (
+                (request.request_key_rows, request.index_head_dim)
+                if request.qsa_selection_path == "torch-fp32-vectorized-reference"
+                else (0, 0)
+            ),
+            "vector_score_heads": (
+                (chunk, request.index_heads, request.request_key_rows)
+                if request.qsa_selection_path == "torch-fp32-vectorized-reference"
+                else (0, 0, 0)
+            ),
             **metadata_shapes,
         },
     )
@@ -490,6 +592,11 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
                 if torch_fallback
                 else 0
             ),
+            "vector_sort_indices": (
+                _mul(chunk, columns, _I64, label="vectorized stable sort indices")
+                if request.qsa_selection_path == "torch-fp32-vectorized-reference"
+                else 0
+            ),
         },
         {
             "blocks": (chunk, block_top_k),
@@ -501,6 +608,11 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
             "torch_valid": (chunk, torch_width) if torch_fallback else (0, 0),
             "torch_chosen_i32": (chunk, torch_width) if torch_fallback else (0, 0),
             "torch_where": (chunk, torch_width) if torch_fallback else (0, 0),
+            "vector_sort_indices": (
+                (chunk, columns)
+                if request.qsa_selection_path == "torch-fp32-vectorized-reference"
+                else (0, 0)
+            ),
         },
     )
     expand = _category(
@@ -611,6 +723,10 @@ def calculate_qsa_workspace(request: QSAWorkspaceInputs) -> QSAWorkspacePlan:
         metadata_bytes,
         scatter_rows,
         score.components["q_index"],
+        score.components["q_index_fp32"],
+        score.components["request_keys"],
+        score.components["request_keys_fp32"],
+        score.components["vector_score_heads"],
         expand.components["indices"],
         score.components["logits"],
         score.components["visible"],
@@ -688,6 +804,7 @@ def validate_qsa_workspace_capacity(
 __all__ = [
     "MAX_QSA_WORKSPACE_BYTES",
     "QSA_LOGITS_WORKSPACE_BYTES",
+    "QSA_SELECTION_PATHS",
     "QSA_WORKSPACE_CATEGORIES",
     "QSAWorkspaceCapacityError",
     "QSAWorkspaceCategory",
@@ -702,5 +819,6 @@ __all__ = [
     "qsa_attention_split_plan",
     "qsa_score_chunk_rows",
     "qsa_topk_scratch_width",
+    "qsa_vectorized_score_chunk_rows",
     "validate_qsa_workspace_capacity",
 ]

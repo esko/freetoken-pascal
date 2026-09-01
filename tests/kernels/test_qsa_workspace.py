@@ -13,6 +13,7 @@ from freetoken.attention.qsa_workspace import (
     QSAWorkspaceInventory,
     calculate_qsa_workspace,
     qsa_topk_scratch_width,
+    qsa_vectorized_score_chunk_rows,
     validate_qsa_workspace_capacity,
 )
 
@@ -73,6 +74,37 @@ def test_inventory_uses_actual_qsa_shapes_and_all_categories() -> None:
         plan.required_bytes
         == plan.persistent_bytes + plan.capture_resident_bytes + plan.eager_transient_peak_bytes
     )
+
+
+def test_vectorized_reference_accounts_request_key_and_stable_sort_buffers() -> None:
+    plan = calculate_qsa_workspace(
+        _inputs(
+            context_tokens=8192,
+            page_table_width=8192,
+            num_pages=1024,
+            qsa_selection_path="torch-fp32-vectorized-reference",
+        )
+    )
+
+    assert plan.request.chunk_rows == qsa_vectorized_score_chunk_rows(
+        plan.request.token_rows, plan.request.score_columns, plan.request.index_heads
+    )
+    assert plan.inventory["score"].components["request_keys"] == (
+        8192 // 4 * 8 * 2
+    )
+    assert plan.inventory["score"].components["request_keys_fp32"] == (
+        8192 // 4 * 8 * 4
+    )
+    assert plan.inventory["top_k"].components["vector_sort_indices"] > 0
+    assert plan.request.request_key_rows == 8192 // 4
+
+
+def test_vectorized_reference_is_eager_only_in_workspace_contract() -> None:
+    with pytest.raises(QSAWorkspaceInputError, match="eager-only"):
+        _inputs(
+            phase="capture",
+            qsa_selection_path="torch-fp32-vectorized-reference",
+        )
 
 
 def test_incomplete_group_keeps_complete_context_blocks_and_tail_shape() -> None:

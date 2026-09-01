@@ -55,6 +55,13 @@ batch metadata separate from graph maximum-batch buffers, and accounts for the r
 128 MiB score tile.
 It does not allocate CUDA memory or alter QSA dispatch, and a later placement owner may consume its
 capacity telemetry as a preflight input.
+
+`--qsa-selection-path auto` keeps the architecture-selected implementation and is the default.
+`torch-fp32-reference` explicitly selects the scalar oracle, while
+`torch-fp32-vectorized-reference` enables the eager-only vectorized FP32 reference for bounded
+H0/H2 parity experiments. The latter uses host request spans, a request-level compressed-key
+gather, a bounded score/sort tile, and device-side expansion/tail generation; it does not change
+the model's budget or claim a performance improvement.
 The `freetoken.engine.qsa_placement` adapter binds its derived persistent and transient categories
 to a placement plan or canonical profile and rejects arbitrary QSA byte overrides.
 It partitions the active eager or capture high-water exactly across #73's ten buckets, while dual-GPU ownership remains deferred until rank-local geometry is explicit.

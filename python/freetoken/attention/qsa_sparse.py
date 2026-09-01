@@ -42,7 +42,11 @@ from freetoken.core import Batch, get_global_ctx
 from freetoken.utils import init_logger
 
 from .base import AttentionSpec, BaseAttnBackend, BaseAttnMetadata
-from .qsa_workspace import QSA_LOGITS_WORKSPACE_BYTES, qsa_score_chunk_rows
+from .qsa_workspace import (
+    QSA_LOGITS_WORKSPACE_BYTES,
+    qsa_score_chunk_rows,
+    qsa_vectorized_score_chunk_rows,
+)
 
 logger = init_logger(__name__)
 
@@ -63,6 +67,43 @@ _LOGITS_WORKSPACE_BYTES = QSA_LOGITS_WORKSPACE_BYTES
 
 
 TORCH_TOPK_ENV = "FREETOKEN_QSA_TORCH_TOPK"
+
+QSA_SELECTION_PATHS = (
+    "auto",
+    "torch-fp32-reference",
+    "torch-fp32-vectorized-reference",
+)
+QSASelectionPath = Literal[
+    "auto",
+    "torch-fp32-reference",
+    "torch-fp32-vectorized-reference",
+]
+
+
+@dataclass(frozen=True)
+class QSARequestSpan:
+    """Host-owned bounds for one ragged request in flattened QSA rows."""
+
+    token_start: int
+    token_stop: int
+    cached_len: int
+    device_len: int
+    table_idx: int
+
+
+def resolve_qsa_selection_path(
+    requested: str,
+    *,
+    reference_only: bool,
+    sm70_supported: bool,
+) -> str:
+    """Resolve QSA selection while keeping the vectorized reference explicit-only."""
+    if requested not in QSA_SELECTION_PATHS:
+        choices = ", ".join(QSA_SELECTION_PATHS)
+        raise ValueError(f"invalid qsa selection path {requested!r}; expected one of {choices}")
+    if requested == "auto":
+        return "torch-fp32-reference" if reference_only or not sm70_supported else "triton"
+    return requested
 
 QSAPhase = Literal[
     "store_kv",
@@ -118,6 +159,9 @@ class QSASparseMetadata(BaseAttnMetadata):
     cmp_rows:         torch.Tensor | None = None  # [T] int32, compressed slab destination
     ring_rows:        torch.Tensor | None = None  # [T] int32, flat ring row or -1
     positions:        torch.Tensor | None = None  # [T] int32, logical query positions
+    # Host scheduler spans avoid reading request lengths back from CUDA in the optional
+    # vectorized reference selector.
+    request_spans:    tuple[QSARequestSpan, ...] = ()
     # fmt: on
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
@@ -163,9 +207,14 @@ class QSASparseAttnBackend(BaseAttnBackend):
 
         from freetoken.utils.arch import is_sm70_supported
 
-        self._torch_reference = self.reference_only or not is_sm70_supported()
+        self.selected_path = resolve_qsa_selection_path(
+            getattr(config, "qsa_selection_path", "auto"),
+            reference_only=self.reference_only,
+            sm70_supported=is_sm70_supported(),
+        )
+        self._vectorized_reference = self.selected_path == "torch-fp32-vectorized-reference"
+        self._torch_reference = self.selected_path != "triton"
         self._block_topk_kernel = None if self._torch_reference else _resolve_block_topk()
-        self.selected_path = "torch-fp32-reference" if self._torch_reference else "triton"
         self._phase_observer: QSAPhaseObserver | None = None
         logger.info_rank0(f"QSA sparse attention path: {self.selected_path}")
         # decode staging (static buffers under CUDA graphs; eager decode snapshots per step)
@@ -173,7 +222,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
         self.capture_bs: list[int] = []
 
     def set_phase_observer(self, observer: QSAPhaseObserver | None) -> None:
-        """Attach scalar-only diagnostics to the eager Torch reference path."""
+        """Attach diagnostics to an eager Torch reference path."""
         if observer is not None and not callable(observer):
             raise TypeError("QSA phase observer must be callable or None")
         if observer is not None and not self._torch_reference:
@@ -229,12 +278,31 @@ class QSASparseAttnBackend(BaseAttnBackend):
         is_decode = getattr(batch, "phase", None) == "decode"
         qo_indptr = torch.tensor([0, *seqlens_q], **_CPU_PINNED).cumsum_(0).to(torch.int32)
         kv_len = torch.tensor(seqlens_k, **_CPU_PINNED)
+        spans: list[QSARequestSpan] = []
+        offset = 0
+        for request in reqs:
+            extend = int(request.extend_len)
+            cached_len = int(request.cached_len)
+            device_len = int(request.device_len)
+            if extend != device_len - cached_len or extend < 0:
+                raise ValueError("QSA request span has inconsistent cached/device lengths")
+            spans.append(
+                QSARequestSpan(
+                    offset,
+                    offset + extend,
+                    cached_len,
+                    device_len,
+                    int(request.table_idx),
+                )
+            )
+            offset += extend
         last = (qo_indptr[1:].to(torch.int32) - 1).to(self.device, non_blocking=True)
         md = QSASparseMetadata(
             is_decode=is_decode,
             last_indices=last,
             qo_indptr_cpu=qo_indptr,
             kv_len_cpu=kv_len,
+            request_spans=tuple(spans),
         )
         batch.attn_metadata = md
         if not is_decode:
@@ -717,6 +785,186 @@ class QSASparseAttnBackend(BaseAttnBackend):
                 indices[row, : values.numel()] = values
         return indices
 
+    def _select_vectorized_reference(self, index, md: QSASparseMetadata, slot: int) -> torch.Tensor:
+        """Select QSA rows with request-batched FP32 Torch operations.
+
+        This is an eager, explicit-only reference candidate.  Request bounds come from the
+        scheduler's host spans; all score, ordering, expansion, and tail work remains on the
+        selected device.  The scalar :meth:`_select_torch` implementation is intentionally kept
+        unchanged as the permanent oracle.
+        """
+        if md.positions is None or md.block_table is None or md.token_to_req is None:
+            raise RuntimeError("QSA vectorized selection requires complete metadata")
+        spans = getattr(md, "request_spans", ())
+        if not spans:
+            raise RuntimeError("QSA vectorized selection requires host request spans")
+        rows = index.q.shape[0]
+        if index.q.ndim != 3 or index.q.shape[1:] != (self.index_heads, self.index_head_dim):
+            raise ValueError("QSA vectorized index queries have invalid geometry")
+        if md.positions.ndim != 1 or md.positions.numel() != rows:
+            raise ValueError("QSA vectorized selection positions have invalid geometry")
+        if md.token_to_req.ndim != 1 or md.token_to_req.numel() != rows:
+            raise ValueError("QSA vectorized selection request indices have invalid geometry")
+        if md.block_table.ndim != 2 or len(spans) != md.block_table.shape[0]:
+            raise ValueError("QSA vectorized selection request spans do not match page table")
+
+        expected_start = 0
+        sparse_ranges: list[tuple[int, int, int]] = []
+        tail_only_ranges: list[tuple[int, int]] = []
+        max_blocks = 0
+        for request_id, span in enumerate(spans):
+            if not isinstance(span, QSARequestSpan):
+                raise ValueError("QSA vectorized selection request spans are malformed")
+            if span.token_start != expected_start or span.token_stop < span.token_start:
+                raise ValueError("QSA vectorized selection request spans are not contiguous")
+            if span.device_len - span.cached_len != span.token_stop - span.token_start:
+                raise ValueError("QSA vectorized selection request span length is inconsistent")
+            if span.cached_len < 0 or span.device_len < 0:
+                raise ValueError("QSA vectorized selection request lengths must be non-negative")
+            if span.table_idx < 0:
+                raise ValueError("QSA vectorized selection request table index is negative")
+            expected_start = span.token_stop
+
+            block_count = span.device_len // self.ratio
+            if block_count:
+                # Even when every visible block fits the budget, preserve the scalar oracle's
+                # stable score ordering.  Skipping the sort would change selected-row order and
+                # can perturb the downstream reduction.
+                sparse_ranges.append((request_id, span.token_start, span.token_stop))
+                max_blocks = max(max_blocks, block_count)
+            elif span.token_start < span.token_stop:
+                tail_only_ranges.append((span.token_start, span.token_stop))
+        if expected_start != rows:
+            raise ValueError("QSA vectorized selection spans do not cover index rows")
+
+        indices = torch.full(
+            (rows, self.select_width), -1, dtype=torch.int32, device=index.q.device
+        )
+        token_offsets = torch.arange(self.ratio, dtype=torch.long, device=index.q.device)
+        for start, stop in tail_only_ranges:
+            row_ids = torch.arange(start, stop, dtype=torch.long, device=index.q.device)
+            positions = md.positions.index_select(0, row_ids).to(torch.long)
+            tail = token_offsets.unsqueeze(0).expand(stop - start, -1)
+            tail_valid = token_offsets.unsqueeze(0) < (positions + 1).unsqueeze(1)
+            packed = torch.full(
+                (stop - start, self.select_width),
+                -1,
+                dtype=torch.int32,
+                device=index.q.device,
+            )
+            packed[:, : self.ratio] = torch.where(tail_valid, tail, -1).to(torch.int32)
+            indices.index_copy_(0, row_ids, packed)
+
+        if not sparse_ranges:
+            return indices
+        columns = md.block_table.shape[1] * self.cmp_page_size
+        if max_blocks <= 0:
+            raise ValueError("QSA vectorized selection has no complete page-table blocks")
+        if (max_blocks + self.cmp_page_size - 1) // self.cmp_page_size > md.block_table.shape[1]:
+            raise ValueError("QSA vectorized selection request exceeds page table")
+
+        q_index = self._torch_index_norm_rope(
+            index.q.reshape(-1, self.index_head_dim),
+            md.positions,
+            index.q_norm_weight,
+            index.eps,
+            heads=self.index_heads,
+        ).view(rows, self.index_heads, self.index_head_dim)
+        # Convert once per forward so every score is an FP32 matmul.  Both buffers are bounded
+        # by the configured context/page-table shape and are included in the H0 workspace plan.
+        q_index_fp32 = self._scratch(
+            "vector_q_index_fp32", rows, self.index_heads, self.index_head_dim, dtype=torch.float32
+        )
+        q_index_fp32.copy_(q_index)
+        key_buffer = self._scratch(
+            "vector_request_keys", max_blocks, self.index_head_dim, dtype=self.dtype
+        )
+        key_buffer_fp32 = self._scratch(
+            "vector_request_keys_fp32", max_blocks, self.index_head_dim, dtype=torch.float32
+        )
+        cmp_pages = self._cmp_pages(slot)
+        cmp_flat = cmp_pages.reshape(-1, self.index_head_dim)
+        rows_per_chunk = qsa_vectorized_score_chunk_rows(rows, columns, self.index_heads)
+        head_scores = self._scratch(
+            "vector_score_heads",
+            rows_per_chunk,
+            self.index_heads,
+            max_blocks,
+            dtype=torch.float32,
+        )
+        logits = self._scratch("logits", rows_per_chunk, columns, dtype=torch.float32)
+
+        for request_id, start, stop in sparse_ranges:
+            span = spans[request_id]
+            block_count = span.device_len // self.ratio
+            block_ids = torch.arange(block_count, dtype=torch.long, device=index.q.device)
+            page_ids = md.block_table[request_id].to(torch.long).index_select(
+                0, torch.div(block_ids, self.cmp_page_size, rounding_mode="floor")
+            )
+            physical = page_ids * self.cmp_page_size + block_ids % self.cmp_page_size
+            torch.index_select(cmp_flat, 0, physical, out=key_buffer[:block_count])
+            key_buffer_fp32[:block_count].copy_(key_buffer[:block_count])
+            keys = key_buffer_fp32[:block_count]
+            width = min(self.block_topk, block_count)
+            for chunk_start in range(start, stop, rows_per_chunk):
+                chunk_stop = min(chunk_start + rows_per_chunk, stop)
+                query = q_index_fp32[chunk_start:chunk_stop]
+                query_positions = md.positions[chunk_start:chunk_stop].to(torch.long)
+                visible = torch.div(query_positions + 1, self.ratio, rounding_mode="floor")
+                visible.clamp_max_(block_count)
+                chunk_rows = chunk_stop - chunk_start
+                head_tile = head_scores[:chunk_rows, :, :block_count]
+                scores = logits[:chunk_rows, :block_count]
+                torch.matmul(query, keys.transpose(0, 1), out=head_tile)
+                torch.relu_(head_tile)
+                torch.sum(head_tile, dim=1, out=scores)
+                scores.mul_(self.index_head_dim**-0.5)
+                scores.masked_fill_(
+                    block_ids.unsqueeze(0) >= visible.unsqueeze(1), -float("inf")
+                )
+                ordered = torch.argsort(scores, dim=-1, descending=True, stable=True)
+                chosen = ordered[:, :width]
+                take = torch.minimum(
+                    visible, torch.full_like(visible, self.block_topk, dtype=torch.long)
+                )
+                chosen_rank = torch.arange(width, dtype=torch.long, device=index.q.device)
+                chosen_valid = chosen_rank.unsqueeze(0) < take.unsqueeze(1)
+                expanded = (
+                    chosen.clamp_min(0).unsqueeze(-1) * self.ratio
+                    + token_offsets.view(1, 1, -1)
+                ).reshape(chunk_stop - chunk_start, width * self.ratio)
+                expanded_valid = chosen_valid.unsqueeze(-1).expand_as(
+                    expanded.view(chunk_stop - chunk_start, width, self.ratio)
+                ).reshape_as(expanded)
+                expanded = torch.where(expanded_valid, expanded.to(torch.int32), -1)
+                packed = torch.full(
+                    (chunk_stop - chunk_start, self.select_width),
+                    -1,
+                    dtype=torch.int32,
+                    device=index.q.device,
+                )
+                packed[:, : width * self.ratio] = expanded
+
+                visible_tokens = query_positions + 1
+                tail_start = torch.div(
+                    visible_tokens, self.ratio, rounding_mode="floor"
+                ) * self.ratio
+                tail_length = visible_tokens - tail_start
+                # A partial tail contains at most ratio-1 tokens.  Excluding the impossible
+                # ratio-th offset avoids clamping it onto the final valid column and
+                # overwriting that token through a duplicate scatter index.
+                tail_offsets = token_offsets[:-1]
+                tail_values = (tail_start.unsqueeze(1) + tail_offsets).to(torch.int32)
+                tail_columns = take.unsqueeze(1) * self.ratio + tail_offsets
+                tail_valid = tail_offsets.unsqueeze(0) < tail_length.unsqueeze(1)
+                old_tail = packed.gather(1, tail_columns)
+                packed.scatter_(1, tail_columns, torch.where(tail_valid, tail_values, old_tail))
+                row_ids = torch.arange(
+                    chunk_start, chunk_stop, dtype=torch.long, device=index.q.device
+                )
+                indices.index_copy_(0, row_ids, packed)
+        return indices
+
     def _attend_torch(
         self,
         q: torch.Tensor,
@@ -767,6 +1015,8 @@ class QSASparseAttnBackend(BaseAttnBackend):
 
     def _select(self, index, md: QSASparseMetadata, slot: int) -> torch.Tensor:
         """Score complete visible blocks, take the top-k, expand them to token indices."""
+        if self._vectorized_reference:
+            return self._select_vectorized_reference(index, md, slot)
         if self._torch_reference:
             return self._select_torch(index, md, slot)
         from freetoken.kernel.triton.qsa import (
@@ -923,10 +1173,14 @@ class QSASparseAttnBackend(BaseAttnBackend):
 
 
 __all__ = [
+    "QSA_SELECTION_PATHS",
     "QSAPhase",
     "QSAPhaseEvent",
     "QSAPhaseMetadata",
     "QSAPhaseObserver",
+    "QSARequestSpan",
+    "QSASelectionPath",
     "QSASparseAttnBackend",
     "QSASparseMetadata",
+    "resolve_qsa_selection_path",
 ]

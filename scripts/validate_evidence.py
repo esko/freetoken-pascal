@@ -1085,7 +1085,10 @@ def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any], *, schema_dir: Path
 
     profile_record = document["profile"]
     selected_path = profile_record["selected_path"]
-    expected_reference = selected_path == "torch-fp32-reference"
+    expected_reference = selected_path in {
+        "torch-fp32-reference",
+        "torch-fp32-vectorized-reference",
+    }
     if profile_record["reference_only"] != expected_reference:
         errors.append("profile.reference_only must match selected_path")
     expected_topk = "torch" if expected_reference else "triton"

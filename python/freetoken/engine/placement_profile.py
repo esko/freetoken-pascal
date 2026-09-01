@@ -70,6 +70,7 @@ _QSA_GEOMETRY_FIELDS = frozenset(
         "capture_max_batch_size",
         "phase",
         "topk_backend",
+        "qsa_selection_path",
         "dtype_bytes",
     }
 )
@@ -397,10 +398,11 @@ class PlacementProfileIdentity:
         for key in ("gdn_state_bytes", "kv_state_bytes", "expert_cache_slots"):
             _geometry_integer(values["state_geometry"], key, "state_geometry", positive=False)
         qsa = values["qsa_geometry"]
-        for key in _QSA_GEOMETRY_FIELDS - {"phase", "topk_backend"}:
+        for key in _QSA_GEOMETRY_FIELDS - {"phase", "topk_backend", "qsa_selection_path"}:
             _geometry_integer(qsa, key, "qsa_geometry", positive=True)
         _text(qsa["phase"], "qsa_geometry.phase")
         _text(qsa["topk_backend"], "qsa_geometry.topk_backend")
+        _text(qsa["qsa_selection_path"], "qsa_geometry.qsa_selection_path")
         try:
             _qsa_workspace_inputs_type()(**dict(qsa))
         except PlacementInputError:

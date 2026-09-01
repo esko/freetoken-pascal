@@ -219,7 +219,16 @@ def _eager_transient_categories(plan: QSAWorkspacePlan) -> dict[str, int]:
     )
     selection_categories = _category_totals(
         score=_add(
-            (metadata, score["q_index"], score["logits"], score["visible"]),
+            (
+                metadata,
+                score["q_index"],
+                score["logits"],
+                score["visible"],
+                score.get("q_index_fp32", 0),
+                score.get("request_keys", 0),
+                score.get("request_keys_fp32", 0),
+                score.get("vector_score_heads", 0),
+            ),
             "QSA eager selection score",
         ),
         top_k=plan.inventory["top_k"].bytes,
