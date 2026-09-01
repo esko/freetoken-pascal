@@ -964,9 +964,7 @@ def _qwen38_router_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
                             "must be a passed timed observation"
                         )
                         parity_passed = False
-                    if not timing.get("ids_exact") or not timing.get(
-                        "weights_within_tolerance"
-                    ):
+                    if not timing.get("ids_exact") or not timing.get("weights_within_tolerance"):
                         errors.append(
                             f"cases[{index}].steady_samples[{sample_index}].{implementation} "
                             "must preserve its initial output"
@@ -991,8 +989,7 @@ def _qwen38_router_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
         case["comparison"] is not None and case["comparison"]["ids_exact"] for case in cases
     )
     weights = all(
-        case["comparison"] is not None
-        and case["comparison"]["weights_within_tolerance"]
+        case["comparison"] is not None and case["comparison"]["weights_within_tolerance"]
         for case in cases
     )
     if claims["exact_ids"] != exact_ids:

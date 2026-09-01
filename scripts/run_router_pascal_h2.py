@@ -204,9 +204,7 @@ def _dtype(torch: Any, name: str) -> Any:
 
 def _seeded_logits(torch: Any, *, token_count: int, dtype: Any, seed: int, device: str) -> Any:
     generator = torch.Generator(device=device).manual_seed(seed)
-    return torch.randn(
-        (token_count, NUM_EXPERTS), generator=generator, device=device, dtype=dtype
-    )
+    return torch.randn((token_count, NUM_EXPERTS), generator=generator, device=device, dtype=dtype)
 
 
 def _case_input(
@@ -301,8 +299,7 @@ def _comparison(reference: tuple[Any, Any], candidate: tuple[Any, Any]) -> dict[
     max_abs = float(weight_error.abs().max().item())
     relative_rms = float(
         torch_sqrt(
-            (weight_error.square().mean())
-            / ref_weights.float().square().mean().clamp_min(1e-30)
+            (weight_error.square().mean()) / ref_weights.float().square().mean().clamp_min(1e-30)
         ).item()
     )
     weights_within = bool(max_abs <= 1e-5 and relative_rms <= 1e-5)
@@ -594,6 +591,7 @@ def run_probe(
     if properties.name != "Tesla P4" or (properties.major, properties.minor) != (6, 1):
         raise RuntimeError("router-p4 requires a Tesla P4 sm_61 device")
     from freetoken.moe.fused import fused_topk
+
     started = time.monotonic()
     deadline = started + HARD_TIMEOUT_SECONDS
     cases: list[dict[str, Any]] = []
@@ -682,8 +680,7 @@ def run_probe(
                 case["comparison"] is not None and case["comparison"]["ids_exact"] for case in cases
             ),
             "weight_tolerance": all(
-                case["comparison"] is not None
-                and case["comparison"]["weights_within_tolerance"]
+                case["comparison"] is not None and case["comparison"]["weights_within_tolerance"]
                 for case in cases
             ),
             "auto_enabled": False,
@@ -695,9 +692,7 @@ def run_probe(
     _validate(document)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(output_path.name + ".tmp")
-    temporary.write_text(
-        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(output_path)
     return document
 
