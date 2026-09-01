@@ -36,6 +36,9 @@ Runs on GitHub-hosted Linux without a GPU:
 - placement-plan accounting, missing-category rejection, stale-profile invalidation, automatic-backoff state machine and canary result schemas;
 - QSA workspace category accounting from concrete shapes, 64-bit overflow rejection, incomplete-group boundaries, and controlled pre-launch capacity errors;
 - QSA placement binding tests for exact ten-category projection, eager/capture lifetime partitioning, near-capacity rejection, forged-byte rejection, dual-GPU deferral, and profile-geometry validation;
+- registered QSA backend eager-reference phase-observer ordering for prefill and decode,
+  scalar-only metadata, selected-path identity, default fast-path isolation, output parity,
+  teardown, capture-path rejection, and fail-loud observer errors that preserve model failures;
 - static-hot trace/profile generation, oracle hit-rate simulation and profile compatibility checks;
 - optional exact n-gram proposal/index/state-machine tests that do not import or require the full model.
 

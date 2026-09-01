@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from .common import Fixture, requires_cuda, parsed_config, selection_spy
+from .common import Fixture, parsed_config, requires_cuda, selection_spy
 
 QSA_LAYER = 3
 
@@ -24,8 +24,11 @@ def _inputs(fixture: Fixture, lengths, extra: int = 0, seed: int = 11):
     generator = torch.Generator(device=fixture.device).manual_seed(seed)
     return [
         torch.randn(
-            n + extra, fixture.config.hidden_size, device=fixture.device,
-            dtype=fixture.dtype, generator=generator,
+            n + extra,
+            fixture.config.hidden_size,
+            device=fixture.device,
+            dtype=fixture.dtype,
+            generator=generator,
         )
         * 0.5
         for n in lengths
@@ -51,6 +54,198 @@ def _cpu_reference_fixture(*, budget: int = 16) -> Fixture:
     )
 
 
+def _observer_fixture() -> Fixture:
+    """Use the established CPU reference geometry for the observer seam."""
+    return _cpu_reference_fixture()
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_cpu_reference_phase_observer_reports_shipping_order(phase: str):
+    fixture = _observer_fixture()
+    attn = fixture.layer(QSA_LAYER, seed=31)
+    req = fixture.req(0, 0, 8)
+    if phase == "decode":
+        # Establish the decode request state without observing the setup prefill.
+        attn.forward(_inputs(fixture, [8], seed=37)[0], fixture.batch([req], "prefill"))
+        fixture.step(req)
+
+    events = []
+    fixture.backend.set_phase_observer(
+        lambda event, metadata: events.append((event, dict(metadata)))
+    )
+    length = 1 if phase == "decode" else 8
+    attn.forward(_inputs(fixture, [length], seed=41)[0], fixture.batch([req], phase))
+
+    assert [(event, metadata["phase"]) for event, metadata in events] == [
+        ("begin", "store_kv"),
+        ("end", "store_kv"),
+        ("begin", "index_cache_composite"),
+        ("end", "index_cache_composite"),
+        ("begin", "selection_composite"),
+        ("end", "selection_composite"),
+        ("begin", "selected_row_attention"),
+        ("end", "selected_row_attention"),
+    ]
+    assert all(metadata["layer_id"] == QSA_LAYER for _, metadata in events)
+    assert all(metadata["slot"] == 0 for _, metadata in events)
+    assert all(metadata["path"] == "torch-fp32-reference" for _, metadata in events)
+    assert all(
+        not any(isinstance(value, torch.Tensor) for value in metadata.values())
+        for _, metadata in events
+    )
+
+
+def test_cpu_reference_phase_observer_is_absent_by_default_and_behavior_is_unchanged(
+    monkeypatch,
+):
+    fixture = _observer_fixture()
+    attn = fixture.layer(QSA_LAYER, seed=43)
+    req = fixture.req(0, 0, 8)
+    assert fixture.backend._phase_observer is None
+    monkeypatch.setattr(
+        fixture.backend,
+        "_observe_phase",
+        lambda *_args, **_kwargs: pytest.fail("default path entered observer machinery"),
+    )
+    output = attn.forward(_inputs(fixture, [8], seed=47)[0], fixture.batch([req], "prefill"))
+    assert output.shape == (8, fixture.config.hidden_size)
+
+
+def test_cpu_reference_phase_observer_preserves_exact_output() -> None:
+    plain = _observer_fixture()
+    observed = _observer_fixture()
+    plain_attn = plain.layer(QSA_LAYER, seed=49)
+    observed_attn = observed.layer(QSA_LAYER, seed=49)
+    observed.backend.set_phase_observer(lambda _event, _metadata: None)
+    plain_input = _inputs(plain, [8], seed=51)[0]
+    observed_input = _inputs(observed, [8], seed=51)[0]
+
+    plain_output = plain_attn.forward(plain_input, plain.batch([plain.req(0, 0, 8)], "prefill"))
+    observed_output = observed_attn.forward(
+        observed_input, observed.batch([observed.req(0, 0, 8)], "prefill")
+    )
+
+    assert torch.equal(observed_output, plain_output)
+
+
+def test_cpu_reference_phase_observer_failure_propagates_before_phase_execution():
+    fixture = _observer_fixture()
+    attn = fixture.layer(QSA_LAYER, seed=53)
+    req = fixture.req(0, 0, 8)
+    calls = []
+
+    def fail(event, metadata):
+        calls.append((event, metadata))
+        raise RuntimeError("QSA phase observer failed")
+
+    fixture.backend.set_phase_observer(fail)
+    with pytest.raises(RuntimeError, match="QSA phase observer failed"):
+        attn.forward(_inputs(fixture, [8], seed=59)[0], fixture.batch([req], "prefill"))
+    assert [event for event, _ in calls] == ["begin"]
+
+
+def test_cpu_reference_phase_observer_balances_events_when_phase_fails(monkeypatch) -> None:
+    fixture = _observer_fixture()
+    attn = fixture.layer(QSA_LAYER, seed=61)
+    req = fixture.req(0, 0, 8)
+    events = []
+    fixture.backend.set_phase_observer(
+        lambda event, metadata: events.append((event, metadata["phase"]))
+    )
+
+    def fail_store(*_args, **_kwargs):
+        raise RuntimeError("store failed")
+
+    monkeypatch.setattr(fixture.backend, "_store_kv_torch", fail_store)
+
+    with pytest.raises(RuntimeError, match="store failed"):
+        attn.forward(_inputs(fixture, [8], seed=67)[0], fixture.batch([req], "prefill"))
+
+    assert events == [("begin", "store_kv"), ("end", "store_kv")]
+
+
+def test_cpu_reference_phase_observer_preserves_phase_error_when_end_fails(
+    monkeypatch,
+) -> None:
+    fixture = _observer_fixture()
+    attn = fixture.layer(QSA_LAYER, seed=69)
+    req = fixture.req(0, 0, 8)
+
+    def observer(event, _metadata):
+        if event == "end":
+            raise RuntimeError("observer end failed")
+
+    def fail_store(*_args, **_kwargs):
+        raise ValueError("original store failure")
+
+    fixture.backend.set_phase_observer(observer)
+    monkeypatch.setattr(fixture.backend, "_store_kv_torch", fail_store)
+
+    with pytest.raises(ValueError, match="original store failure"):
+        attn.forward(_inputs(fixture, [8], seed=71)[0], fixture.batch([req], "prefill"))
+
+
+def test_cpu_reference_phase_observer_end_failure_propagates() -> None:
+    fixture = _observer_fixture()
+    attn = fixture.layer(QSA_LAYER, seed=73)
+    req = fixture.req(0, 0, 8)
+
+    def observer(event, _metadata):
+        if event == "end":
+            raise RuntimeError("observer end failed")
+
+    fixture.backend.set_phase_observer(observer)
+    with pytest.raises(RuntimeError, match="observer end failed"):
+        attn.forward(_inputs(fixture, [8], seed=79)[0], fixture.batch([req], "prefill"))
+
+
+def test_cpu_reference_phase_observer_rejects_noncallable() -> None:
+    fixture = _observer_fixture()
+
+    with pytest.raises(TypeError, match="must be callable or None"):
+        fixture.backend.set_phase_observer("not-callable")
+
+
+def test_phase_observer_can_be_detached_and_rejects_nonreference_path() -> None:
+    fixture = _observer_fixture()
+    fixture.backend.set_phase_observer(lambda _event, _metadata: None)
+    fixture.backend.set_phase_observer(None)
+    assert fixture.backend._phase_observer is None
+
+    fixture.backend._torch_reference = False
+    with pytest.raises(RuntimeError, match="eager Torch-reference only"):
+        fixture.backend.set_phase_observer(lambda _event, _metadata: None)
+
+
+@requires_cuda
+def test_pascal_phase_observer_preserves_exact_prefill_output() -> None:
+    config = parsed_config(num_layers=4, budget=16, ratio=4)
+    fixture = Fixture(config, num_pages=16)
+    if fixture.backend.selected_path != "torch-fp32-reference":
+        pytest.skip("phase observer is qualified only on the Pascal eager reference path")
+    attn = fixture.layer(QSA_LAYER, seed=83)
+    x = _inputs(fixture, [8], seed=89)[0]
+    plain = attn.forward(x, fixture.batch([fixture.req(0, 0, 8)], "prefill"))
+    events = []
+    fixture.backend.set_phase_observer(
+        lambda event, metadata: events.append((event, metadata["phase"]))
+    )
+
+    observed = attn.forward(x, fixture.batch([fixture.req(1, 0, 8)], "prefill"))
+
+    assert torch.equal(observed, plain)
+    assert events == [
+        ("begin", "store_kv"),
+        ("end", "store_kv"),
+        ("begin", "index_cache_composite"),
+        ("end", "index_cache_composite"),
+        ("begin", "selection_composite"),
+        ("end", "selection_composite"),
+        ("begin", "selected_row_attention"),
+        ("end", "selected_row_attention"),
+    ]
+
+
 def test_cpu_reference_norm_rope_matches_explicit_fp32_formula():
     fixture = _cpu_reference_fixture()
     backend = fixture.backend
@@ -63,9 +258,10 @@ def test_cpu_reference_norm_rope_matches_explicit_fp32_formula():
     value = value * torch.rsqrt(value.square().mean(dim=-1, keepdim=True) + 1.0e-6)
     value = value * (1.0 + weight.float())
     cache = backend._index_rope_cache()[3]
-    cos, sin = cache[: backend._index_rope_cache().shape[1] // 2], cache[
-        backend._index_rope_cache().shape[1] // 2 : backend._index_rope_cache().shape[1]
-    ]
+    cos, sin = (
+        cache[: backend._index_rope_cache().shape[1] // 2],
+        cache[backend._index_rope_cache().shape[1] // 2 : backend._index_rope_cache().shape[1]],
+    )
     half = cos.numel()
     rotated = value[:, : 2 * half]
     partner = torch.cat((-rotated[:, half:], rotated[:, :half]), dim=-1)
@@ -333,9 +529,7 @@ def test_flashinfer_dense_matches_the_sparse_path():
 
     dense = FlashInferBackend(config)
     fixture.ctx.attn_backend = SimpleNamespace(
-        qsa_forward=lambda q, k, v, index, layer_id, batch: dense.forward(
-            q, k, v, layer_id, batch
-        )
+        qsa_forward=lambda q, k, v, index, layer_id, batch: dense.forward(q, k, v, layer_id, batch)
     )
     batch = fixture.batch([req], "prefill")
     dense.prepare_metadata(batch)
@@ -344,7 +538,9 @@ def test_flashinfer_dense_matches_the_sparse_path():
 
 
 @requires_cuda
-@pytest.mark.parametrize("cut", [1001, 4096, 4097], ids=["unaligned", "page-boundary", "boundary+1"])
+@pytest.mark.parametrize(
+    "cut", [1001, 4096, 4097], ids=["unaligned", "page-boundary", "boundary+1"]
+)
 def test_chunked_prefill_matches_one_shot(cut: int):
     """Cut points that are not multiples of index_ratio exercise the dual-source compress."""
     config = parsed_config()
@@ -387,9 +583,17 @@ def test_decode_graph_replay_matches_eager():
         "out_loc": torch.zeros(bs, dtype=torch.int32, device=fixture.device),
     }
     capture_batch = SimpleNamespace(
-        padded_reqs=[dummy] * bs, reqs=[dummy] * bs, phase="decode", size=bs, padded_size=bs,
-        is_prefill=False, is_decode=True, positions=static["positions"],
-        out_loc=static["out_loc"], attn_metadata=None, active_table_idx=None,
+        padded_reqs=[dummy] * bs,
+        reqs=[dummy] * bs,
+        phase="decode",
+        size=bs,
+        padded_size=bs,
+        is_prefill=False,
+        is_decode=True,
+        positions=static["positions"],
+        out_loc=static["out_loc"],
+        attn_metadata=None,
+        active_table_idx=None,
     )
     fixture.backend.prepare_for_capture(capture_batch)
     attn.forward(static["x"], capture_batch)  # warmup, same metadata object as the capture

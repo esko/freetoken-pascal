@@ -95,6 +95,19 @@ eager-only plan rather than being reported as capture-safe.
 Negative, zero-invalid, incomplete-category, shape-inconsistent, and checked 64-bit arithmetic inputs fail closed with a controlled `ValueError` subtype.
 This H0 contract makes no kernel, throughput, or Tesla P4 claim and does not change QSA selection, token budget, or dispatch defaults.
 
+The registered `QSASparseAttnBackend` also exposes a default-disabled, eager-reference-only scalar
+phase observer for `store_kv`, `index_cache_composite`, `selection_composite`, and
+`selected_row_attention`. The composite names deliberately do not claim separate projection,
+compression, scoring, top-k, expansion, state-update, allocation, or host-synchronization timing.
+When no observer is
+attached, execution follows the original allocation path without constructing callbacks or phase
+metadata. An attached observer receives begin/end boundaries, layer/slot identity, and the actual
+selected path; it does not receive tensors, synchronize CUDA, time operations, or change dispatch.
+Benchmark owners may place CUDA events at those boundaries and must measure total forward latency
+separately. The observer is rejected on the Triton/capture path because Python callbacks do not run
+on graph replay. This seam is observability infrastructure only and establishes no H2 performance
+claim.
+
 The torch-free `freetoken.engine.qsa_placement` adapter projects the calculated component lifetimes into #73's exact ten QSA placement categories.
 It attributes the winning eager phase without summing mutually exclusive buffers, attributes retained capture-graph buffers separately from active replay buffers, and makes the ten-category sum equal the calculator's required high-water.
 It rejects inconsistent or caller-forged totals while retaining the calculator's exact live/peak telemetry.
