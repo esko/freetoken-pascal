@@ -365,6 +365,8 @@ def test_chunked_prefill_matches_one_shot(cut: int):
 def test_decode_graph_replay_matches_eager():
     config = parsed_config()
     fixture = Fixture(config, num_pages=256)
+    if fixture.backend._torch_reference:
+        pytest.skip("Pascal QSA reference path is eager-only")
     attn = fixture.layer(QSA_LAYER)
     lengths, steps = [300, 411], 4
     bs = len(lengths)
