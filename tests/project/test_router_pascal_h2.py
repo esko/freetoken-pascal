@@ -29,6 +29,15 @@ def test_capture_telemetry_normalizes_identity_and_ecc() -> None:
     assert sample["power_limit_watts"] == 75.0
 
 
+def test_tensor_hash_accepts_bfloat16_and_hashes_exact_bytes() -> None:
+    torch = pytest.importorskip("torch")
+    value = torch.tensor([1.0, -2.0], dtype=torch.bfloat16)
+
+    assert ROUTER_H2._sha256_tensor(value) == ROUTER_H2._sha256_bytes(
+        value.view(torch.uint8).numpy().tobytes()
+    )
+
+
 def test_capture_telemetry_fails_closed_on_wrong_device() -> None:
     def wrong_index(*_args: object, **_kwargs: object) -> str:
         return _telemetry_output().replace("0, Tesla", "1, Tesla", 1)
@@ -101,4 +110,3 @@ def test_main_removes_stale_evidence_before_probe(
             "1" * 40,
         ]
     ) == 0
-

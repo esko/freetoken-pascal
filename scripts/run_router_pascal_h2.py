@@ -76,7 +76,11 @@ def _sha256_bytes(value: bytes) -> str:
 def _sha256_tensor(value: Any) -> str:
     """Hash tensor bytes only after an explicit synchronized host copy."""
     detached = value.detach().contiguous().cpu()
-    return _sha256_bytes(detached.numpy().tobytes())
+    # NumPy has no native bfloat16 scalar type. A uint8 view preserves the
+    # exact tensor representation for every supported router dtype.
+    import torch
+
+    return _sha256_bytes(detached.view(torch.uint8).numpy().tobytes())
 
 
 def _now() -> str:
