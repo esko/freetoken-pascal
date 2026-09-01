@@ -9,6 +9,20 @@ repo_root="$(git rev-parse --show-toplevel)"
 container_root=/workspace/freetoken-pascal
 mkdir -p results/hardware
 
+profile_id="${FREETOKEN_PASCAL_PROFILE_ID:-}"
+inventory_profile_args=()
+if [[ -n "$profile_id" ]]; then
+  case "$profile_id" in
+    ecc-on|ecc-off)
+      inventory_profile_args+=(--profile-id "$profile_id")
+      ;;
+    *)
+      echo "FREETOKEN_PASCAL_PROFILE_ID must be ecc-on or ecc-off" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 docker image inspect "$image" >/dev/null
 software_probe="$({
   docker run --rm -i --gpus all "$image" python - <<'PY'
@@ -42,19 +56,25 @@ print(data["triton"])
   --cuda-runtime "${software_fields[0]}" \
   --torch-version "${software_fields[1]}" \
   --torch-device-count "${software_fields[2]}" \
-  --triton-version "${software_fields[3]}"
+  --triton-version "${software_fields[3]}" \
+  "${inventory_profile_args[@]}"
 
 minimum_gpus=1
 case "$level" in
-  dual-p4|release) minimum_gpus=2 ;;
+  dual-p4|dual-p4-short|release) minimum_gpus=2 ;;
 esac
+inventory_check_profile_args=()
+if [[ -n "$profile_id" ]]; then
+  inventory_check_profile_args+=(--expected-profile "$profile_id")
+fi
 docker run --rm --gpus all \
   -v "$repo_root:$container_root" \
   -w "$container_root" \
   "$image" \
   python scripts/check_hardware_inventory.py \
     results/hardware/inventory.json \
-    --minimum-gpus "$minimum_gpus"
+    --minimum-gpus "$minimum_gpus" \
+    "${inventory_check_profile_args[@]}"
 
 run_single_smoke() {
   docker run --rm --gpus "device=$smoke_gpu" \
@@ -133,6 +153,21 @@ run_dual_smoke() {
     bash -lc 'PYTHONPATH=python pytest -q tests/project/test_hardware_smoke.py -m dual_p4'
 }
 
+run_dual_short() {
+  if [[ -z "$profile_id" ]]; then
+    echo "dual-p4-short requires FREETOKEN_PASCAL_PROFILE_ID (ecc-on or ecc-off)" >&2
+    return 1
+  fi
+  docker run --rm --gpus all \
+    -v "$repo_root:$container_root" \
+    -w "$container_root" \
+    "$image" \
+    python scripts/run_dual_p4_short.py \
+      --inventory results/hardware/inventory.json \
+      --output results/hardware/qwen38-dual-p4-device.json \
+      --expected-profile "$profile_id"
+}
+
 case "$level" in
   smoke)
     run_single_smoke
@@ -143,6 +178,9 @@ case "$level" in
   dual-p4)
     run_single_h2
     run_dual_smoke
+    ;;
+  dual-p4-short)
+    run_dual_short
     ;;
   release)
     test -n "${FREETOKEN_PASCAL_MODEL_PATH:-}" || {

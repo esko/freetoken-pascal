@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "check_hardware_inventory.py"
+GATE_SCRIPT = ROOT / "scripts" / "ci" / "hardware_gate.sh"
 SPEC = importlib.util.spec_from_file_location("check_hardware_inventory", SCRIPT)
 assert SPEC and SPEC.loader
 CHECK_HARDWARE = importlib.util.module_from_spec(SPEC)
@@ -296,6 +297,17 @@ def test_inventory_rejects_idle_pcie_link_as_load_qualified() -> None:
     assert CHECK_HARDWARE.validate_pascal_inventory(measured) == [
         "gpus[0] idle PCIe link cannot be load qualified",
     ]
+
+
+def test_dual_short_gate_isolated_from_model_serving_path() -> None:
+    gate = GATE_SCRIPT.read_text(encoding="utf-8")
+
+    assert "dual-p4-short)" in gate
+    assert "run_dual_short" in gate
+    assert "run_single_h2" not in gate.split("dual-p4-short)", 1)[1].split("release)", 1)[0]
+    assert "scripts/run_dual_p4_short.py" in gate
+    assert "--gpus all" in gate
+    assert "--expected-profile \"$profile_id\"" in gate
 
 
 def test_inventory_requires_thermal_state_to_remain_explicitly_unqualified() -> None:
