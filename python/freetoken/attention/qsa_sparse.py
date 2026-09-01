@@ -302,7 +302,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
 
         if self._torch_reference:
             self._update_index_cache_torch(index, md, slot, batch)
-            indices = self._select_torch(index, md, slot)
+            indices = self._select(index, md, slot)
             return self._attend_torch(
                 q,
                 self.kvcache.k_cache(layer_id),
@@ -341,7 +341,8 @@ class QSASparseAttnBackend(BaseAttnBackend):
         expected = (k_cache.shape[-2], k_cache.shape[-1])
         if tuple(k.shape[1:]) != (expected[0] * expected[1],):
             raise ValueError(
-                f"QSA reference K/V shape {tuple(k.shape)} does not match cache heads/dim {expected}"
+                "QSA reference K/V shape "
+                f"{tuple(k.shape)} does not match cache heads/dim {expected}"
             )
         if out_loc.ndim != 1 or out_loc.numel() != k.shape[0]:
             raise ValueError("QSA reference K/V locations must match token rows")
@@ -417,7 +418,8 @@ class QSASparseAttnBackend(BaseAttnBackend):
         """FP32 reference for the indexer's grouped norm and partial NeoX rope."""
         if x.ndim != 2 or x.shape[1] != self.index_head_dim:
             raise ValueError(
-                f"QSA reference index rows must be [rows, {self.index_head_dim}], got {tuple(x.shape)}"
+                "QSA reference index rows must be "
+                f"[rows, {self.index_head_dim}], got {tuple(x.shape)}"
             )
         if positions.ndim != 1 or heads <= 0 or x.shape[0] != positions.numel() * heads:
             raise ValueError("QSA reference index positions must match row/head geometry")
@@ -552,7 +554,9 @@ class QSASparseAttnBackend(BaseAttnBackend):
             tail_start = (visible_tokens // self.ratio) * self.ratio
             tokens.extend(range(tail_start, tail_start + visible_tokens - tail_start))
             if tokens:
-                values = torch.tensor(tokens[: self.select_width], dtype=torch.int32, device=index.q.device)
+                values = torch.tensor(
+                    tokens[: self.select_width], dtype=torch.int32, device=index.q.device
+                )
                 indices[row, : values.numel()] = values
         return indices
 
@@ -574,8 +578,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
             raise ValueError("QSA reference attention geometry does not match selection")
         if block_table.ndim != 2 or token_to_req.shape != (q.shape[0],):
             raise ValueError("QSA reference attention metadata has invalid shapes")
-        width = indices.shape[1]
-        if width <= 0:
+        if indices.shape[1] <= 0:
             raise ValueError("QSA reference attention requires positive selection width")
         logical = indices.to(torch.long)
         safe_logical = logical.clamp_min(0)
@@ -589,30 +592,26 @@ class QSASparseAttnBackend(BaseAttnBackend):
         physical_pages = block_table[request.unsqueeze(1), pages]
         physical = physical_pages * self.page_size + offsets
         valid = logical >= 0
-        flat = physical.clamp_min(0).reshape(-1)
-        keys = k_cache.view(-1, k_cache.shape[-2], k_cache.shape[-1]).index_select(0, flat)
-        values = v_cache.view(-1, v_cache.shape[-2], v_cache.shape[-1]).index_select(0, flat)
-        keys = keys.view(q.shape[0], width, k_cache.shape[-2], q.shape[-1])
-        values = values.view_as(keys)
-        keys = torch.where(valid[:, :, None, None], keys, torch.zeros_like(keys))
-        values = torch.where(valid[:, :, None, None], values, torch.zeros_like(values))
-        group = q.shape[1] // k_cache.shape[2]
-        query = q.float().view(q.shape[0], k_cache.shape[2], group, q.shape[2])
-        score = torch.einsum("nkgd,ntkd->nkgt", query, keys.float())
-        valid_heads = valid[:, None, None, :]
-        score = score.masked_fill(~valid_heads, -float("inf"))
-        # A malformed selection can contain no valid rows.  Keep that fail-closed case finite
-        # instead of allowing softmax([-inf, ...]) to produce NaNs in the model state.
-        has_valid = valid.any(dim=-1, keepdim=True)[:, None, None, :]
-        score = torch.where(has_valid, score, torch.zeros_like(score))
-        probs = torch.softmax(score * (q.shape[-1] ** -0.5), dim=-1)
-        probs = torch.where(valid_heads, probs, torch.zeros_like(probs))
-        probs = probs / probs.sum(dim=-1, keepdim=True).clamp_min(1.0e-20)
-        output = torch.einsum("nkgt,ntkd->nkgd", probs, values.float())
-        return output.reshape_as(q).to(dtype=q.dtype)
+        total_rows = k_cache.shape[0] * self.page_size
+        if bool((valid & ((physical_pages < 0) | (physical < 0) | (physical >= total_rows))).any()):
+            raise ValueError("QSA reference attention selected physical row is out of bounds")
+        selected_rows = torch.where(valid, physical, torch.zeros_like(physical)).to(torch.int32)
+        counts = valid.sum(dim=1, dtype=torch.int32)
+        from freetoken.kernel.triton.qsa_legacy import qsa_sparse_gqa
+
+        return qsa_sparse_gqa(
+            q,
+            k_cache.view(-1, k_cache.shape[-2], k_cache.shape[-1]),
+            v_cache.view(-1, v_cache.shape[-2], v_cache.shape[-1]),
+            selected_rows,
+            counts,
+            q.shape[-1] ** -0.5,
+        )
 
     def _select(self, index, md: QSASparseMetadata, slot: int) -> torch.Tensor:
         """Score complete visible blocks, take the top-k, expand them to token indices."""
+        if self._torch_reference:
+            return self._select_torch(index, md, slot)
         from freetoken.kernel.triton.qsa import (
             expand_qsa_block_indices,
             qsa_index_norm_rope,
@@ -715,6 +714,8 @@ class QSASparseAttnBackend(BaseAttnBackend):
 
     # ----- CUDA graph (decode) --------------------------------------------------------------
     def init_capture_graph(self, max_seq_len: int, bs_list: list[int]) -> None:
+        if self._torch_reference:
+            raise NotImplementedError("QSA torch-fp32-reference is eager-only")
         self.capture_bs = sorted(bs_list)
         max_bs = max(bs_list)
         width = get_global_ctx().page_table.shape[1]
