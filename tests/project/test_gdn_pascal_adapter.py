@@ -412,6 +412,23 @@ def test_real_pascal_forward_decode_uses_proof_owned_slots_for_two_requests(monk
     assert seen and seen[0].tolist() == [1, 2]
 
 
+def test_real_pascal_forward_rejects_malformed_decode_before_convolution(monkeypatch) -> None:
+    op, ctx, batch, hidden, pool, _seen = _cpu_forward_fixture(
+        monkeypatch, phase="decode", slots=(1, 2)
+    )
+    batch.fla_metadata = build_fla_metadata(batch, torch.device("cpu"))
+    batch.fla_metadata.cu_seqlens = torch.tensor([0, 2, 2], dtype=torch.int64)
+    batch.fla_metadata._pascal_host_offset_values = (0, 2, 2)
+    before_conv = pool.conv_states.clone()
+    before_recurrent = pool.recurrent_states.clone()
+    op._reference_conv_decode = lambda *_args: pytest.fail("convolution ran before preflight")
+    with pytest.raises((ValueError, RuntimeError), match=r"exactly \[0\.\.B\]"):
+        with ctx.forward_batch(batch):
+            op.forward(hidden)
+    torch.testing.assert_close(pool.conv_states, before_conv)
+    torch.testing.assert_close(pool.recurrent_states, before_recurrent)
+
+
 def test_real_pascal_forward_rejects_attached_proof_for_replaced_pool(monkeypatch) -> None:
     op, ctx, batch, hidden, pool, _seen = _cpu_forward_fixture(
         monkeypatch, phase="decode", slots=(1, 2)

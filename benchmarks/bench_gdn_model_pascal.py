@@ -428,7 +428,7 @@ def validate_report_format(report: dict[str, Any]) -> None:
         if not isinstance(block, dict):
             raise ValueError(f"metadata proof timings missing {case} case")
         for phase in (
-            "first_cold_proof_construction",
+            "allocator_cold_proof_construction",
             "allocator_warm_proof_reissue",
             "warm_proof_validation",
         ):
@@ -784,7 +784,7 @@ def _measure_metadata_proof(
     num_tokens: int,
     repeats: int,
 ) -> dict[str, Any]:
-    """Measure first cold construction, allocator-warm reissue, and warm validation."""
+    """Measure allocator-cold construction, allocator-warm reissue, and warm validation."""
 
     metadata = getattr(batch, "fla_metadata", None)
     if metadata is None:
@@ -802,13 +802,14 @@ def _measure_metadata_proof(
         if proof is None:
             raise RuntimeError("scheduler metadata did not produce a Pascal proof")
 
-    # Empty the CUDA allocator before the first issue so this sample is genuinely cold rather
-    # than merely proof-object cold. Subsequent proof reissues intentionally observe allocator
-    # reuse and are reported separately.
+    # Empty the CUDA allocator before the first issue. This makes the allocation cold relative
+    # to PyTorch's caching allocator, but does not reset the CUDA context, driver, or JIT state;
+    # the prefill case also runs before decode. Subsequent proof reissues intentionally observe
+    # allocator reuse and are reported separately.
     metadata.pascal_metadata_proof = None
     torch.cuda.empty_cache()
     cuda_ms, wall_ms = _timed_call(torch, device, construct)
-    first_cold_samples = [{"index": 0, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}]
+    allocator_cold_samples = [{"index": 0, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}]
 
     allocator_warm_samples: list[dict[str, float | int]] = []
     for index in range(max(1, repeats)):
@@ -837,9 +838,9 @@ def _measure_metadata_proof(
         cuda_ms, wall_ms = _timed_call(torch, device, validate)
         warm_samples.append({"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms})
     return {
-        "first_cold_proof_construction": {
-            "samples": first_cold_samples,
-            "statistics": _summary(first_cold_samples),
+        "allocator_cold_proof_construction": {
+            "samples": allocator_cold_samples,
+            "statistics": _summary(allocator_cold_samples),
         },
         "allocator_warm_proof_reissue": {
             "samples": allocator_warm_samples,

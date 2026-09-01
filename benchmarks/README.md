@@ -70,8 +70,9 @@ synchronous Pascal metadata validation when the cold fallback is selected; sched
 metadata proofs avoid that repeated device-to-host validation. Device-scoped CUDA events include
 device work plus any stream idle caused by synchronous dispatch. Paired sample order alternates.
 The report's `selected_behavior.metadata_validation` identifies the selected path. The
-`metadata_proof_timings` block separately labels the first truly cold proof construction (after
-emptying the CUDA allocator), allocator-warm proof reissues, and warm semantic proof validation
+`metadata_proof_timings` block separately labels allocator-cold proof construction (after
+emptying PyTorch's caching allocator, without resetting the CUDA runtime), allocator-warm proof
+reissues, and warm semantic proof validation
 for both prefill and decode. Keep the
 run short, and capture `nvidia-smi` telemetry separately:
 

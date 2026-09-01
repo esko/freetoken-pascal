@@ -63,7 +63,7 @@ def _minimal_report() -> dict[str, object]:
             "statistics": {},
         }
         for phase in (
-            "first_cold_proof_construction",
+            "allocator_cold_proof_construction",
             "allocator_warm_proof_reissue",
             "warm_proof_validation",
         )
