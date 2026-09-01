@@ -285,6 +285,29 @@ the 75 W cap are context rather than a stable performance baseline.
 
 Use the exact same model bytes where the runtime permits. If formats differ, state that the comparison is not a codec-controlled A/B.
 
+The bounded QSA context sweep is a one-P4 H2 investigation over the registered `qsa_sparse` backend.
+It uses one tiny Qwen4-Exp QSA layer and one request at contexts 128, 512, and 2048.
+Each context receives one prefill and one decode observation.
+The observer records CUDA event pairs for `store_kv`, index-cache maintenance, selection, and selected-row attention without synchronizing inside callbacks.
+The producer synchronizes once after each complete forward before reading total and phase event timings.
+
+Run it through the profile-bound hardware gate:
+
+```bash
+FREETOKEN_PASCAL_TEST_LEVEL=qsa-p4 \
+FREETOKEN_PASCAL_PROFILE_ID=ecc-off \
+FREETOKEN_SMOKE_GPU=0 \
+bash scripts/ci/hardware_gate.sh
+```
+
+The output is `results/hardware/qwen38-qsa-h2-${profile_id}.json` and validates against `schemas/qwen38-qsa-h2-evidence.schema.json` before publication.
+It retains raw per-forward samples, composite phase sums, selected path and top-k backend, workspace plans, allocator allocation/reserve/high-water checkpoints, exact inventory identity, ECC profile, commit, clocks, temperature, and power telemetry.
+It explicitly labels startup canary, cancellation/restore, truncation, chunked prefill, graph capture, full-model serving, sustained load, thermal qualification, and performance as unmeasured or unclaimed.
+It also leaves batch construction, metadata copies, CPU scalar extraction, host synchronization,
+fine-grained allocation/copy overhead, workspace reservation/reuse, and controlled workspace
+exhaustion/backoff explicitly unmeasured; the serialized workspace plans are advisory accounting.
+The expected Pascal path is the eager Torch FP32 reference, so this slice does not qualify an optimized QSA kernel or change any default.
+
 ## Statistics
 
 - at least one untimed warm-up;

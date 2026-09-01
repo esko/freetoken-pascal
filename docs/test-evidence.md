@@ -42,6 +42,10 @@ exact comparison; fluent text alone is not evidence.
 Every example carries `evidence_status: synthetic`. Real runs must use `measured` and replace every
 placeholder checksum and hardware field with captured values.
 
+The QSA H2 context-sweep contract is `qwen38-qsa-h2-evidence.schema.json`.
+Its synthetic fixture covers the registered `qsa_sparse` backend at contexts 128, 512, and 2048, with prefill and decode raw samples, composite phase sums, workspace plans, and allocator checkpoints.
+The measured producer is intentionally limited to one tiny QSA layer and one request per context/phase, and records startup-canary, cancellation/restore, chunking, graph-capture, sustained-load, thermal, performance, and full-model limitations explicitly.
+
 ## Hardware gates and retention
 
 The ordinary hosted workflow is H0/H1 only. Both Tesla P4 cards are installed on Gorilla, while
@@ -169,6 +173,25 @@ The reported approximately 0.18 output tokens per second divides two output toke
 prompt-plus-generation call and must not be presented as steady-state decode TPS. Cold-cache PLE
 fault/read-amplification, ECC-on comparison, long-context, and sustained thermal evidence remain
 separate required profiles.
+
+The first registered-backend QSA context sweep ran on Gorilla at commit `7e5c264387` under the
+ECC-off profile. The 15.843-second bounded run used one tiny Qwen4-Exp QSA layer and one request,
+with one prefill and one immediately following decode at 128, 512, and 2,048 tokens. All six
+forwards completed through the visible `torch-fp32-reference` path. The observed total CUDA-event
+times were 3,314.434/14.834 ms, 1,479.759/7.341 ms, and 10,209.235/13.042 ms for prefill/decode at
+the three respective contexts. The 2,048-token prefill attributed 7,987.261 ms to composite
+selection, 1,805.783 ms to selected-row attention, and reached a cumulative allocator high-water
+of 339.16 MiB. These one-sample tiny-geometry observations locate work for further profiling; the
+128-token prefill includes first-use overhead, and none of these numbers is a throughput or stable
+performance claim. The run ended at 38 C and 24.92 W under the provisional 75 W cap.
+
+Raw evidence is retained on Gorilla as `results/hardware/qwen38-qsa-h2-ecc-off.json` with SHA-256
+`b304fa894e74e54cd34611ccce9ae06f98239344ef3dff2e0251d9a2808688a5`; its dedicated inventory
+has SHA-256 `90d5ffddad2fe563f06303e3b2200bcad4f346bb0011e1ee349b63ab88dd8de4`. The schema and semantic
+validator passed after independently checking that reported driver-free memory never exceeded
+driver-total memory. Full-model serving, repeated/warmed samples, chunked prefill, 8K-262K
+contexts, optimized QSA, cancellation/restore, placement backoff, sustained thermals, and H3
+remain unqualified.
 
 The short-evidence profiles deliberately keep these claims separate:
 

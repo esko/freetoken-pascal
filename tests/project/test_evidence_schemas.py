@@ -26,14 +26,14 @@ def load(name: str) -> dict:
 def test_all_example_evidence_is_schema_valid() -> None:
     paths = sorted(RESULT_DIR.glob("*.json"))
 
-    assert len(paths) == 9
+    assert len(paths) == 10
     assert VALIDATE_EVIDENCE.validate_paths(paths, schema_dir=SCHEMA_DIR) == []
 
 
 def test_all_evidence_schemas_are_valid_draft_2020_12() -> None:
     schemas = sorted(SCHEMA_DIR.glob("*.schema.json"))
 
-    assert len(schemas) == 10
+    assert len(schemas) == 11
     for path in schemas:
         Draft202012Validator.check_schema(json.loads(path.read_text(encoding="utf-8")))
 
@@ -196,6 +196,85 @@ def test_router_h2_fixture_is_synthetic_bounded_and_default_off() -> None:
     assert evidence["claims"]["auto_enabled"] is False
     assert evidence["claims"]["end_to_end_performance"] is False
     assert len(evidence["cases"][0]["steady_samples"]) == 5
+
+
+def test_qsa_h2_fixture_is_synthetic_bounded_and_explicitly_unmeasured() -> None:
+    evidence = load("qwen38-qsa-h2-evidence.json")
+
+    assert VALIDATE_EVIDENCE.validate_document(evidence, schema_dir=SCHEMA_DIR) == []
+    assert evidence["evidence_status"] == "synthetic"
+    assert evidence["profile"]["attention_backend"] == "qsa_sparse"
+    assert evidence["profile"]["selected_path"] == "torch-fp32-reference"
+    assert evidence["workload"]["contexts"] == [128, 512, 2048]
+    assert evidence["workload"]["sustained_load"] is False
+    assert evidence["claims"]["performance"] is False
+    assert set(evidence["unmeasured"]["phases"]) == {
+        "startup_canary",
+        "cancellation_state_restore",
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    (
+        (
+            lambda value: value["samples"][0]["phase_elapsed_ns"].update(store_kv=101),
+            "phase_elapsed_ns must equal raw phase-event sums",
+        ),
+        (
+            lambda value: value["samples"][0]["phase_events"][0].update(path="triton"),
+            "phase_events path must match profile",
+        ),
+        (
+            lambda value: value["allocator_checkpoints"][0].update(
+                allocator_reserved_bytes=1,
+                allocator_allocated_bytes=2,
+            ),
+            "allocated exceeds reserved",
+        ),
+        (
+            lambda value: value["profile"].update(topk_backend="triton"),
+            "topk_backend must match selected_path",
+        ),
+        (
+            lambda value: value["samples"][0]["allocator_after"].update(
+                driver_free_bytes=value["samples"][0]["allocator_after"]["driver_total_bytes"] + 1
+            ),
+            "free bytes exceed driver capacity",
+        ),
+        (
+            lambda value: value["samples"][0].update(total_elapsed_ns=1),
+            "total_elapsed_ns is below composite phase sum",
+        ),
+        (
+            lambda value: value["samples"][0]["phase_events"][0].update(layer_id=4),
+            "must identify tiny QSA layer 3 slot 0",
+        ),
+        (
+            lambda value: value["timing_statistics"][0]["total"].update(median_ns=1),
+            "total median must match raw samples",
+        ),
+    ),
+)
+def test_qsa_h2_semantics_reject_forged_evidence(
+    mutate: Callable[[dict], None], message: str
+) -> None:
+    invalid = copy.deepcopy(load("qwen38-qsa-h2-evidence.json"))
+    mutate(invalid)
+
+    errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=SCHEMA_DIR)
+
+    assert any(message in error for error in errors), errors
+
+
+def test_measured_qsa_h2_requires_bound_inventory_file() -> None:
+    invalid = copy.deepcopy(load("qwen38-qsa-h2-evidence.json"))
+    invalid["evidence_status"] = "measured"
+    invalid["hardware_inventory"]["path"] = "results/hardware/does-not-exist.json"
+
+    errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=SCHEMA_DIR)
+
+    assert any("unable to read measured QSA hardware inventory" in error for error in errors)
 
 
 @pytest.mark.parametrize(

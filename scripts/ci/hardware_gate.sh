@@ -25,7 +25,7 @@ if [[ -n "$profile_id" ]]; then
 fi
 inventory_path=results/hardware/inventory.json
 case "$level" in
-  warm-p4|dual-p4-short|router-p4)
+  warm-p4|dual-p4-short|router-p4|qsa-p4)
     if [[ -n "$profile_id" ]]; then
       inventory_path="results/hardware/inventory-${profile_id}-${level}.json"
     fi
@@ -249,6 +249,33 @@ run_router_p4() {
       --repository-commit "$repository_commit"
 }
 
+run_qsa_p4() {
+  if [[ -z "$profile_id" ]]; then
+    echo "qsa-p4 requires FREETOKEN_PASCAL_PROFILE_ID (ecc-on or ecc-off)" >&2
+    return 1
+  fi
+  if [[ "$smoke_gpu" != "0" ]]; then
+    echo "qsa-p4 currently requires FREETOKEN_SMOKE_GPU=0 for exact host/container identity" >&2
+    return 1
+  fi
+  docker run --rm --gpus "device=$smoke_gpu" \
+    -v "$repo_root:$container_root" \
+    -w "$container_root" \
+    "$image" \
+    env PYTHONPATH=python python -m pytest -q tests/project/test_qsa_pascal_h2.py
+  docker run --rm --gpus "device=$smoke_gpu" \
+    -v "$repo_root:$container_root" \
+    -w "$container_root" \
+    "$image" \
+    env PYTHONPATH=python timeout --foreground --signal=TERM --kill-after=5s 300s \
+      python scripts/run_qsa_pascal_h2.py \
+      --inventory "$inventory_path" \
+      --output "results/hardware/qwen38-qsa-h2-${profile_id}.json" \
+      --gpu-index "$smoke_gpu" \
+      --expected-profile "$profile_id" \
+      --repository-commit "$repository_commit"
+}
+
 case "$level" in
   smoke)
     run_single_smoke
@@ -268,6 +295,9 @@ case "$level" in
     ;;
   router-p4)
     run_router_p4
+    ;;
+  qsa-p4)
+    run_qsa_p4
     ;;
   release)
     test -n "${FREETOKEN_PASCAL_MODEL_PATH:-}" || {
