@@ -268,8 +268,9 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
         ple_sources = {str(item.get("source_kind")) for item in ple_telemetry.values()}
         assert ple_backends == {ple_backend}
         assert ple_sources == {"dedicated-artifact"}
+        expected_mapped_bytes = ple_identity["tensor_bytes"] if ple_backend == "mmap" else 0
         assert {int(item["mapped_bytes"]) for item in ple_telemetry.values()} == {
-            ple_identity["tensor_bytes"]
+            expected_mapped_bytes
         }
 
         execution = [
