@@ -77,11 +77,20 @@ match are recorded without claiming a cryptographic content check. The dedicated
   for the complete prompt plus generation call, the same 96 rows and 8,640 packed bytes through 96
   positional reads, `POSIX_FADV_RANDOM`, 23 minor faults, and zero observed major faults or
   block-device reads on the warm cache.
-- Run telemetry reported direct AVX2 kernels for every routed layer, eight actual worker threads with
-  verified affinity, CPU execution, and a file-backed GGUF expert source. This is an observation
-  from the retained run record; an H2 gate assertion for each layer and worker/affinity field is
-  still required before treating it as a qualification claim. No SSD or GPU expert execution
-  occurred.
+- Clean-tip `pread` qualification: commit `3c9dc0422a` passed the complete single-P4 gate on
+  Gorilla. The gate stream-hashed all four model shards and the dedicated PLE payload, validated
+  the generated document against `qwen38-gguf-cache-zero-h2-evidence.schema.json`, produced the
+  identical token IDs `[201519, 8691]`, and retained the raw document at
+  `results/hardware/qwen38-gguf-cache-zero-h2.json` on Gorilla for the 30-day H2 retention window.
+  Startup took 130.748 seconds and the complete five-token prompt plus two-token generation call
+  took 114.010 seconds. Because whole-artifact verification displaced useful expert pages before
+  inference, this is cold-after-verification correctness evidence and not a steady-state TPS result.
+  PLE telemetry recorded 96 requested/unique/sorted rows, 96 positional reads, 8,640 packed bytes,
+  20 minor faults, zero major faults, and zero observed physical storage-read bytes from the warm
+  page cache.
+- The clean-tip gate asserted direct AVX2 kernels for every one of the 48 routed layers, eight actual
+  worker threads with verified affinity to CPUs 0-7, CPU execution, and a file-backed GGUF expert
+  source. No SSD or GPU expert execution occurred.
 - Runtime allocation reached 5.86 GiB on GPU 0 with about 2.20 GiB free after initialization.
   Peak sampled temperature was 54 C at roughly 25 W under the intentional 75 W power limit.
 - The inventory at clean commit `0cb4bb3500` (patch-equivalent to superseded stacked commit
@@ -94,8 +103,9 @@ that all expert pages were prefaulted into DDR4 or protected from swap, so this 
 described as proving resident/no-swap expert-bank behavior. The H2 run also did not provide cold-cache
 fault/read-amplification or model-shard cryptographic-hash evidence.
 
-The clean-branch commit mappings above establish source equivalence but do not replace a rerun at
-the clean branch tip; that rerun is still required for strict reproducibility.
+The earlier clean-branch commit mappings establish source equivalence for the warm mmap/pread
+observations. Commit `3c9dc0422a` supplies the independent clean-tip cryptographic and execution
+rerun for the pread path; a corresponding clean-tip mmap rerun remains optional follow-up evidence.
 
 These were bounded correctness/integration runs, not repeated steady-state decode benchmarks.
 The reported approximately 0.18 output tokens per second divides two output tokens by the complete
