@@ -217,6 +217,35 @@ def test_phase_observer_can_be_detached_and_rejects_nonreference_path() -> None:
         fixture.backend.set_phase_observer(lambda _event, _metadata: None)
 
 
+@requires_cuda
+def test_pascal_phase_observer_preserves_exact_prefill_output() -> None:
+    config = parsed_config(num_layers=4, budget=16, ratio=4)
+    fixture = Fixture(config, num_pages=16)
+    if fixture.backend.selected_path != "torch-fp32-reference":
+        pytest.skip("phase observer is qualified only on the Pascal eager reference path")
+    attn = fixture.layer(QSA_LAYER, seed=83)
+    x = _inputs(fixture, [8], seed=89)[0]
+    plain = attn.forward(x, fixture.batch([fixture.req(0, 0, 8)], "prefill"))
+    events = []
+    fixture.backend.set_phase_observer(
+        lambda event, metadata: events.append((event, metadata["phase"]))
+    )
+
+    observed = attn.forward(x, fixture.batch([fixture.req(1, 0, 8)], "prefill"))
+
+    assert torch.equal(observed, plain)
+    assert events == [
+        ("begin", "store_kv"),
+        ("end", "store_kv"),
+        ("begin", "index_cache_composite"),
+        ("end", "index_cache_composite"),
+        ("begin", "selection_composite"),
+        ("end", "selection_composite"),
+        ("begin", "selected_row_attention"),
+        ("end", "selected_row_attention"),
+    ]
+
+
 def test_cpu_reference_norm_rope_matches_explicit_fp32_formula():
     fixture = _cpu_reference_fixture()
     backend = fixture.backend
