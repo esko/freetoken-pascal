@@ -174,20 +174,20 @@ prompt-plus-generation call and must not be presented as steady-state decode TPS
 fault/read-amplification, ECC-on comparison, long-context, and sustained thermal evidence remain
 separate required profiles.
 
-The first registered-backend QSA context sweep ran on Gorilla at commit `3a8f31738b` under the
-ECC-off profile. The 15.442-second bounded run used one tiny Qwen4-Exp QSA layer and one request,
+The first registered-backend QSA context sweep ran on Gorilla at commit `7e5c264387` under the
+ECC-off profile. The 15.843-second bounded run used one tiny Qwen4-Exp QSA layer and one request,
 with one prefill and one immediately following decode at 128, 512, and 2,048 tokens. All six
 forwards completed through the visible `torch-fp32-reference` path. The observed total CUDA-event
-times were 3,324.188/14.756 ms, 1,435.772/7.133 ms, and 9,863.488/12.749 ms for prefill/decode at
-the three respective contexts. The 2,048-token prefill attributed 7,704.363 ms to composite
-selection, 1,754.887 ms to selected-row attention, and reached a cumulative allocator high-water
+times were 3,314.434/14.834 ms, 1,479.759/7.341 ms, and 10,209.235/13.042 ms for prefill/decode at
+the three respective contexts. The 2,048-token prefill attributed 7,987.261 ms to composite
+selection, 1,805.783 ms to selected-row attention, and reached a cumulative allocator high-water
 of 339.16 MiB. These one-sample tiny-geometry observations locate work for further profiling; the
 128-token prefill includes first-use overhead, and none of these numbers is a throughput or stable
-performance claim. The run ended at 39 C and 25.03 W under the provisional 75 W cap.
+performance claim. The run ended at 38 C and 24.92 W under the provisional 75 W cap.
 
 Raw evidence is retained on Gorilla as `results/hardware/qwen38-qsa-h2-ecc-off.json` with SHA-256
-`ccb49c293009cb7c44dd19042e8004b3a844b548d3d21062a3c0f5d757ba38e2`; its dedicated inventory
-has SHA-256 `a282cc180496e7d0ffbc2d93c89aba8d0ab0f17771b570f0ba0cc126ce88a9c5`. The schema and semantic
+`b304fa894e74e54cd34611ccce9ae06f98239344ef3dff2e0251d9a2808688a5`; its dedicated inventory
+has SHA-256 `90d5ffddad2fe563f06303e3b2200bcad4f346bb0011e1ee349b63ab88dd8de4`. The schema and semantic
 validator passed after independently checking that reported driver-free memory never exceeded
 driver-total memory. Full-model serving, repeated/warmed samples, chunked prefill, 8K-262K
 contexts, optimized QSA, cancellation/restore, placement backoff, sustained thermals, and H3
