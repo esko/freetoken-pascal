@@ -135,6 +135,24 @@ match are recorded without claiming a cryptographic content check. The dedicated
   observed physical storage-read bytes. Peak sampled state was 52 C and 30.31 W. Raw evidence has
   SHA-256 `386afae5680e4f7ff8f2717f2e95e79137fe5c3f05fac572001fa1dc0747795b`; its dedicated
   inventory has SHA-256 `ca6fc4b81d48b2a38e456f2ae187844f863dc4c2009414e786caab7f4f159156`.
+- The bounded router-only H2 gate at `ce5b08f8b7` first passed 19 selected real-CUDA
+  router edge-case tests, including finite ties, non-finite/all-invalid rows, padded rows,
+  CUDA-graph capture and the unchanged `auto` fallback. It then completed the exact 108-case
+  matrix spanning BF16/FP16/FP32, 1/2/4/8/32/128 rows, padding/random/exceptional inputs and
+  both renormalization modes. All candidate cases launched, all expert IDs matched exactly,
+  every weight comparison passed, maximum absolute error was
+  `1.1920928955078125e-7`, and maximum relative RMS error was
+  `1.4996938091371703e-7`. Across the deliberately heterogeneous matrix, the descriptive
+  median synchronized observation was 687,104 ns for the Torch reference and 165,529 ns for
+  the forced Triton candidate; this is not a model-level or dispatch-enabling performance
+  claim. The candidate's first call may include JIT and reached 3.130 seconds in the first
+  recorded case. The 40.001-second matrix ended at 45 C and 24.05 W under the provisional
+  75 W cap. Raw ECC-off evidence is retained on Gorilla as
+  `results/hardware/qwen38-router-h2-ecc-off.json` with SHA-256
+  `2d92de17a785270be0b5815e81d22b255af6290a9ff7b739cd91d5ed9ad672ab`; its dedicated
+  inventory has SHA-256 `9dd75ee45bf091658a38040ae8d051cb74c48a35b7fe3226d2f73ea4a0aceb27`.
+  `auto` remains the Torch reference pending same-model end-to-end A/B and issue #14's broader
+  correctness corpus; no thermal, TPS or dual-P4 policy qualification is implied.
 
 The complete 77.0 GiB expert bank was mapped/file-backed for this slice. No evidence was collected
 that all expert pages were prefaulted into DDR4 or protected from swap, so this run must not be

@@ -176,6 +176,13 @@ that CUDA-resident token-limit scalars are compared on-device rather than extrac
 `router_dispatch` observer event records the selected implementation. The candidate
 remains default-off until the H1/H2 gates pass.
 
+The H2 router evidence schema fails closed on incomplete matrices, inventory/ECC or
+telemetry identity mismatch, candidate compile/launch failure, nonalternating samples,
+failed steady observations, forged summaries, and claim/parity disagreement. A
+synthetic golden fixture tests the protocol but cannot qualify hardware. Measured
+component evidence is still insufficient to change `auto`; the same-model
+end-to-end A/B and the broader issue #14 correctness corpus remain required.
+
 ### Placement operation
 
 Test the #73 planner and canary with synthetic and real categories:

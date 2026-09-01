@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esko/freetoken-pascal/schemas/qwen38-router-h2-evidence.schema.json",
+  "title": "FreeToken-Pascal bounded Qwen3.8 Pascal router evidence",
+  "description": "A standalone forced-reference versus candidate router observation for Qwen3.8's 512-expert top-k=10 route. It never qualifies auto dispatch, end-to-end serving, throughput, thermals, or a default.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_name", "schema_version", "evidence_status", "evidence_kind", "claim_status",
+    "repository_commit", "donor", "software", "hardware_inventory", "workload", "auto_control",
+    "cases", "telemetry", "duration_seconds", "hard_timeout_seconds", "summary", "claims"
+  ],
+  "properties": {
+    "schema_name": {"const": "qwen38-router-h2-evidence.schema.json"},
+    "schema_version": {"const": 1},
+    "evidence_status": {"enum": ["synthetic", "measured"]},
+    "evidence_kind": {"const": "qwen38-pascal-router-ab"},
+    "claim_status": {"const": "bounded-router-only"},
+    "repository_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "donor": {"$ref": "#/$defs/donor"},
+    "software": {"$ref": "#/$defs/software"},
+    "hardware_inventory": {"$ref": "#/$defs/hardware_inventory"},
+    "workload": {"$ref": "#/$defs/workload"},
+    "auto_control": {"$ref": "#/$defs/auto_control"},
+    "cases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}},
+    "telemetry": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/telemetry"}},
+    "duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+    "hard_timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+    "summary": {"$ref": "#/$defs/summary"},
+    "claims": {"$ref": "#/$defs/claims"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonnegative_ns": {"type": "integer", "minimum": 0},
+    "donor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repository", "pull_request", "ref", "license", "method"],
+      "properties": {
+        "id": {"const": "freetoken-qwen4-pr257-merge"},
+        "repository": {"const": "https://github.com/FlashML-org/FreeToken"},
+        "pull_request": {"const": 257},
+        "ref": {"const": "bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40"},
+        "license": {"const": "Apache-2.0"},
+        "method": {"const": "upstream-arbitrary-k-router-reference"}
+      }
+    },
+    "software": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python", "torch", "cuda_runtime", "triton"],
+      "properties": {
+        "python": {"type": "string", "minLength": 1},
+        "torch": {"type": "string", "minLength": 1},
+        "cuda_runtime": {"const": "12.6"},
+        "triton": {"type": "string", "minLength": 1}
+      }
+    },
+    "hardware_inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "profile_id", "gpu_index", "gpu_identity"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "profile_id": {"enum": ["ecc-on", "ecc-off"]},
+        "gpu_index": {"type": "integer", "minimum": 0},
+        "gpu_identity": {"$ref": "#/$defs/gpu_identity"}
+      }
+    },
+    "gpu_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index", "name", "compute_capability", "memory_mib", "uuid", "pci_bus_id",
+        "ecc_mode", "pci_root", "numa_node"
+      ],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0},
+        "name": {"const": "Tesla P4"},
+        "compute_capability": {"const": "6.1"},
+        "memory_mib": {"type": "integer", "minimum": 7580, "maximum": 8192},
+        "uuid": {"type": "string", "pattern": "^GPU-[A-Za-z0-9-]+$"},
+        "pci_bus_id": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "ecc_mode": {"enum": ["enabled", "disabled"]},
+        "pci_root": {"type": "string", "pattern": "^pci[0-9a-f]{4}:[0-9a-f]{2}$"},
+        "numa_node": {"type": "integer", "minimum": 0}
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model", "num_experts", "topk", "dtypes", "token_counts", "renormalize",
+        "repeats", "matrix_complete", "max_duration_seconds"
+      ],
+      "properties": {
+        "model": {"const": "Qwen3.8-Flash-Next"},
+        "num_experts": {"const": 512},
+        "topk": {"const": 10},
+        "dtypes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["bfloat16", "float16", "float32"]}
+        },
+        "token_counts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": [1, 2, 4, 8, 32, 128]}
+        },
+        "renormalize": {"type": "array", "uniqueItems": true, "items": {"type": "boolean"}},
+        "repeats": {"type": "integer", "minimum": 5, "maximum": 5},
+        "matrix_complete": {"type": "boolean"},
+        "max_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300}
+      }
+    },
+    "auto_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested_mode", "selected_implementation", "topk", "num_experts",
+        "renormalize", "fallback_reason", "default_changed", "end_to_end_claim"
+      ],
+      "properties": {
+        "requested_mode": {"const": "auto"},
+        "selected_implementation": {"const": "torch-reference"},
+        "topk": {"const": 10},
+        "num_experts": {"const": 512},
+        "renormalize": {"type": "boolean"},
+        "fallback_reason": {"const": "candidate-not-qualified"},
+        "default_changed": {"const": false},
+        "end_to_end_claim": {"const": false}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "kind", "dtype", "token_count", "renormalize", "padded",
+        "num_token_non_padded", "input_sha256", "reference", "candidate",
+        "comparison", "steady_samples"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["random", "padding", "exceptional"]},
+        "dtype": {"enum": ["bfloat16", "float16", "float32"]},
+        "token_count": {"enum": [1, 2, 4, 8, 32, 128]},
+        "renormalize": {"type": "boolean"},
+        "padded": {"type": "boolean"},
+        "num_token_non_padded": {"type": ["integer", "null"], "minimum": 0},
+        "input_sha256": {"$ref": "#/$defs/sha256"},
+        "reference": {"$ref": "#/$defs/reference"},
+        "candidate": {"$ref": "#/$defs/candidate"},
+        "comparison": {
+          "oneOf": [{"$ref": "#/$defs/comparison"}, {"type": "null"}]
+        },
+        "steady_samples": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/steady_sample"}
+        }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "status", "initial_call_elapsed_ns", "may_include_jit", "ids_sha256", "weights_sha256"],
+      "properties": {
+        "mode": {"const": "torch-reference"},
+        "status": {"const": "passed"},
+        "initial_call_elapsed_ns": {"$ref": "#/$defs/nonnegative_ns"},
+        "may_include_jit": {"const": false},
+        "ids_sha256": {"$ref": "#/$defs/sha256"},
+        "weights_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eligible", "mode", "status", "initial_call_elapsed_ns", "may_include_jit", "failure"],
+      "properties": {
+        "eligible": {"type": "boolean"},
+        "mode": {"const": "triton-candidate"},
+        "status": {"enum": ["passed", "failed", "not-run"]},
+        "initial_call_elapsed_ns": {"oneOf": [{"$ref": "#/$defs/nonnegative_ns"}, {"type": "null"}]},
+        "may_include_jit": {"const": true},
+        "ids_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "weights_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "failure": {
+          "oneOf": [{"$ref": "#/$defs/failure"}, {"type": "null"}]
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "exception_type", "message"],
+      "properties": {
+        "phase": {"enum": ["compile", "launch", "compile_or_launch"]},
+        "exception_type": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1, "maxLength": 2048}
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ids_exact", "max_abs_error", "relative_rms", "atol", "rtol", "weights_within_tolerance", "passed"],
+      "properties": {
+        "ids_exact": {"type": "boolean"},
+        "max_abs_error": {"type": "number", "minimum": 0},
+        "relative_rms": {"type": "number", "minimum": 0},
+        "atol": {"type": "number", "minimum": 0},
+        "rtol": {"type": "number", "minimum": 0},
+        "weights_within_tolerance": {"type": "boolean"},
+        "passed": {"type": "boolean"}
+      }
+    },
+    "steady_sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repeat", "order", "reference", "candidate"],
+      "properties": {
+        "repeat": {"type": "integer", "minimum": 0, "maximum": 4},
+        "order": {"enum": ["reference_then_candidate", "candidate_then_reference"]},
+        "reference": {"$ref": "#/$defs/timing_sample"},
+        "candidate": {"$ref": "#/$defs/timing_sample"}
+      }
+    },
+    "timing_sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "elapsed_ns", "synchronized"],
+      "properties": {
+        "status": {"enum": ["passed", "failed", "not-run"]},
+        "elapsed_ns": {"oneOf": [{"$ref": "#/$defs/nonnegative_ns"}, {"type": "null"}]},
+        "synchronized": {"const": true},
+        "ids_exact": {"type": "boolean"},
+        "weights_within_tolerance": {"type": "boolean"}
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captured_at", "index", "name", "uuid", "compute_capability", "memory_mib",
+        "pci_bus_id", "ecc_mode", "clocks", "temperature_celsius", "power_watts",
+        "power_limit_watts"
+      ],
+      "properties": {
+        "captured_at": {"type": "string", "format": "date-time"},
+        "index": {"type": "integer", "minimum": 0},
+        "name": {"const": "Tesla P4"},
+        "uuid": {"type": "string", "pattern": "^GPU-[A-Za-z0-9-]+$"},
+        "compute_capability": {"const": "6.1"},
+        "memory_mib": {"type": "integer", "minimum": 7580, "maximum": 8192},
+        "pci_bus_id": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "ecc_mode": {"enum": ["enabled", "disabled"]},
+        "clocks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["graphics_mhz", "memory_mhz"],
+          "properties": {
+            "graphics_mhz": {"type": "integer", "minimum": 0},
+            "memory_mhz": {"type": "integer", "minimum": 0}
+          }
+        },
+        "temperature_celsius": {"type": "number", "minimum": 0, "maximum": 100},
+        "power_watts": {"type": "number", "minimum": 0, "maximum": 100},
+        "power_limit_watts": {"type": "number", "exclusiveMinimum": 0, "maximum": 100}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_count", "reference_case_count", "candidate_eligible_case_count",
+        "candidate_passed_case_count", "candidate_failed_case_count",
+        "candidate_not_run_case_count", "all_candidate_parity_passed",
+        "performance_claim", "end_to_end_claim", "default_changed"
+      ],
+      "properties": {
+        "case_count": {"type": "integer", "minimum": 1},
+        "reference_case_count": {"type": "integer", "minimum": 1},
+        "candidate_eligible_case_count": {"type": "integer", "minimum": 0},
+        "candidate_passed_case_count": {"type": "integer", "minimum": 0},
+        "candidate_failed_case_count": {"type": "integer", "minimum": 0},
+        "candidate_not_run_case_count": {"type": "integer", "minimum": 0},
+        "all_candidate_parity_passed": {"type": "boolean"},
+        "performance_claim": {"const": false},
+        "end_to_end_claim": {"const": false},
+        "default_changed": {"const": false}
+      }
+    },
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "router_only", "exact_ids", "weight_tolerance", "auto_enabled",
+        "end_to_end_performance", "thermal_qualification", "dual_p4_policy"
+      ],
+      "properties": {
+        "router_only": {"const": true},
+        "exact_ids": {"type": "boolean"},
+        "weight_tolerance": {"type": "boolean"},
+        "auto_enabled": {"const": false},
+        "end_to_end_performance": {"const": false},
+        "thermal_qualification": {"const": false},
+        "dual_p4_policy": {"const": false}
+      }
+    }
+  }
+}

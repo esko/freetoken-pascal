@@ -890,6 +890,143 @@ def _qwen38_dual_p4_semantic_errors(document: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _qwen38_router_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
+    """Validate router matrix, parity, summary, and inventory bindings."""
+    errors: list[str] = []
+    cases = document["cases"]
+    summary = document["summary"]
+    inventory = document["hardware_inventory"]
+    identity = inventory["gpu_identity"]
+    profile = inventory["profile_id"]
+    expected_ecc = "disabled" if profile == "ecc-off" else "enabled"
+    if identity["index"] != inventory["gpu_index"]:
+        errors.append("hardware_inventory.gpu_identity.index must match gpu_index")
+    if identity["ecc_mode"] != expected_ecc:
+        errors.append("hardware_inventory.gpu_identity.ecc_mode must match profile_id")
+    for index, sample in enumerate(document["telemetry"]):
+        for field in ("index", "uuid", "pci_bus_id", "name", "compute_capability", "memory_mib"):
+            if sample[field] != identity[field]:
+                errors.append(f"telemetry[{index}].{field} must match hardware inventory")
+        if sample["ecc_mode"] != expected_ecc:
+            errors.append(f"telemetry[{index}].ecc_mode must match profile_id")
+
+    ids = [case["id"] for case in cases]
+    if len(ids) != len(set(ids)):
+        errors.append("router case IDs must be unique")
+    expected_counts = {
+        "case_count": len(cases),
+        "reference_case_count": sum(case["reference"]["status"] == "passed" for case in cases),
+        "candidate_eligible_case_count": sum(case["candidate"]["eligible"] for case in cases),
+        "candidate_passed_case_count": sum(
+            case["candidate"]["status"] == "passed" for case in cases
+        ),
+        "candidate_failed_case_count": sum(
+            case["candidate"]["status"] == "failed" for case in cases
+        ),
+        "candidate_not_run_case_count": sum(
+            case["candidate"]["status"] == "not-run" for case in cases
+        ),
+    }
+    for field, expected in expected_counts.items():
+        if summary[field] != expected:
+            errors.append(f"summary.{field} must match router cases")
+
+    parity_passed = not any(case["candidate"]["status"] == "failed" for case in cases)
+    for index, case in enumerate(cases):
+        candidate = case["candidate"]
+        comparison = case["comparison"]
+        samples = case["steady_samples"]
+        if candidate["status"] == "passed":
+            if not candidate["eligible"] or candidate["failure"] is not None:
+                errors.append(f"cases[{index}] passed candidate must be eligible without failure")
+            if comparison is None or not comparison["passed"]:
+                errors.append(f"cases[{index}] passed candidate requires passing comparison")
+                parity_passed = False
+            if len(samples) != document["workload"]["repeats"]:
+                errors.append(f"cases[{index}].steady_samples must match workload.repeats")
+            if [sample["repeat"] for sample in samples] != list(range(len(samples))):
+                errors.append(f"cases[{index}].steady_samples repeats must be ordered and complete")
+            for sample_index, sample in enumerate(samples):
+                expected_order = (
+                    "reference_then_candidate"
+                    if sample_index % 2 == 0
+                    else "candidate_then_reference"
+                )
+                if sample["order"] != expected_order:
+                    errors.append(
+                        f"cases[{index}].steady_samples[{sample_index}].order must alternate"
+                    )
+                for implementation in ("reference", "candidate"):
+                    timing = sample[implementation]
+                    if timing["status"] != "passed" or timing["elapsed_ns"] is None:
+                        errors.append(
+                            f"cases[{index}].steady_samples[{sample_index}].{implementation} "
+                            "must be a passed timed observation"
+                        )
+                        parity_passed = False
+                    if not timing.get("ids_exact") or not timing.get("weights_within_tolerance"):
+                        errors.append(
+                            f"cases[{index}].steady_samples[{sample_index}].{implementation} "
+                            "must preserve its initial output"
+                        )
+                        parity_passed = False
+        else:
+            if samples:
+                errors.append(f"cases[{index}] unsuccessful candidate cannot report steady samples")
+            if comparison is not None:
+                errors.append(f"cases[{index}] unsuccessful candidate cannot report comparison")
+            if candidate["status"] == "failed" and candidate["failure"] is None:
+                errors.append(f"cases[{index}] failed candidate requires failure detail")
+            if candidate["status"] == "not-run" and candidate["failure"] is not None:
+                errors.append(f"cases[{index}] not-run candidate cannot report failure detail")
+        if comparison is not None:
+            expected = comparison["ids_exact"] and comparison["weights_within_tolerance"]
+            if comparison["passed"] != expected:
+                errors.append(f"cases[{index}].comparison.passed must match parity predicates")
+                parity_passed = False
+    claims = document["claims"]
+    exact_ids = all(
+        case["comparison"] is not None and case["comparison"]["ids_exact"] for case in cases
+    )
+    weights = all(
+        case["comparison"] is not None and case["comparison"]["weights_within_tolerance"]
+        for case in cases
+    )
+    if claims["exact_ids"] != exact_ids:
+        errors.append("claims.exact_ids must match all case comparisons")
+    if claims["weight_tolerance"] != weights:
+        errors.append("claims.weight_tolerance must match all case comparisons")
+    if summary["all_candidate_parity_passed"] != parity_passed:
+        errors.append("summary.all_candidate_parity_passed must match case comparisons")
+
+    if document["evidence_status"] == "measured":
+        workload = document["workload"]
+        if not workload["matrix_complete"]:
+            errors.append("measured router evidence requires a complete matrix")
+        if set(workload["dtypes"]) != {"bfloat16", "float16", "float32"}:
+            errors.append("measured router evidence requires BF16, FP16, and FP32")
+        if set(workload["token_counts"]) != {1, 2, 4, 8, 32, 128}:
+            errors.append("measured router evidence requires every target token count")
+        if set(workload["renormalize"]) != {False, True}:
+            errors.append("measured router evidence requires both renormalization modes")
+        expected_matrix = {
+            (kind, dtype, token_count, renormalize)
+            for kind in ("random", "padding", "exceptional")
+            for dtype in ("bfloat16", "float16", "float32")
+            for token_count in (1, 2, 4, 8, 32, 128)
+            for renormalize in (False, True)
+        }
+        actual_matrix = [
+            (case["kind"], case["dtype"], case["token_count"], case["renormalize"])
+            for case in cases
+        ]
+        if len(actual_matrix) != len(set(actual_matrix)):
+            errors.append("measured router evidence contains duplicate matrix cases")
+        if set(actual_matrix) != expected_matrix:
+            errors.append("measured router evidence requires the exact 108-case matrix")
+    return errors
+
+
 def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
     if not isinstance(document, dict):
         return ["document root must be an object"]
@@ -987,6 +1124,8 @@ def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
         errors.extend(_qwen38_q3_triad_semantic_errors(document, schema_dir=schema_dir))
     elif schema_name == "qwen38-dual-p4-device-evidence.schema.json":
         errors.extend(_qwen38_dual_p4_semantic_errors(document))
+    elif schema_name == "qwen38-router-h2-evidence.schema.json":
+        errors.extend(_qwen38_router_h2_semantic_errors(document))
     if document.get("evidence_status") == "measured" and document.get("commit") == "0" * 40:
         errors.append("measured evidence cannot use the placeholder commit")
     return errors
