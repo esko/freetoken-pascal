@@ -459,6 +459,23 @@ def test_qwen4_gguf_v_head_reorder_roundtrip():
     assert torch.equal(grouped.flatten().index_select(0, indices), tiled)
 
 
+def test_qwen4_gguf_static_permutation_ignores_meta_model_context():
+    with torch.device("meta"):
+        indices = _grouped_to_tiled_indices(2, 3, 4)
+
+    assert indices.device.type == "cpu"
+    assert torch.equal(
+        indices,
+        torch.tensor(
+            [
+                0, 1, 2, 3, 12, 13, 14, 15,
+                4, 5, 6, 7, 16, 17, 18, 19,
+                8, 9, 10, 11, 20, 21, 22, 23,
+            ]
+        ),
+    )
+
+
 def test_qwen4_gguf_centered_norm_subtracts_before_bf16_narrowing():
     effective = torch.tensor([1.001, 0.999], dtype=torch.float32)
     tensor = SimpleNamespace(
