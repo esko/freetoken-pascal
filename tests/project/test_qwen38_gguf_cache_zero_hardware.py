@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import time
 from collections import Counter
 from pathlib import Path
@@ -26,6 +27,14 @@ EXPECTED_EXPERT_CENSUS = {
     "Q5_K": 2,
     "Q8_0": 5,
 }
+
+
+def _repository_commit() -> str:
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+    ).strip()
 
 
 def _jsonable(value: Any) -> Any:
@@ -335,6 +344,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
             "schema_name": "qwen38-gguf-cache-zero-h2-evidence.schema.json",
             "schema_version": 1,
             "evidence_status": "measured",
+            "repository_commit": _repository_commit(),
             "model": model_identity,
             "ple_artifact": ple_identity,
             "hardware": p4_identity,

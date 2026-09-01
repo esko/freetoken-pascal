@@ -6,7 +6,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_name", "schema_version", "evidence_status", "model", "ple_artifact",
+    "schema_name", "schema_version", "evidence_status", "repository_commit", "model", "ple_artifact",
     "hardware", "config", "expert_quant_census", "expert_source", "ple_telemetry",
     "expert_telemetry", "generation", "startup_seconds"
   ],
@@ -14,6 +14,7 @@
     "schema_name": {"const": "qwen38-gguf-cache-zero-h2-evidence.schema.json"},
     "schema_version": {"const": 1},
     "evidence_status": {"const": "measured"},
+    "repository_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "model": {"$ref": "#/$defs/model"},
     "ple_artifact": {"$ref": "#/$defs/ple_artifact"},
     "hardware": {"$ref": "#/$defs/hardware"},
