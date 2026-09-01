@@ -186,8 +186,7 @@ def _validate_cpu_bridge_config(
         )
     if grouped:
         raise UnsupportedGGUFCpuConfiguration(
-            "Qwen GGUF CPU bridge currently supports one request; "
-            "grouped execution is unsupported"
+            "Qwen GGUF CPU bridge currently supports one request; grouped execution is unsupported"
         )
 
 
@@ -610,6 +609,11 @@ class QwenGGUFCpuExpertBundle:
             "source": getattr(ple, "source_kind", "gguf-mmap"),
             "ple_backend": getattr(ple, "backend", "mmap"),
             "ple_codec_identity": ple_telemetry.get("codec_identity"),
+            # Routed experts are always read from the immutable host GGUF mappings and
+            # executed by this CPU bridge.  Keep these explicit so hardware evidence cannot
+            # confuse the dedicated PLE artifact source with an expert execution backend.
+            "expert_source": "gguf-host-mmap",
+            "expert_execution_device": "cpu",
             "memory": self.host.memory_report(),
             "kernel_census": self.kernel_census,
             "requested_num_threads": self._requested_num_threads,

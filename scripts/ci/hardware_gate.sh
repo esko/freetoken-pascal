@@ -76,6 +76,33 @@ run_single_h2() {
       tests/project/test_hardware_smoke.py \
       tests/project/test_gdn_pascal_hardware.py \
       -m "sm61 and not dual_p4"'
+
+  # Engine startup intentionally requires CUDA to be uninitialized.  Run the real-model test
+  # in a fresh container after the ordinary smoke tests have completed their CUDA allocation.
+  if [[ -z "${FREETOKEN_PASCAL_MODEL_PATH:-}" ]]; then
+    return
+  fi
+  local -a qwen_env=(
+    -e FREETOKEN_SM61_RUNNER_VERIFIED=1
+    -e FREETOKEN_DISABLE_KERNEL_CACHE=1
+    -e "FREETOKEN_PASCAL_MODEL_PATH=${FREETOKEN_PASCAL_MODEL_PATH}"
+  )
+  local -a qwen_mounts=(
+    -v "$FREETOKEN_PASCAL_MODEL_PATH:$FREETOKEN_PASCAL_MODEL_PATH:ro"
+  )
+  if [[ -n "${FREETOKEN_PASCAL_PLE_ARTIFACT:-}" ]]; then
+    qwen_env+=( -e "FREETOKEN_PASCAL_PLE_ARTIFACT=${FREETOKEN_PASCAL_PLE_ARTIFACT}" )
+    qwen_mounts+=( -v "$FREETOKEN_PASCAL_PLE_ARTIFACT:$FREETOKEN_PASCAL_PLE_ARTIFACT:ro" )
+  fi
+  docker run --rm --gpus "device=$smoke_gpu" \
+    "${qwen_env[@]}" \
+    -v "$repo_root:$container_root" \
+    "${qwen_mounts[@]}" \
+    -w "$container_root" \
+    "$image" \
+    bash -lc 'PYTHONPATH=python pytest -q -s \
+      tests/project/test_qwen38_gguf_cache_zero_hardware.py \
+      -m "sm61 and not dual_p4"'
 }
 
 run_dual_smoke() {
