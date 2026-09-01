@@ -108,7 +108,11 @@ def test_cpu_reference_paged_gqa_uses_page_table_and_matches_dense_oracle():
     req = fixture.req(0, 0, 8)
     # Move the request's page away from page zero after allocation.  Both the K/V store and
     # the reference gather must follow the authoritative page-table mapping.
-    fixture.page_table[0, : fixture.page_size] = 2 * fixture.page_size
+    fixture.page_table[0, : fixture.page_size] = torch.arange(
+        2 * fixture.page_size,
+        3 * fixture.page_size,
+        dtype=fixture.page_table.dtype,
+    )
     x = _inputs(fixture, [8], seed=37)[0]
     qsa = attn.forward(x, fixture.batch([req], "prefill"))
 
