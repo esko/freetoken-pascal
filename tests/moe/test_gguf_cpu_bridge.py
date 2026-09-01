@@ -1009,12 +1009,7 @@ def test_bundle_owns_dedicated_ple_artifact_for_each_io_backend(
     from freetoken.gguf_host import convert_gguf_ple_to_artifact
     from freetoken.moe.gguf_cpu import open_qwen_gguf_cpu_expert_bundle
 
-    source = (
-        Path(__file__).resolve().parents[1]
-        / "fixtures"
-        / "gguf"
-        / "qwen4-tiny-experts.gguf"
-    )
+    source = Path(__file__).resolve().parents[1] / "fixtures" / "gguf" / "qwen4-tiny-experts.gguf"
     artifact = tmp_path / "ple-artifact"
     convert_gguf_ple_to_artifact(source, artifact)
     bundle = open_qwen_gguf_cpu_expert_bundle(

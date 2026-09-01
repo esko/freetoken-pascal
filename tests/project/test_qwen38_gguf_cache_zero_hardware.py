@@ -324,8 +324,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
                 "output_token_count": len(result[0]["token_ids"]),
                 "output_token_ids": result[0]["token_ids"],
                 "elapsed_seconds": generation_seconds,
-                "observed_tokens_per_second": len(result[0]["token_ids"])
-                / generation_seconds,
+                "observed_tokens_per_second": len(result[0]["token_ids"]) / generation_seconds,
             },
             "startup_seconds": startup_seconds,
         }
