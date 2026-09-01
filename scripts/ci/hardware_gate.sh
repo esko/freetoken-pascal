@@ -82,13 +82,20 @@ run_single_h2() {
   if [[ -z "${FREETOKEN_PASCAL_MODEL_PATH:-}" ]]; then
     return
   fi
+  if [[ ! -f "$FREETOKEN_PASCAL_MODEL_PATH" ]]; then
+    echo "FREETOKEN_PASCAL_MODEL_PATH must name the first pinned GGUF shard" >&2
+    return 1
+  fi
+  local model_dir
+  model_dir="$(dirname -- "$FREETOKEN_PASCAL_MODEL_PATH")"
   local -a qwen_env=(
     -e FREETOKEN_SM61_RUNNER_VERIFIED=1
     -e FREETOKEN_DISABLE_KERNEL_CACHE=1
     -e "FREETOKEN_PASCAL_MODEL_PATH=${FREETOKEN_PASCAL_MODEL_PATH}"
   )
   local -a qwen_mounts=(
-    -v "$FREETOKEN_PASCAL_MODEL_PATH:$FREETOKEN_PASCAL_MODEL_PATH:ro"
+    # Shard discovery needs every sibling in the pinned split, not only shard one.
+    -v "$model_dir:$model_dir:ro"
   )
   if [[ -n "${FREETOKEN_PASCAL_PLE_ARTIFACT:-}" ]]; then
     qwen_env+=( -e "FREETOKEN_PASCAL_PLE_ARTIFACT=${FREETOKEN_PASCAL_PLE_ARTIFACT}" )
