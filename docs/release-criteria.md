@@ -56,6 +56,7 @@ FreeToken-Pascal core v1 is complete only when every required item is evidenced.
 - [ ] QSA/top-k workspace exhaustion produces controlled backoff/error rather than process abort or corrupt output.
 - [ ] Two P4s work under the selected measured ownership/trunk policy; layer-owned, disjoint, replicated and TP/split candidates are compared where feasible.
 - [ ] After installation, release evidence captures each `P4 -> PCIe root -> NUMA node -> CPU socket` mapping; worker pools, expert-bank pages and staging buffers use the measured local node where possible, without inferring locality from GPU ordinal.
+- [ ] Every H2/H3 result binds the exact hardware-inventory SHA-256 and ECC profile; mixed current/pending ECC state, duplicate device identity, or topology drift fails closed.
 - [ ] Local-node, deliberately remote-node and interleaved placement controls are compared using end-to-end decode results before H3 policy selection.
 - [ ] Physical-core affinity avoids oversubscription; hard pin/staging limits are enforced; page-residency and cross-node counters are captured; unexplained cross-socket traffic or page migration fails H3 readiness.
 - [ ] Static-hot cache works and is reported beside cache-zero.

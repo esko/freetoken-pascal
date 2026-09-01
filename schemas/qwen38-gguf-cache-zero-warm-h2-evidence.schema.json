@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esko/freetoken-pascal/schemas/qwen38-gguf-cache-zero-warm-h2-evidence.schema.json",
+  "title": "FreeToken-Pascal bounded warm-cache Qwen3.8 single-P4 evidence",
+  "description": "A short warm-cache model-forward observation that reuses the canonical full-H2 model, PLE, and repository identity. It is not a steady-state performance or thermal qualification record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_name", "schema_version", "evidence_status", "evidence_kind", "claim_status",
+    "repository_commit",
+    "identity", "hardware_inventory", "request", "warmup", "timing", "thermal", "power",
+    "throttling", "performance", "ple", "execution", "output_token_ids", "claims"
+  ],
+  "properties": {
+    "schema_name": {"const": "qwen38-gguf-cache-zero-warm-h2-evidence.schema.json"},
+    "schema_version": {"const": 1},
+    "evidence_status": {"enum": ["synthetic", "measured"]},
+    "evidence_kind": {"const": "single-p4-warm-cache"},
+    "claim_status": {"const": "bounded-correctness-only"},
+    "repository_commit": {"$ref": "#/$defs/commit"},
+    "identity": {"$ref": "#/$defs/canonical_identity"},
+    "hardware_inventory": {"$ref": "#/$defs/hardware_inventory"},
+    "request": {"$ref": "#/$defs/request"},
+    "warmup": {"$ref": "#/$defs/warmup"},
+    "timing": {"$ref": "#/$defs/timing"},
+    "thermal": {"$ref": "#/$defs/thermal"},
+    "power": {"$ref": "#/$defs/power"},
+    "throttling": {"$ref": "#/$defs/throttling"},
+    "performance": {"$ref": "#/$defs/performance"},
+    "ple": {"$ref": "#/$defs/ple"},
+    "execution": {"$ref": "#/$defs/execution"},
+    "output_token_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {"type": "integer"}
+    },
+    "claims": {"$ref": "#/$defs/warm_claims"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "canonical_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope", "source_schema_name", "source_schema_version", "source_full_h2_evidence_sha256",
+        "canonicalization", "canonical_identity_sha256", "repository_commit", "repository_identity_sha256",
+        "model", "ple_artifact", "hash_reuse"
+      ],
+      "properties": {
+        "scope": {"const": "full-h2-model-ple-repository"},
+        "source_schema_name": {"const": "qwen38-gguf-cache-zero-h2-evidence.schema.json"},
+        "source_schema_version": {"const": 1},
+        "source_full_h2_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "canonicalization": {"const": "canonical-json-sha256-v1"},
+        "canonical_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "repository_commit": {"$ref": "#/$defs/commit"},
+        "repository_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "model": {"$ref": "#/$defs/model_identity"},
+        "ple_artifact": {"$ref": "#/$defs/ple_identity"},
+        "hash_reuse": {"$ref": "#/$defs/hash_reuse"}
+      }
+    },
+    "model_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision", "variant", "canonical_identity_sha256", "shards"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "revision": {"$ref": "#/$defs/commit"},
+        "variant": {"const": "UD-Q4_K_XL"},
+        "canonical_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "shards": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/model_shard"}
+        }
+      }
+    },
+    "model_shard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "size", "sha256", "observed_sha256", "sha256_status"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "size": {"type": "integer", "minimum": 1, "maximum": 100000000000},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "observed_sha256": {"$ref": "#/$defs/sha256"},
+        "sha256_status": {"const": "verified"}
+      }
+    },
+    "ple_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path", "canonical_identity_sha256", "payload_sha256", "manifest_sha256",
+        "payload_bytes", "rows", "row_bytes", "codec"
+      ],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "canonical_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "payload_sha256": {"$ref": "#/$defs/sha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "payload_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000000},
+        "rows": {"type": "integer", "minimum": 1, "maximum": 1000000000},
+        "row_bytes": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "codec": {"type": "string", "minLength": 1}
+      }
+    },
+    "hash_reuse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_identity", "repository_commit", "model_shards", "ple_payload",
+        "runtime_ple_integrity_hash", "model_shard_hashes_recomputed", "ple_identity_recomputed"
+      ],
+      "properties": {
+        "source_identity": {"const": "full-h2-canonical"},
+        "repository_commit": {"const": "reused-from-full-h2"},
+        "model_shards": {"const": "verified-against-full-h2"},
+        "ple_payload": {"const": "reused-from-full-h2"},
+        "runtime_ple_integrity_hash": {"const": "performed"},
+        "model_shard_hashes_recomputed": {"const": true},
+        "ple_identity_recomputed": {"const": false}
+      }
+    },
+    "hardware_inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "profile_id", "device"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "profile_id": {"enum": ["ecc-on", "ecc-off"]},
+        "device": {"$ref": "#/$defs/inventory_device"}
+      }
+    },
+    "inventory_device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uuid", "pci_bus_id", "pci_root", "numa_node", "ecc_profile", "clocks",
+        "temperature_celsius", "power_watts", "power_limit_watts", "throttle_status"
+      ],
+      "properties": {
+        "uuid": {"type": "string", "pattern": "^GPU-[A-Za-z0-9-]+$"},
+        "pci_bus_id": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "pci_root": {"type": "string", "pattern": "^pci[0-9a-f]{4}:[0-9a-f]{2}$"},
+        "numa_node": {"type": "integer", "minimum": 0, "maximum": 1},
+        "ecc_profile": {"enum": ["ecc-on", "ecc-off"]},
+        "clocks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["graphics_mhz", "memory_mhz"],
+          "properties": {
+            "graphics_mhz": {"type": "integer", "minimum": 0, "maximum": 2000},
+            "memory_mhz": {"type": "integer", "minimum": 0, "maximum": 10000}
+          }
+        },
+        "temperature_celsius": {"type": "number", "minimum": 0, "maximum": 85},
+        "power_watts": {"type": "number", "minimum": 0, "maximum": 75},
+        "power_limit_watts": {"type": "number", "exclusiveMinimum": 0, "maximum": 75},
+        "throttle_status": {"const": "not-assessed"}
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "request_count", "concurrency", "prompt_tokens", "context_tokens",
+        "max_new_tokens", "temperature", "timeout_seconds"
+      ],
+      "properties": {
+        "kind": {"const": "single-request"},
+        "request_count": {"const": 1},
+        "concurrency": {"const": 1},
+        "prompt_tokens": {"type": "integer", "minimum": 1, "maximum": 512},
+        "context_tokens": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "max_new_tokens": {"type": "integer", "minimum": 1, "maximum": 8},
+        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300}
+      }
+    },
+    "warmup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cache_state", "iterations", "elapsed_seconds", "max_duration_seconds"],
+      "properties": {
+        "cache_state": {"const": "warm"},
+        "iterations": {"type": "integer", "minimum": 0, "maximum": 3},
+        "elapsed_seconds": {"type": "number", "minimum": 0, "maximum": 300},
+        "max_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300}
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope", "startup_seconds", "warmup_seconds", "total_request_seconds",
+        "total_seconds", "measured_iterations"
+      ],
+      "properties": {
+        "scope": {"const": "bounded-warm-cache-request"},
+        "startup_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+        "warmup_seconds": {"type": "number", "minimum": 0, "maximum": 300},
+        "total_request_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+        "total_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+        "measured_iterations": {"type": "integer", "minimum": 1, "maximum": 3}
+      }
+    },
+    "thermal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qualification", "peak_celsius", "observation_seconds"],
+      "properties": {
+        "qualification": {"const": "unqualified"},
+        "peak_celsius": {"type": "number", "minimum": 0, "maximum": 85},
+        "observation_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300}
+      }
+    },
+    "power": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qualification", "peak_watts", "power_limit_watts"],
+      "properties": {
+        "qualification": {"const": "observed-only"},
+        "peak_watts": {"type": "number", "minimum": 0, "maximum": 75},
+        "power_limit_watts": {"type": "number", "exclusiveMinimum": 0, "maximum": 75}
+      }
+    },
+    "throttling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qualification", "assessment", "throttle_events", "claim"],
+      "properties": {
+        "qualification": {"const": "not-qualified"},
+        "assessment": {"const": "not-assessed"},
+        "throttle_events": {"type": "integer", "minimum": 0, "maximum": 3},
+        "claim": {"const": false}
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "claim", "steady_state", "decode_tokens_per_second", "prompt_tokens_per_second"],
+      "properties": {
+        "status": {"const": "not-claimed"},
+        "claim": {"const": false},
+        "steady_state": {"const": false},
+        "decode_tokens_per_second": {"const": null},
+        "prompt_tokens_per_second": {"const": null}
+      }
+    },
+    "ple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend", "cache_state", "source_kind", "logical_rows", "unique_rows",
+        "application_reads", "packed_bytes", "physical_read_bytes", "major_page_faults",
+        "read_amplification", "identity_reused", "runtime_integrity_hash", "runtime_integrity_sha256"
+      ],
+      "properties": {
+        "backend": {"enum": ["mmap", "pread"]},
+        "cache_state": {"const": "warm"},
+        "source_kind": {"const": "dedicated-artifact"},
+        "logical_rows": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "unique_rows": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "application_reads": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "packed_bytes": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "physical_read_bytes": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "major_page_faults": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "read_amplification": {"type": "number", "minimum": 0, "maximum": 128},
+        "identity_reused": {"const": true},
+        "runtime_integrity_hash": {"const": "performed"},
+        "runtime_integrity_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device_name", "compute_capability", "gpu_count", "model_loaded", "model_forward", "expert_execution", "serving_scope"],
+      "properties": {
+        "device_name": {"const": "Tesla P4"},
+        "compute_capability": {"const": "6.1"},
+        "gpu_count": {"const": 1},
+        "model_loaded": {"const": true},
+        "model_forward": {"const": true},
+        "expert_execution": {"const": "cpu"},
+        "serving_scope": {"const": "single-p4-reference-only"}
+      }
+    },
+    "warm_claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_execution", "single_p4_only", "steady_state_tps", "thermal_qualification", "dual_p4_serving"],
+      "properties": {
+        "model_execution": {"const": true},
+        "single_p4_only": {"const": true},
+        "steady_state_tps": {"const": false},
+        "thermal_qualification": {"const": false},
+        "dual_p4_serving": {"const": false}
+      }
+    }
+  }
+}

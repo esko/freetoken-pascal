@@ -58,10 +58,25 @@ reference fallbacks. “Mapped/file-backed” records the ownership and addressa
 slice; it does not claim that the full bank was prefaulted, resident in DDR4, or protected from
 swap. This is integration evidence, not profile qualification or a throughput target; cold cache,
 sustained decode, long-context quality, placement, residency/no-swap, and optimized QSA/GDN work
-remain gated. The earlier stacked-branch run IDs map by exact patch diff to clean-branch commits
+remain gated. A later clean-tip `pread` rerun at `3c9dc0422a` streamed and verified all four model
+shards plus the dedicated PLE payload, validated the generated evidence schema, and again produced
+the expected two token IDs through direct AVX2 execution in all 48 routed layers. Whole-artifact
+verification displaced useful expert pages, so its full-call timing is explicitly cold-after-
+verification correctness evidence rather than decode TPS. The earlier stacked-branch run IDs map
+by exact patch diff to clean-branch commits
 `d924ba4b9a` for the mmap run (`0b5cadb0a7`) and `c34648dbbe` for the pread run (`3b52df561c`).
-Those clean commits provide source provenance, not a claim that the hardware runs were rerun after
-the branch was cleaned; a clean-branch rerun remains a reproducibility follow-up.
+Those clean commits provide source provenance for the earlier observations; the later clean-tip
+run supplies independent reproducibility evidence for the pread path.
+
+Hardware evidence must bind an immutable ECC profile to the captured inventory. Short warm-cache
+measurements rehash the current model shards against canonical full-H2 identities before acquiring
+GPU resources and retain the Engine's mandatory PLE integrity validation. A separate watchdog
+process bounds Engine construction, generation, telemetry cleanup, and shutdown; evidence is
+published atomically only after cleanup succeeds. The outer 900-second process limit includes the
+CPU/NVMe identity pass; it is not the GPU thermal bound. Short direct dual-device probes remain
+non-serving evidence until issue #20
+provides a real two-P4 execution policy. None of these bounded profiles qualifies sustained
+thermals or release throughput.
 
 ## Phase 2 — AVX2 host expert backend and model profiles
 

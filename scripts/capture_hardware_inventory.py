@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+PROFILE_IDS = ("ecc-on", "ecc-off")
+
 
 def _run(*command: str) -> str:
     return subprocess.check_output(command, text=True).strip()
@@ -62,7 +64,7 @@ def _pci_topology(bus: str) -> dict[str, Any]:
 def _gpu_inventory() -> list[dict[str, Any]]:
     fields = (
         "index,name,uuid,compute_cap,memory.total,pci.bus_id,driver_version,"
-        "clocks.current.graphics,clocks.current.memory,ecc.mode.current"
+        "clocks.current.graphics,clocks.current.memory,ecc.mode.current,ecc.mode.pending"
     )
     rows = _run(
         "nvidia-smi",
@@ -71,9 +73,19 @@ def _gpu_inventory() -> list[dict[str, Any]]:
     ).splitlines()
     gpus: list[dict[str, Any]] = []
     for row in rows:
-        index, name, uuid, capability, memory, bus, driver, graphics, memory_clock, ecc = (
-            part.strip() for part in row.split(",")
-        )
+        (
+            index,
+            name,
+            uuid,
+            capability,
+            memory,
+            bus,
+            driver,
+            graphics,
+            memory_clock,
+            ecc,
+            ecc_pending,
+        ) = (part.strip() for part in row.split(","))
         canonical_bus = bus.lower().replace("00000000:", "0000:")
         maximum, current = _pci_link(canonical_bus)
         gpus.append(
@@ -86,6 +98,7 @@ def _gpu_inventory() -> list[dict[str, Any]]:
                 "pci_bus_id": canonical_bus,
                 "driver": driver,
                 "ecc_mode": ecc.lower(),
+                "ecc_pending_mode": ecc_pending.lower(),
                 "clocks": {
                     "graphics_mhz": int(graphics),
                     "memory_mhz": int(memory_clock),
@@ -156,10 +169,26 @@ def capture(
     torch_version: str,
     torch_device_count: int,
     triton_version: str,
+    profile_id: str | None = None,
 ) -> dict[str, Any]:
+    if profile_id is not None and profile_id not in PROFILE_IDS:
+        raise ValueError(f"profile_id must be one of {PROFILE_IDS}, got {profile_id!r}")
     commit = _run("git", "rev-parse", "HEAD")
     toolkit = _run("dpkg-query", "-W", "-f=${Version}", "nvidia-container-toolkit")
-    return {
+    gpus = _gpu_inventory()
+    if profile_id is not None:
+        expected = "enabled" if profile_id == "ecc-on" else "disabled"
+        mismatches = [
+            f"gpu index {gpu.get('index')}: current={gpu.get('ecc_mode')!r}, "
+            f"pending={gpu.get('ecc_pending_mode')!r}, expected={expected!r}"
+            for gpu in gpus
+            if gpu.get("ecc_mode") != expected or gpu.get("ecc_pending_mode") != expected
+        ]
+        if mismatches:
+            raise RuntimeError(
+                f"hardware ECC profile {profile_id!r} is not consistent: " + "; ".join(mismatches)
+            )
+    document = {
         "schema_name": "hardware-inventory.schema.json",
         "schema_version": 1,
         "evidence_status": "measured",
@@ -172,7 +201,7 @@ def capture(
             "numa_nodes": len(list(Path("/sys/devices/system/node").glob("node[0-9]*"))),
             "memory_bytes": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"),
         },
-        "gpus": _gpu_inventory(),
+        "gpus": gpus,
         "software": {
             "cuda_driver": _run(
                 "nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"
@@ -196,6 +225,9 @@ def capture(
             "commands": ["nvidia-smi", "sysfs", "lsblk", "dpkg-query"],
         },
     }
+    if profile_id is not None:
+        document["profile_id"] = profile_id
+    return document
 
 
 def main() -> int:
@@ -205,12 +237,14 @@ def main() -> int:
     parser.add_argument("--torch-version", required=True)
     parser.add_argument("--torch-device-count", required=True, type=int)
     parser.add_argument("--triton-version", required=True)
+    parser.add_argument("--profile-id", choices=PROFILE_IDS)
     args = parser.parse_args()
     document = capture(
         cuda_runtime=args.cuda_runtime,
         torch_version=args.torch_version,
         torch_device_count=args.torch_device_count,
         triton_version=args.triton_version,
+        profile_id=args.profile_id,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")

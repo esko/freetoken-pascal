@@ -1,0 +1,127 @@
+{
+  "schema_name": "qwen38-dual-p4-device-evidence.schema.json",
+  "schema_version": 1,
+  "evidence_status": "synthetic",
+  "evidence_kind": "dual-p4-direct-device-smoke",
+  "claim_status": "non-serving-device-only",
+  "repository_commit": "df89b6d429000000000000000000000000000000",
+  "hardware_inventory": {
+    "path": "results/hardware/hardware-inventory.json",
+    "sha256": "7cc1e9a6b39b6ff0b8d0a0cdafcba6d23d92f5767f25e4a764a95b2efec7b0b1",
+    "profile_id": "ecc-off",
+    "gpu_identities": [
+      {
+        "index": 0,
+        "uuid": "GPU-7af15080-238c-fd1d-66da-4f8984053664",
+        "pci_bus_id": "0000:02:00.0",
+        "pci_root": "pci0000:00",
+        "numa_node": 0,
+        "ecc_profile": "ecc-off"
+      },
+      {
+        "index": 1,
+        "uuid": "GPU-70e2a7db-7560-b18a-7a20-4295300c6a53",
+        "pci_bus_id": "0000:81:00.0",
+        "pci_root": "pci0000:80",
+        "numa_node": 1,
+        "ecc_profile": "ecc-off"
+      }
+    ]
+  },
+  "request": {
+    "kind": "direct-device-smoke",
+    "request_count": 0,
+    "prompt_tokens": 0,
+    "output_tokens": 0,
+    "timeout_seconds": 30
+  },
+  "warmup": {
+    "iterations": 1,
+    "elapsed_seconds": 0.2,
+    "max_duration_seconds": 15
+  },
+  "timing": {
+    "scope": "short-device-smoke",
+    "operation_seconds": 0.4,
+    "total_seconds": 0.6,
+    "measured_iterations": 1
+  },
+  "thermal": {
+    "qualification": "unqualified",
+    "peak_celsius": 36,
+    "observation_seconds": 0.6
+  },
+  "power": {
+    "qualification": "observed-only",
+    "peak_watts": 25,
+    "power_limit_watts": 75
+  },
+  "throttling": {
+    "qualification": "not-qualified",
+    "assessment": "not-assessed",
+    "throttle_events": 0,
+    "claim": false
+  },
+  "performance": {
+    "status": "not-claimed",
+    "claim": false,
+    "steady_state": false,
+    "tokens_per_second": null
+  },
+  "serving": {
+    "classification": "non-serving",
+    "model_loaded": false,
+    "model_forward": false,
+    "tps_claimed": false,
+    "thermal_qualified": false,
+    "dual_gpu_policy": "not-selected"
+  },
+  "devices": [
+    {
+      "index": 0,
+      "name": "Tesla P4",
+      "compute_capability": "6.1",
+      "memory_mib": 7580,
+      "uuid": "GPU-7af15080-238c-fd1d-66da-4f8984053664",
+      "pci_bus_id": "0000:02:00.0",
+      "pci_root": "pci0000:00",
+      "numa_node": 0,
+      "ecc_profile": "ecc-off",
+      "clocks": {"graphics_mhz": 885, "memory_mhz": 2999},
+      "temperature_celsius": 36,
+      "power_watts": 25,
+      "power_limit_watts": 75,
+      "throttle_status": "not-assessed",
+      "operation": "direct-device-addition",
+      "iterations": 1,
+      "allocation_bytes": 1048576,
+      "result": "passed"
+    },
+    {
+      "index": 1,
+      "name": "Tesla P4",
+      "compute_capability": "6.1",
+      "memory_mib": 7580,
+      "uuid": "GPU-70e2a7db-7560-b18a-7a20-4295300c6a53",
+      "pci_bus_id": "0000:81:00.0",
+      "pci_root": "pci0000:80",
+      "numa_node": 1,
+      "ecc_profile": "ecc-off",
+      "clocks": {"graphics_mhz": 885, "memory_mhz": 2999},
+      "temperature_celsius": 36,
+      "power_watts": 25,
+      "power_limit_watts": 75,
+      "throttle_status": "not-assessed",
+      "operation": "direct-device-addition",
+      "iterations": 1,
+      "allocation_bytes": 1048576,
+      "result": "passed"
+    }
+  ],
+  "claims": {
+    "model_execution": false,
+    "steady_state_tps": false,
+    "thermal_qualification": false,
+    "dual_p4_serving": false
+  }
+}

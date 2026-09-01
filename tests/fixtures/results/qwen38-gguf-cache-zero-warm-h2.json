@@ -1,0 +1,169 @@
+{
+  "schema_name": "qwen38-gguf-cache-zero-warm-h2-evidence.schema.json",
+  "schema_version": 1,
+  "evidence_status": "synthetic",
+  "evidence_kind": "single-p4-warm-cache",
+  "claim_status": "bounded-correctness-only",
+  "repository_commit": "3c9dc0422a4d52a973c85965287066c929068547",
+  "identity": {
+    "scope": "full-h2-model-ple-repository",
+    "source_schema_name": "qwen38-gguf-cache-zero-h2-evidence.schema.json",
+    "source_schema_version": 1,
+    "source_full_h2_evidence_sha256": "6b5bc0b0a5fbd20f4c2dce7b2a16bb6d945d7e5b05ed2bd1dc30a2d2c2d4dbf5",
+    "canonicalization": "canonical-json-sha256-v1",
+    "canonical_identity_sha256": "b5fb2685d3a5dfc71edb4e9a7d7ba7f36cba5ae827cfb8b9f89c5d7f2bb4aa41",
+    "repository_commit": "3c9dc0422a53fe97e07601dea48a8ca510e53c8c",
+    "repository_identity_sha256": "bc0c3f3295eaad2ab7de01b7f65048f33ad0e6c4aaf2b9b452544c27bf4d3f90",
+    "model": {
+      "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+      "revision": "c8b5954a88c2775c546b92593eda40ea041d3176",
+      "variant": "UD-Q4_K_XL",
+      "canonical_identity_sha256": "0e18d6ef6d0dc0db4f181df9cf1aa71c929e3a7b06a51f6ad8ecdd1a2e8eb6f6",
+      "shards": [
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+          "size": 10946624,
+          "sha256": "4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082",
+          "observed_sha256": "4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082",
+          "sha256_status": "verified"
+        },
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+          "size": 49859583136,
+          "sha256": "3f342f1c1580473f1ee94ddd5b28206e8c07a70fa1a366f59d1d6c922919a6c9",
+          "observed_sha256": "3f342f1c1580473f1ee94ddd5b28206e8c07a70fa1a366f59d1d6c922919a6c9",
+          "sha256_status": "verified"
+        },
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+          "size": 49376141504,
+          "sha256": "56758f40269cad5cd9b0d3d6fbae0f40f6d5be6de49e4ab392dbe83157d9cbd3",
+          "observed_sha256": "56758f40269cad5cd9b0d3d6fbae0f40f6d5be6de49e4ab392dbe83157d9cbd3",
+          "sha256_status": "verified"
+        },
+        {
+          "name": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+          "size": 12087983520,
+          "sha256": "753bda48b98ba4f1636134a90a967de1b2d3908a236c026e464777342e53510a",
+          "observed_sha256": "753bda48b98ba4f1636134a90a967de1b2d3908a236c026e464777342e53510a",
+          "sha256_status": "verified"
+        }
+      ]
+    },
+    "ple_artifact": {
+      "path": "/srv/nvme/qwen38/ple/ple.bin",
+      "canonical_identity_sha256": "3d2f5d375861e84151cd01daf4d46c21114c1dcedca2d5a2ec8b47c2ce9b1bf7",
+      "payload_sha256": "dd55c28902f38cd88134b2a569c51282c5ffce30080487e1a645740115c56cc3",
+      "manifest_sha256": "a516b658afa963094448d1a3a374541c3a05671b8eb7a3769d8c05be913e1ed4",
+      "payload_bytes": 28800138240,
+      "rows": 320001536,
+      "row_bytes": 90,
+      "codec": "IQ4_NL@1"
+    },
+    "hash_reuse": {
+      "source_identity": "full-h2-canonical",
+      "repository_commit": "reused-from-full-h2",
+      "model_shards": "verified-against-full-h2",
+      "ple_payload": "reused-from-full-h2",
+      "runtime_ple_integrity_hash": "performed",
+      "model_shard_hashes_recomputed": true,
+      "ple_identity_recomputed": false
+    }
+  },
+  "hardware_inventory": {
+    "path": "results/hardware/hardware-inventory.json",
+    "sha256": "7cc1e9a6b39b6ff0b8d0a0cdafcba6d23d92f5767f25e4a764a95b2efec7b0b1",
+    "profile_id": "ecc-off",
+    "device": {
+      "uuid": "GPU-7af15080-238c-fd1d-66da-4f8984053664",
+      "pci_bus_id": "0000:02:00.0",
+      "pci_root": "pci0000:00",
+      "numa_node": 0,
+      "ecc_profile": "ecc-off",
+      "clocks": {"graphics_mhz": 885, "memory_mhz": 2999},
+      "temperature_celsius": 54,
+      "power_watts": 25,
+      "power_limit_watts": 75,
+      "throttle_status": "not-assessed"
+    }
+  },
+  "request": {
+    "kind": "single-request",
+    "request_count": 1,
+    "concurrency": 1,
+    "prompt_tokens": 5,
+    "context_tokens": 5,
+    "max_new_tokens": 2,
+    "temperature": 0,
+    "timeout_seconds": 300
+  },
+  "warmup": {
+    "cache_state": "warm",
+    "iterations": 1,
+    "elapsed_seconds": 0.5,
+    "max_duration_seconds": 300
+  },
+  "timing": {
+    "scope": "bounded-warm-cache-request",
+    "startup_seconds": 1,
+    "warmup_seconds": 0.5,
+    "total_request_seconds": 5,
+    "total_seconds": 6,
+    "measured_iterations": 1
+  },
+  "thermal": {
+    "qualification": "unqualified",
+    "peak_celsius": 54,
+    "observation_seconds": 6
+  },
+  "power": {
+    "qualification": "observed-only",
+    "peak_watts": 25,
+    "power_limit_watts": 75
+  },
+  "throttling": {
+    "qualification": "not-qualified",
+    "assessment": "not-assessed",
+    "throttle_events": 0,
+    "claim": false
+  },
+  "performance": {
+    "status": "not-claimed",
+    "claim": false,
+    "steady_state": false,
+    "decode_tokens_per_second": null,
+    "prompt_tokens_per_second": null
+  },
+  "ple": {
+    "backend": "pread",
+    "cache_state": "warm",
+    "source_kind": "dedicated-artifact",
+    "logical_rows": 96,
+    "unique_rows": 96,
+    "application_reads": 96,
+    "packed_bytes": 8640,
+    "physical_read_bytes": 0,
+    "major_page_faults": 0,
+    "read_amplification": 0,
+    "identity_reused": true,
+    "runtime_integrity_hash": "performed",
+    "runtime_integrity_sha256": "dd55c28902f38cd88134b2a569c51282c5ffce30080487e1a645740115c56cc3"
+  },
+  "execution": {
+    "device_name": "Tesla P4",
+    "compute_capability": "6.1",
+    "gpu_count": 1,
+    "model_loaded": true,
+    "model_forward": true,
+    "expert_execution": "cpu",
+    "serving_scope": "single-p4-reference-only"
+  },
+  "output_token_ids": [201519, 8691],
+  "claims": {
+    "model_execution": true,
+    "single_p4_only": true,
+    "steady_state_tps": false,
+    "thermal_qualification": false,
+    "dual_p4_serving": false
+  }
+}

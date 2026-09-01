@@ -37,9 +37,15 @@ gpu:
       pcie_idle_observed: {generation: 1, width: 16}
   installed: true
   ecc:
-    current: enabled
+    current: disabled
+    current_profile: ecc-off
     intended_performance_profile: disabled
-    note: ECC-off usable VRAM requires a separate post-reset measurement
+    historical_profiles:
+      ecc-on:
+        current: enabled
+        status: historical
+        note: Earlier inventory and timing observations used ECC-on capacity.
+    note: Current and pending ECC state are both disabled under the approved ecc-off profile.
   thermal_qualification: unqualified
   sustained_load: not-run
   qualification_note: GPUs are intentionally throttled pending airflow optimization

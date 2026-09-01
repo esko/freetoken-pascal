@@ -49,6 +49,10 @@ cooling qualification and any self-hosted runner remain pending. The local hardw
 `scripts/check_hardware_inventory.py`; zero GPUs, a non-6.1 device, or fewer than two devices for a
 dual-P4 level is a hard failure before pytest starts. Verified environment flags then unlock the
 `sm61` and `dual_p4` markers. Otherwise pytest reports an explicit deferred skip reason.
+Measured inventory may additionally bind the immutable `ecc-on` or `ecc-off` profile. When a
+profile is requested, every GPU's current and pending ECC state must agree with it; mixed modes or
+a profile mismatch fail before device tests start. The current Gorilla operating profile is
+`ecc-off`. Earlier ECC-on observations remain separate historical evidence.
 
 Artifact retention is:
 
@@ -97,11 +101,46 @@ match are recorded without claiming a cryptographic content check. The dedicated
   `7594bce5b4`) recorded two ECC-disabled Tesla P4 cards on separate PCI roots and NUMA nodes,
   plus the PCIe Gen3 x4 NVMe on node 0. Seven short single-card tests and one dual-card discovery
   test passed. Active-load PCIe link qualification and cooling remain unqualified.
+- The identity-hardened bounded `dual-p4-short` producer at `cd8ce1dc44` ran on both ECC-off cards
+  without loading a model. One isolated 1 MiB addition per device completed in 0.394 seconds
+  (0.483 seconds total), with a 35 C peak and 23.58 W peak under the 75 W limit. The evidence binds
+  the dedicated inventory SHA-256
+  `d64d287fa25d429dcedcd097ace0c3a99fd5f2d6a5a62301165655848c986d17`, both unique
+  UUID/PCI-root/NUMA identities, and explicit non-serving/no-TPS/no-thermal-qualification claims.
+  Raw evidence is retained on Gorilla as `results/hardware/qwen38-dual-p4-device.json` with
+  SHA-256 `308583cfdcdac106727e25351f930039aee9d1a026cfd3b51c6a806f880f52c9` for the H2/H3
+  investigation window.
+- The bounded warm-cache producer at `fe6e7ca91c` reused canonical full-H2 artifact
+  SHA-256 `740e0c1ab79acf5f5473c70751f645bd6f1e91235cc0b826cb14e18529f16b7e`
+  instead of rehashing the four model shards; normal Engine startup still performed the dedicated
+  PLE integrity hash. Startup took 151.029 seconds. One deterministic two-token warmup took
+  114.488 seconds and included first-use GGUF CUDA extension compilation; the immediately repeated
+  identical five-token prompt plus two-token request took 5.244 seconds and returned the same IDs
+  `[201519, 8691]`. The measured request read 96 unique PLE rows/8,640 packed bytes through
+  `pread`, with zero major faults and zero observed physical storage-read bytes. Peak sampled GPU
+  state across the two requests was 52 C and 29.93 W under the 75 W limit. This is a single bounded
+  warm-call observation, not decode-only or steady-state TPS. Raw evidence is retained on Gorilla
+  as `results/hardware/qwen38-gguf-cache-zero-warm-h2.json` with SHA-256
+  `f4d0ad2189e62615554c7f15136921a60af11a8251a1b7e01871bf6b66e06385`; its dedicated
+  ECC-off inventory has SHA-256
+  `51d6e6654444b5b0983b83f3da5f0525888eccb5c1de894c1037bcafc6745a98`.
+  This retained observation predates the strengthened producer contract and is historical only:
+  same-size model content drift was not excluded cryptographically during that short run.
+- The identity-hardened warm producer at `cd8ce1dc44` then rehashed all four current model shards
+  against the canonical full-H2 identities before GPU acquisition. It retained the mandatory PLE
+  integrity pass and completed under the separate-process 300-second GPU-ownership watchdog.
+  Startup took 149.908 seconds, the deterministic warmup took 114.457 seconds, and the identical
+  measured request took 5.067 seconds; both returned `[201519, 8691]`. The measured request again
+  read 96 unique PLE rows/8,640 packed bytes through `pread`, with zero major faults and zero
+  observed physical storage-read bytes. Peak sampled state was 52 C and 30.31 W. Raw evidence has
+  SHA-256 `386afae5680e4f7ff8f2717f2e95e79137fe5c3f05fac572001fa1dc0747795b`; its dedicated
+  inventory has SHA-256 `ca6fc4b81d48b2a38e456f2ae187844f863dc4c2009414e786caab7f4f159156`.
 
 The complete 77.0 GiB expert bank was mapped/file-backed for this slice. No evidence was collected
 that all expert pages were prefaulted into DDR4 or protected from swap, so this run must not be
 described as proving resident/no-swap expert-bank behavior. The H2 run also did not provide cold-cache
-fault/read-amplification or model-shard cryptographic-hash evidence.
+fault/read-amplification evidence. The clean-tip pread rerun did provide model-shard cryptographic
+hash evidence; the earlier mmap/pread observations did not.
 
 The earlier clean-branch commit mappings establish source equivalence for the warm mmap/pread
 observations. Commit `3c9dc0422a` supplies the independent clean-tip cryptographic and execution
@@ -112,3 +151,18 @@ The reported approximately 0.18 output tokens per second divides two output toke
 prompt-plus-generation call and must not be presented as steady-state decode TPS. Cold-cache PLE
 fault/read-amplification, ECC-on comparison, long-context, and sustained thermal evidence remain
 separate required profiles.
+
+The short-evidence profiles deliberately keep these claims separate:
+
+- a warm-cache single-P4 request must stream-hash the current model split against the canonical
+  full-H2 identities before GPU acquisition, and Engine startup still performs its mandatory
+  dedicated-PLE integrity validation; a separate-process 300-second watchdog remains armed through
+  shutdown and the measured document is atomically published only after successful cleanup; the
+  outer 900-second process limit separately allows for CPU/NVMe hashing before GPU acquisition;
+- a direct dual-P4 probe measures only two-device identity, bounded allocation/arithmetic, topology,
+  and instantaneous telemetry, and must identify itself as non-serving;
+- neither profile establishes steady-state TPS, a selected dual-P4 policy, or thermal qualification.
+
+Each short profile binds the exact hardware inventory by SHA-256, including ECC profile, UUIDs,
+PCI roots, and NUMA nodes. The full H2 artifact remains authoritative for model, PLE, repository,
+and cache-zero execution identity.

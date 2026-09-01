@@ -9,6 +9,7 @@
     "schema_name": {"const": "hardware-inventory.schema.json"},
     "schema_version": {"const": 1},
     "evidence_status": {"enum": ["synthetic", "measured"]},
+    "profile_id": {"enum": ["ecc-on", "ecc-off"]},
     "captured_at": {"type": "string", "format": "date-time"},
     "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "host": {
@@ -38,6 +39,7 @@
           "driver": {"type": "string", "minLength": 1},
           "uuid": {"type": "string", "minLength": 1},
           "ecc_mode": {"enum": ["enabled", "disabled", "n/a"]},
+          "ecc_pending_mode": {"enum": ["enabled", "disabled", "n/a"]},
           "clocks": {
             "type": "object",
             "additionalProperties": false,
@@ -127,6 +129,44 @@
           },
           "software": {
             "required": ["cuda_runtime", "nvidia_container_toolkit", "torch_cuda_device_count"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"profile_id": {"const": "ecc-on"}},
+        "required": ["profile_id"]
+      },
+      "then": {
+        "properties": {
+          "gpus": {
+            "items": {
+              "required": ["ecc_mode", "ecc_pending_mode"],
+              "properties": {
+                "ecc_mode": {"const": "enabled"},
+                "ecc_pending_mode": {"const": "enabled"}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"profile_id": {"const": "ecc-off"}},
+        "required": ["profile_id"]
+      },
+      "then": {
+        "properties": {
+          "gpus": {
+            "items": {
+              "required": ["ecc_mode", "ecc_pending_mode"],
+              "properties": {
+                "ecc_mode": {"const": "disabled"},
+                "ecc_pending_mode": {"const": "disabled"}
+              }
+            }
           }
         }
       }
