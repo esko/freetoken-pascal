@@ -236,6 +236,19 @@ def test_qsa_h2_fixture_is_synthetic_bounded_and_explicitly_unmeasured() -> None
             lambda value: value["profile"].update(topk_backend="triton"),
             "topk_backend must match selected_path",
         ),
+        (
+            lambda value: value["samples"][0]["allocator_after"].update(
+                driver_free_bytes=value["samples"][0]["allocator_after"][
+                    "driver_total_bytes"
+                ]
+                + 1
+            ),
+            "free bytes exceed driver capacity",
+        ),
+        (
+            lambda value: value["samples"][0].update(total_elapsed_ns=1),
+            "total_elapsed_ns is below composite phase sum",
+        ),
     ),
 )
 def test_qsa_h2_semantics_reject_forged_evidence(

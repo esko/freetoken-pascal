@@ -1097,6 +1097,8 @@ def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
         }
         if sample["phase_elapsed_ns"] != phase_sums:
             errors.append(f"samples[{index}].phase_elapsed_ns must equal raw phase-event sums")
+        if sample["total_elapsed_ns"] < sum(phase_sums.values()):
+            errors.append(f"samples[{index}].total_elapsed_ns is below composite phase sum")
         if set(event["path"] for event in events) != {selected_path}:
             errors.append(f"samples[{index}].phase_events path must match profile.selected_path")
         if set(event["phase"] for event in events) != set(sample["phase_elapsed_ns"]):
@@ -1115,6 +1117,10 @@ def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
             if snapshot["allocator_reserved_bytes"] > snapshot["driver_total_bytes"]:
                 errors.append(
                     f"samples[{index}].allocator_{label} reserved bytes exceed driver capacity"
+                )
+            if snapshot["driver_free_bytes"] > snapshot["driver_total_bytes"]:
+                errors.append(
+                    f"samples[{index}].allocator_{label} free bytes exceed driver capacity"
                 )
 
     for key, statistic in statistics_by_key.items():
@@ -1193,13 +1199,15 @@ def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
             if any(value is None for value in values):
                 errors.append(f"allocator_checkpoints[{index}] measured fields cannot be null")
             else:
-                total, _free, allocated, reserved, high_water, _count, _retry, _failure = values
+                total, free, allocated, reserved, high_water, _count, _retry, _failure = values
                 if allocated > reserved:
                     errors.append(f"allocator_checkpoints[{index}] allocated exceeds reserved")
                 if high_water < allocated:
                     errors.append(f"allocator_checkpoints[{index}] high-water is below allocated")
                 if reserved > total:
                     errors.append(f"allocator_checkpoints[{index}] reserved exceeds capacity")
+                if free > total:
+                    errors.append(f"allocator_checkpoints[{index}] free bytes exceed capacity")
         elif any(value is not None for value in values):
             errors.append(f"allocator_checkpoints[{index}] unmeasured fields must be null")
     required_unmeasured = {"startup_canary", "cancellation_state_restore"}
