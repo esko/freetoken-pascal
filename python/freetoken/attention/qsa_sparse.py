@@ -32,9 +32,9 @@ static buffers (``prepare_for_replay``) so the whole path is CUDA-graph capturab
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 import torch
 
@@ -63,6 +63,26 @@ _LOGITS_WORKSPACE_BYTES = QSA_LOGITS_WORKSPACE_BYTES
 
 
 TORCH_TOPK_ENV = "FREETOKEN_QSA_TORCH_TOPK"
+
+QSAPhase = Literal[
+    "store_kv",
+    "index_cache_composite",
+    "selection_composite",
+    "selected_row_attention",
+]
+QSAPhaseEvent = Literal["begin", "end"]
+
+
+class QSAPhaseMetadata(TypedDict):
+    """Scalar identity attached to an eager reference phase boundary."""
+
+    phase: QSAPhase
+    layer_id: int
+    slot: int
+    path: str
+
+
+QSAPhaseObserver = Callable[[QSAPhaseEvent, Mapping[str, object]], None]
 
 
 def _resolve_block_topk() -> Callable | None:
@@ -145,11 +165,20 @@ class QSASparseAttnBackend(BaseAttnBackend):
 
         self._torch_reference = self.reference_only or not is_sm70_supported()
         self._block_topk_kernel = None if self._torch_reference else _resolve_block_topk()
-        path = "torch-fp32-reference" if self._torch_reference else "triton"
-        logger.info_rank0(f"QSA sparse attention path: {path}")
+        self.selected_path = "torch-fp32-reference" if self._torch_reference else "triton"
+        self._phase_observer: QSAPhaseObserver | None = None
+        logger.info_rank0(f"QSA sparse attention path: {self.selected_path}")
         # decode staging (static buffers under CUDA graphs; eager decode snapshots per step)
         self._graph: dict[str, torch.Tensor] = {}
         self.capture_bs: list[int] = []
+
+    def set_phase_observer(self, observer: QSAPhaseObserver | None) -> None:
+        """Attach scalar-only diagnostics to the eager Torch reference path."""
+        if observer is not None and not callable(observer):
+            raise TypeError("QSA phase observer must be callable or None")
+        if observer is not None and not self._torch_reference:
+            raise RuntimeError("QSA phase observer is eager Torch-reference only")
+        self._phase_observer = observer
 
     @staticmethod
     def _qsa_group(config: ModelConfig):
@@ -288,6 +317,86 @@ class QSASparseAttnBackend(BaseAttnBackend):
         md = batch.attn_metadata
         assert isinstance(md, QSASparseMetadata)
         slot = self._idx_slot[layer_id]
+        if self._phase_observer is None:
+            return self._qsa_forward_unobserved(q, k, v, index, layer_id, batch, md, slot)
+        if self._torch_reference:
+            self._observe_phase(
+                "store_kv",
+                layer_id,
+                slot,
+                lambda: self._store_kv_torch(k, v, batch.out_loc, layer_id),
+            )
+        else:
+            self._observe_phase(
+                "store_kv",
+                layer_id,
+                slot,
+                lambda: self.kvcache.store_kv(k, v, batch.out_loc, layer_id),
+            )
+
+        self._observe_phase(
+            "index_cache_composite",
+            layer_id,
+            slot,
+            lambda: self._maintain_index_cache(index, md, slot, batch),
+        )
+
+        if self._torch_reference:
+            indices = self._observe_phase(
+                "selection_composite",
+                layer_id,
+                slot,
+                lambda: self._select(index, md, slot),
+            )
+            return self._observe_phase(
+                "selected_row_attention",
+                layer_id,
+                slot,
+                lambda: self._attend_torch(
+                    q,
+                    self.kvcache.k_cache(layer_id),
+                    self.kvcache.v_cache(layer_id),
+                    indices,
+                    md.block_table,
+                    md.token_to_req,
+                ),
+            )
+
+        from freetoken.kernel.triton.qsa import qsa_sparse_paged_attention
+
+        indices = self._observe_phase(
+            "selection_composite",
+            layer_id,
+            slot,
+            lambda: self._select(index, md, slot),
+        )
+        return self._observe_phase(
+            "selected_row_attention",
+            layer_id,
+            slot,
+            lambda: qsa_sparse_paged_attention(
+                q,
+                self.kvcache.k_cache(layer_id),
+                self.kvcache.v_cache(layer_id),
+                indices,
+                md.block_table,
+                md.token_to_req,
+                torch.empty_like(q),
+            ),
+        )
+
+    def _qsa_forward_unobserved(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        index,
+        layer_id: int,
+        batch: Batch,
+        md: QSASparseMetadata,
+        slot: int,
+    ) -> torch.Tensor:
+        """Original allocation path, retained when diagnostics are disabled."""
         if self._torch_reference:
             self._store_kv_torch(k, v, batch.out_loc, layer_id)
         else:
@@ -325,6 +434,52 @@ class QSASparseAttnBackend(BaseAttnBackend):
             md.token_to_req,
             torch.empty_like(q),
         )
+
+    def _observe_phase(
+        self,
+        phase: QSAPhase,
+        layer_id: int,
+        slot: int,
+        fn: Callable[[], torch.Tensor | None],
+    ) -> torch.Tensor | None:
+        observer = self._phase_observer
+        metadata: QSAPhaseMetadata = {
+            "phase": phase,
+            "layer_id": int(layer_id),
+            "slot": int(slot),
+            "path": self.selected_path,
+        }
+        if observer is not None:
+            observer("begin", metadata)
+        phase_error: BaseException | None = None
+        try:
+            return fn()
+        except BaseException as error:
+            phase_error = error
+            raise
+        finally:
+            if observer is not None:
+                try:
+                    observer("end", metadata)
+                except Exception:
+                    if phase_error is None:
+                        raise
+                    logger.exception(
+                        "QSA phase observer end callback failed while preserving phase error"
+                    )
+
+    def _maintain_index_cache(self, index, md: QSASparseMetadata, slot: int, batch: Batch) -> None:
+        if md.block_table is None:
+            self._snapshot_decode(md, batch)
+        if slot == 0 or md.cmp_rows is None:
+            # Rebuilt at the first QSA layer of every forward, not cached on the metadata: a
+            # capture batch runs its warmup and its capture through ONE metadata object, and a
+            # cached plan would bake the warmup's addresses into the graph.
+            self._plan_index_writes(md, batch)
+        if self._torch_reference:
+            self._update_index_cache_torch(index, md, slot, batch)
+        else:
+            self._update_index_cache(index, md, slot)
 
     def _store_kv_torch(
         self,
@@ -439,9 +594,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
         rotated = value[:, :rotary_dim]
         half = rotary_dim // 2
         partner = torch.cat((-rotated[:, half:], rotated[:, :half]), dim=-1)
-        rotated = rotated * torch.cat((cos, cos), dim=-1) + partner * torch.cat(
-            (sin, sin), dim=-1
-        )
+        rotated = rotated * torch.cat((cos, cos), dim=-1) + partner * torch.cat((sin, sin), dim=-1)
         return torch.cat((rotated, value[:, rotary_dim:]), dim=-1).to(dtype=x.dtype)
 
     def _update_index_cache_torch(
@@ -535,8 +688,12 @@ class QSASparseAttnBackend(BaseAttnBackend):
             )
             if visible_blocks:
                 block_ids = torch.arange(visible_blocks, dtype=torch.long, device=index.q.device)
-                page_ids = md.block_table[request].to(torch.long).index_select(
-                    0, torch.div(block_ids, self.cmp_page_size, rounding_mode="floor")
+                page_ids = (
+                    md.block_table[request]
+                    .to(torch.long)
+                    .index_select(
+                        0, torch.div(block_ids, self.cmp_page_size, rounding_mode="floor")
+                    )
                 )
                 keys = cmp_pages[page_ids, block_ids % self.cmp_page_size, 0]
                 scores = torch.relu(q_index[row].float() @ keys.float().transpose(0, 1)).sum(0)
@@ -765,4 +922,11 @@ class QSASparseAttnBackend(BaseAttnBackend):
         self._graph = {}
 
 
-__all__ = ["QSASparseAttnBackend", "QSASparseMetadata"]
+__all__ = [
+    "QSAPhase",
+    "QSAPhaseEvent",
+    "QSAPhaseMetadata",
+    "QSAPhaseObserver",
+    "QSASparseAttnBackend",
+    "QSASparseMetadata",
+]
