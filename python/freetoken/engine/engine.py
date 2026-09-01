@@ -1587,6 +1587,13 @@ def _preflight_qwen_gguf_cpu_engine_config(
         raise ValueError(
             f"Qwen GGUF PLE backend must be 'mmap' or 'pread', got {ple_backend!r}"
         )
+    ple_warm_mode = getattr(config, "ple_warm_mode", "cold")
+    artifact_warm_modes = {"cold", "page-cache-warm", "targeted", "full-ple-warm"}
+    if ple_warm_mode not in artifact_warm_modes:
+        raise ValueError(
+            "Qwen GGUF dedicated PLE warm mode must be one of "
+            f"{sorted(artifact_warm_modes)}, got {ple_warm_mode!r}"
+        )
     threads = getattr(config, "moe_cpu_threads", 0)
     if isinstance(threads, bool) or not isinstance(threads, int) or threads < 0:
         raise ValueError(
