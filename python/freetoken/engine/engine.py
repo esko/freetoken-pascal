@@ -60,6 +60,31 @@ def _load_model_host_resources(model, config: EngineConfig) -> int:
     return 0
 
 
+def _qwen_gguf_cpu_workspace_max_tokens(config: EngineConfig) -> int:
+    """Resolve the finite per-forward token bound for the serial GGUF CPU bridge.
+
+    ``max_extend_tokens`` is the scheduler's chunk-prefill limit when present; the model's
+    ``max_forward_len``/``max_seq_len`` remains the absolute context limit.  Taking the
+    smallest configured positive bound avoids allocating for an impossible request while
+    making a later bridge call unable to grow the workspace silently.
+    """
+    bounds: list[tuple[str, int]] = []
+    for name in ("max_forward_len", "max_extend_tokens", "max_seq_len"):
+        if not hasattr(config, name):
+            continue
+        value = getattr(config, name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"Qwen GGUF CPU {name} must be a positive integer, got {value!r}")
+        bounds.append((name, value))
+    if not bounds:
+        # Standalone fixture seams do not carry scheduler geometry; decode still has a
+        # deterministic one-token bound rather than an unlimited implicit allocation.
+        return 1
+    return min(value for _, value in bounds)
+
+
 def _initialize_qwen_gguf_cpu_composition(model, config: EngineConfig):
     """Build the cache-zero Qwen GGUF composition as one transactional unit.
 
@@ -69,23 +94,18 @@ def _initialize_qwen_gguf_cpu_composition(model, config: EngineConfig):
     allocation makes the startup contract fixture-testable while the Engine remains CUDA
     bound at its outer constructor.
     """
-    _validate_qwen_gguf_cpu_engine_config(config)
+    _preflight_qwen_gguf_cpu_engine_config(config, require_ple_artifact=True)
     from freetoken.moe.gguf_cpu import open_qwen_gguf_cpu_expert_bundle
 
     ple_artifact_path = getattr(config, "ple_artifact_path", None)
-    if not ple_artifact_path:
-        raise ValueError(
-            "Qwen GGUF cache-zero Engine startup requires config.ple_artifact_path "
-            "(the dedicated PLE artifact); embedded GGUF PLE is not used"
-        )
     model_config = config.model_config
+    workspace_max_tokens = _qwen_gguf_cpu_workspace_max_tokens(config)
     bundle = open_qwen_gguf_cpu_expert_bundle(
         config.model_path,
         top_k=int(model_config.num_experts_per_tok),
         num_threads=int(getattr(config, "moe_cpu_threads", 0)),
-        # Keep startup memory bounded; the bridge grows its serial workspace for the actual
-        # prefill token count before execution.
-        max_tokens=1,
+        # The configured scheduler/sequence bound is the bridge's hard allocation limit.
+        max_tokens=workspace_max_tokens,
         max_routes=int(model_config.num_experts_per_tok),
         cache_size=0,
         ple_artifact_path=ple_artifact_path,
@@ -405,6 +425,11 @@ class Engine:
         self._gguf_cpu_expert_bundle = None
         self._gguf_cpu_expert_bundle_owned = False
         try:
+            # Reject the narrow Qwen GGUF contract before CUDA/model construction.  This is
+            # intentionally pure: invalid TP, request, cache, graph, or artifact settings must
+            # not create a model and then fail after a partial weight load.
+            if _is_qwen_gguf_expert_config(getattr(config, "model_config", None)):
+                _preflight_qwen_gguf_cpu_engine_config(config, require_ple_artifact=True)
             self._initialize(config)
         except BaseException:
             # Host-bank resources may already be live when any later startup step
@@ -428,6 +453,8 @@ class Engine:
             format_compatibility_profile(runtime_compatibility_profile(self.device.index))
         )
         _adjust_config(config)
+        if _is_qwen_gguf_expert_config(config.model_config):
+            _preflight_qwen_gguf_cpu_engine_config(config, require_ple_artifact=True)
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
@@ -487,9 +514,7 @@ class Engine:
         self._post_weights_free = post_weights_free
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
-        if is_offload_moe_backend(config.moe_backend) and not _is_qwen_gguf_expert_config(
-            config.model_config
-        ):
+        if _should_initialize_offload_moe_cache(config):
             self._init_offload_moe_cache(config)
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
@@ -1316,17 +1341,18 @@ class Engine:
                 self._expert_banks = None
 
         # Qwen's PLE table is owned by the model rather than the generic expert-bank cache.
-        # Mark the transition before invoking model code so repeated shutdown and re-entrant
-        # rollback cannot close the same model resource twice.
+        # Only mark the transition after close_host_resources succeeds.  A transient close
+        # failure must remain retryable during Engine rollback/shutdown.
         if getattr(self, "_model_host_resources_closed", False):
             return
-        self._model_host_resources_closed = True
         close_host_resources = getattr(getattr(self, "model", None), "close_host_resources", None)
         if callable(close_host_resources):
             try:
                 close_host_resources()
             except Exception as exc:
                 logger.error(f"Model host-resource cleanup failed: {exc}")
+                return
+        self._model_host_resources_closed = True
 
 
 def _profile_gpu(index: "int | None" = None) -> Tuple[str | None, str | None]:
@@ -1501,8 +1527,19 @@ def _is_qwen_gguf_expert_config(model_config) -> bool:
     )
 
 
-def _validate_qwen_gguf_cpu_engine_config(config: EngineConfig) -> None:
-    """Validate the deliberately narrow Engine-side GGUF CPU contract."""
+def _should_initialize_offload_moe_cache(config: EngineConfig) -> bool:
+    """Keep the homogeneous cache constructor out of the Qwen GGUF cache-zero path."""
+    return is_offload_moe_backend(config.moe_backend) and not _is_qwen_gguf_expert_config(
+        config.model_config
+    )
+
+
+def _preflight_qwen_gguf_cpu_engine_config(
+    config: EngineConfig,
+    *,
+    require_ple_artifact: bool,
+) -> None:
+    """Purely validate the narrow Qwen GGUF CPU contract before model construction."""
     model_config = getattr(config, "model_config", None)
     if not _is_qwen_gguf_expert_config(model_config):
         raise ValueError(
@@ -1513,6 +1550,12 @@ def _validate_qwen_gguf_cpu_engine_config(config: EngineConfig) -> None:
     if tp_info is None or int(getattr(tp_info, "size", 0)) != 1:
         size = "unknown" if tp_info is None else getattr(tp_info, "size", "unknown")
         raise ValueError(f"Qwen GGUF CPU Engine requires TP=1, got {size}")
+    backend = getattr(config, "moe_backend", "auto")
+    if backend not in ("auto", "cpu"):
+        raise ValueError(
+            "Qwen GGUF routed experts require the cache-zero CPU bridge; "
+            f"got moe_backend={backend!r}"
+        )
     if int(getattr(config, "max_running_req", 1)) != 1:
         raise ValueError("Qwen GGUF CPU Engine supports one decode request at a time")
     if int(getattr(config, "moe_cache_size", 0)) != 0:
@@ -1532,12 +1575,29 @@ def _validate_qwen_gguf_cpu_engine_config(config: EngineConfig) -> None:
         raise ValueError("Qwen GGUF CPU Engine attachment does not support CUDA graphs")
     if int(getattr(config, "cuda_graph_max_bs", 0) or 0) > 0:
         raise ValueError("Qwen GGUF CPU Engine attachment does not support CUDA graphs")
+    if require_ple_artifact:
+        artifact = getattr(config, "ple_artifact_path", None)
+        if not isinstance(artifact, (str, bytes, os.PathLike)) or not str(artifact).strip():
+            raise ValueError(
+                "Qwen GGUF cache-zero Engine startup requires config.ple_artifact_path "
+                "(the dedicated PLE artifact); embedded GGUF PLE is not used"
+            )
+    ple_backend = getattr(config, "ple_backend", "mmap")
+    if ple_backend not in {"mmap", "pread"}:
+        raise ValueError(
+            f"Qwen GGUF PLE backend must be 'mmap' or 'pread', got {ple_backend!r}"
+        )
     threads = getattr(config, "moe_cpu_threads", 0)
     if isinstance(threads, bool) or not isinstance(threads, int) or threads < 0:
         raise ValueError(
             "Qwen GGUF CPU Engine moe_cpu_threads must be non-negative, "
             f"got {threads!r}"
         )
+
+
+def _validate_qwen_gguf_cpu_engine_config(config: EngineConfig) -> None:
+    """Validate the deliberately narrow explicit Engine attachment contract."""
+    _preflight_qwen_gguf_cpu_engine_config(config, require_ple_artifact=False)
 
 
 def _guard_qwen_gguf_engine_setup(config: EngineConfig) -> None:
@@ -1636,13 +1696,9 @@ def _adjust_config(config: EngineConfig):
     expert_quant = getattr(model_config, "expert_quant", "none")
 
     if _is_qwen_gguf_expert_config(model_config):
-        if config.moe_backend not in ("auto", "cpu"):
-            raise ValueError(
-                "Qwen GGUF routed experts require the cache-zero CPU bridge; "
-                f"got moe_backend={config.moe_backend!r}"
-            )
-        if config.max_running_req != 1:
-            raise ValueError("Qwen GGUF cache-zero startup supports one request at a time")
+        # Validate user-provided values before resolving them to cache-zero defaults.  This
+        # keeps an accidental cache/TP/graph request from being silently accepted.
+        _preflight_qwen_gguf_cpu_engine_config(config, require_ple_artifact=False)
         override("moe_backend", "cpu")
         override("moe_cache_size", 0)
         override("moe_cache_rate", None)

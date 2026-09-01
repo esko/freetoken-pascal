@@ -560,6 +560,38 @@ def test_bundle_accepts_single_request_prefill_mode() -> None:
     bundle.close()
 
 
+def test_bundle_reuses_configured_workspace_and_rejects_over_bound_before_growth() -> None:
+    torch = pytest.importorskip("torch")
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle, UnsupportedGGUFCpuConfiguration
+
+    bundle = QwenGGUFCpuExpertBundle.from_host(
+        _host(), top_k=1, mode="scalar", max_tokens=2, max_routes=1
+    )
+    try:
+        plan = bundle.workspace_plan
+        output = bundle.prefill(
+            0,
+            torch.ones((2, 256), dtype=torch.float32),
+            torch.ones((2, 1), dtype=torch.float32),
+            torch.zeros((2, 1), dtype=torch.int32),
+        )
+        assert output.shape == (2, 256)
+        assert bundle.workspace_plan is plan
+        with pytest.raises(UnsupportedGGUFCpuConfiguration, match="workspace bound 2"):
+            bundle.prefill(
+                0,
+                torch.ones((3, 256), dtype=torch.float32),
+                torch.ones((3, 1), dtype=torch.float32),
+                torch.zeros((3, 1), dtype=torch.int32),
+            )
+        assert bundle.workspace_plan is plan
+        with pytest.raises(UnsupportedGGUFCpuConfiguration, match="workspace bound 1"):
+            bundle.prepare(max_tokens=2, max_routes=2)
+        assert bundle.workspace_plan is plan
+    finally:
+        bundle.close()
+
+
 def test_bundle_does_not_replace_explicit_zero_route_workspace() -> None:
     from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
 

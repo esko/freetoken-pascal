@@ -493,6 +493,9 @@ def convert_gguf_ple_to_artifact(source: str | Path, output: str | Path) -> Path
             "format": "freetoken-pascal-ple-v1",
             "version": 1,
             "payload": "ple.bin",
+            # The serving artifact is a raw tensor payload.  Keep this explicit so an
+            # artifact descriptor can never accidentally inherit the source GGUF offset.
+            "data_offset": 0,
             "tensor_name": descriptor.tensor_name,
             "quant_type": descriptor.quant_type,
             "quant_name": descriptor.quant_name,
@@ -1418,6 +1421,13 @@ class MappedPLETable:
             raise ValueError("PLE artifact manifest missing geometry or checksum")
         if manifest.get("payload") != "ple.bin":
             raise ValueError("invalid PLE artifact payload name")
+        artifact_data_offset = manifest.get("data_offset", manifest.get("offset", 0))
+        if (
+            isinstance(artifact_data_offset, bool)
+            or not isinstance(artifact_data_offset, int)
+            or artifact_data_offset != 0
+        ):
+            raise ValueError("PLE artifact data_offset must be zero")
         codec_value = manifest.get("codec")
         if codec_value is None:
             # The original v1 artifact schema identified IQ4_NL through the

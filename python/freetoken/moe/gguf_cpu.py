@@ -220,6 +220,8 @@ class QwenGGUFCpuExpertBundle:
         requested_num_threads: int | None = None,
         effective_num_threads: int = 1,
         worker_plan: WorkerPlan | None = None,
+        workspace_max_tokens: int = 1,
+        workspace_max_routes: int = 0,
     ) -> None:
         self.host = host
         self.layout = layout
@@ -228,6 +230,10 @@ class QwenGGUFCpuExpertBundle:
         self._requested_num_threads = requested_num_threads
         self._effective_num_threads = effective_num_threads
         self._worker_plan = worker_plan
+        self._workspace_max_tokens = _checked_int(workspace_max_tokens, "workspace_max_tokens")
+        self._workspace_max_routes = _checked_int(workspace_max_routes, "workspace_max_routes")
+        if self._workspace_max_tokens <= 0 or self._workspace_max_routes < 0:
+            raise ValueError("workspace bounds must be positive tokens and non-negative routes")
         self._last_execution_telemetry: CpuExecutionTelemetry | None = None
         self._closed = False
         self._host_owner_token: object | None = None
@@ -326,6 +332,7 @@ class QwenGGUFCpuExpertBundle:
             message += ", ".join(unsupported)
             raise UnsupportedGGUFCpuConfiguration(message)
         executor: Q4KExecutor | None = None
+        resolved_max_routes = max_routes if max_routes is not None else top_k
         try:
             executor = Q4KExecutor(
                 layout,
@@ -340,7 +347,7 @@ class QwenGGUFCpuExpertBundle:
             )
             executor.prepare(
                 max_tokens=max_tokens,
-                max_routes=max_routes if max_routes is not None else top_k,
+                max_routes=resolved_max_routes,
             )
         except BaseException:
             if executor is not None:
@@ -360,6 +367,8 @@ class QwenGGUFCpuExpertBundle:
                 requested_num_threads=requested_num_threads,
                 effective_num_threads=effective_num_threads,
                 worker_plan=worker_plan,
+                workspace_max_tokens=max_tokens,
+                workspace_max_routes=resolved_max_routes,
             )
             bundle._host_owner_token = host.claim_cpu_bridge()
             return bundle
@@ -443,6 +452,18 @@ class QwenGGUFCpuExpertBundle:
 
     def prepare(self, max_tokens: int, max_routes: int) -> Any:
         self._require_open()
+        max_tokens = _checked_int(max_tokens, "max_tokens")
+        max_routes = _checked_int(max_routes, "max_routes")
+        if max_tokens > self._workspace_max_tokens:
+            raise UnsupportedGGUFCpuConfiguration(
+                f"requested max_tokens={max_tokens} exceeds configured CPU workspace bound "
+                f"{self._workspace_max_tokens}"
+            )
+        if max_routes > self._workspace_max_routes:
+            raise UnsupportedGGUFCpuConfiguration(
+                f"requested max_routes={max_routes} exceeds configured CPU workspace bound "
+                f"{self._workspace_max_routes}"
+            )
         return self.executor.prepare(max_tokens=max_tokens, max_routes=max_routes)
 
     @property
@@ -484,6 +505,28 @@ class QwenGGUFCpuExpertBundle:
             if value.device.type != "cpu":
                 raise ValueError(f"{name} must be a CPU tensor, got {value.device}")
 
+        # Reject over-bound requests before Torch->NumPy conversion or any workspace
+        # re-preparation.  The configured bound is established by Engine startup from the
+        # scheduler/model limits and is deliberately finite for this correctness slice.
+        if hidden_states.ndim != 2:
+            raise ValueError(f"hidden_states must be rank 2, got {tuple(hidden_states.shape)}")
+        if topk_weights.ndim != 2 or topk_ids.ndim != 2:
+            raise ValueError("topk_weights and topk_ids must be rank 2")
+        if topk_weights.shape != topk_ids.shape:
+            raise ValueError("topk_weights and topk_ids shapes disagree")
+        requested_tokens = int(hidden_states.shape[0])
+        requested_routes = int(topk_ids.shape[1])
+        if requested_tokens > self._workspace_max_tokens:
+            raise UnsupportedGGUFCpuConfiguration(
+                f"request token count {requested_tokens} exceeds configured CPU workspace "
+                f"bound {self._workspace_max_tokens}"
+            )
+        if requested_routes > self._workspace_max_routes:
+            raise UnsupportedGGUFCpuConfiguration(
+                f"request route count {requested_routes} exceeds configured CPU workspace "
+                f"bound {self._workspace_max_routes}"
+            )
+
         allowed_hidden = {torch.float16, torch.float32}
         if hasattr(torch, "bfloat16"):
             allowed_hidden.add(torch.bfloat16)
@@ -502,17 +545,13 @@ class QwenGGUFCpuExpertBundle:
         hidden_np = hidden_states.detach().contiguous().to(dtype=torch.float32).numpy()
         weights_np = topk_weights.detach().contiguous().to(dtype=torch.float32).numpy()
         ids_np = topk_ids.detach().contiguous().to(dtype=torch.int32).numpy()
-        # The first request is normally prepared by startup, but a correctness-first
-        # single-request prefill may be longer than the decode-sized workspace.  The eager
-        # bridge serializes calls, so growing the bounded workspace here is transactional
-        # and cannot race an execution.
         plan = self.workspace_plan
-        requested_tokens = int(hidden_states.shape[0])
-        requested_routes = int(ids_np.shape[1])
+        # The executor was prepared to the configured bound at startup.  Keep this check in
+        # the adapter as a defensive invariant in case a caller manually re-prepared it smaller.
         if requested_tokens > int(plan.max_tokens) or requested_routes > int(plan.max_routes):
-            self.prepare(
-                max_tokens=max(requested_tokens, int(plan.max_tokens)),
-                max_routes=max(requested_routes, int(plan.max_routes)),
+            raise UnsupportedGGUFCpuConfiguration(
+                f"request shape ({requested_tokens}, {requested_routes}) exceeds prepared "
+                f"workspace ({plan.max_tokens}, {plan.max_routes})"
             )
         try:
             result = self.executor.execute(
@@ -575,6 +614,8 @@ class QwenGGUFCpuExpertBundle:
             "kernel_census": self.kernel_census,
             "requested_num_threads": self._requested_num_threads,
             "effective_num_threads": self._effective_num_threads,
+            "workspace_max_tokens": self._workspace_max_tokens,
+            "workspace_max_routes": self._workspace_max_routes,
             "actual_thread_count": None if execution is None else execution.thread_count,
             "threading_fallback_reason": self.threading_fallback_reason,
             "affinity_telemetry": self.affinity_telemetry,
