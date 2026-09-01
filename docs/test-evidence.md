@@ -77,7 +77,7 @@ match are recorded without claiming a cryptographic content check. The dedicated
   for the complete prompt plus generation call, the same 96 rows and 8,640 packed bytes through 96
   positional reads, `POSIX_FADV_RANDOM`, 23 minor faults, and zero observed major faults or
   block-device reads on the warm cache.
-- Run telemetry reported every routed layer as `mixed_avx2`, eight actual worker threads with
+- Run telemetry reported direct AVX2 kernels for every routed layer, eight actual worker threads with
   verified affinity, CPU execution, and a file-backed GGUF expert source. This is an observation
   from the retained run record; an H2 gate assertion for each layer and worker/affinity field is
   still required before treating it as a qualification claim. No SSD or GPU expert execution

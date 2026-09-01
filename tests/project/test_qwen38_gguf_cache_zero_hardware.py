@@ -308,7 +308,13 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
         assert execution, "CPU expert execution telemetry was not emitted"
         expected_cpu_threads = int(os.environ.get("FREETOKEN_PASCAL_CPU_THREADS", "8"))
         assert len(expert_telemetry) == 48
-        assert all(str(item["backend"]) == "mixed_avx2" for item in execution)
+        direct_avx2_backends = {"q4_k_avx2", "mixed_gemv_avx2", "mixed_avx2"}
+        assert all(str(item["backend"]) in direct_avx2_backends for item in execution)
+        assert all(
+            item["kernel_census"]
+            and all(str(kernel).endswith("_avx2") for kernel in item["kernel_census"])
+            for item in execution
+        )
         assert all(int(item["thread_count"]) == expected_cpu_threads for item in execution)
         for layer_telemetry in expert_telemetry.values():
             affinity = layer_telemetry["affinity_telemetry"]
@@ -328,6 +334,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
         evidence = {
             "schema_name": "qwen38-gguf-cache-zero-h2-evidence.schema.json",
             "schema_version": 1,
+            "evidence_status": "measured",
             "model": model_identity,
             "ple_artifact": ple_identity,
             "hardware": p4_identity,

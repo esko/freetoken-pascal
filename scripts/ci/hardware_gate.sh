@@ -102,6 +102,7 @@ run_single_h2() {
     -e FREETOKEN_SM61_RUNNER_VERIFIED=1
     -e FREETOKEN_DISABLE_KERNEL_CACHE=1
     -e "FREETOKEN_PASCAL_MODEL_PATH=${FREETOKEN_PASCAL_MODEL_PATH}"
+    -e "FREETOKEN_PASCAL_PLE_BACKEND=${FREETOKEN_PASCAL_PLE_BACKEND:-mmap}"
   )
   local -a qwen_mounts=(
     # Shard discovery needs every sibling in the pinned split, not only shard one.
@@ -117,7 +118,9 @@ run_single_h2() {
     "$image" \
     bash -lc 'PYTHONPATH=python pytest -q -s \
       tests/project/test_qwen38_gguf_cache_zero_hardware.py \
-      -m "sm61 and not dual_p4"'
+      -m "sm61 and not dual_p4" && \
+      python scripts/validate_evidence.py \
+      results/hardware/qwen38-gguf-cache-zero-h2.json'
 }
 
 run_dual_smoke() {
