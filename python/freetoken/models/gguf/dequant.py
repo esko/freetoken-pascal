@@ -73,6 +73,14 @@ def dequant_q4_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     return ((q - 8.0) * d).reshape(-1).to(out_dtype)
 
 
+def dequant_q8_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """Q8_0: per 32-element block = fp16 scale ``d`` + 32 signed int8 values."""
+    raw = raw.reshape(-1, 34)
+    d = _f16_scales(raw, 0, 2)
+    q = raw[:, 2:34].contiguous().view(torch.int8).to(torch.float32)
+    return (q * d).reshape(-1).to(out_dtype)
+
+
 def dequant_q6_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     """Q6_K: 256-elem super-block = 128B low nibbles + 64B high 2-bits + 16 int8
     sub-scales + fp16 ``d``. Direct vectorization of ggml's two-half loop."""
@@ -112,6 +120,7 @@ def dequant_q6_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
 _DEQUANT = {
     GGML_Q4_0: dequant_q4_0,
     GGML_Q6_K: dequant_q6_k,
+    GGML_Q8_0: dequant_q8_0,
 }
 
 
@@ -191,6 +200,7 @@ __all__ = [
     "MOE_VEC_TYPES",
     "dequant_q4_0",
     "dequant_q6_k",
+    "dequant_q8_0",
     "dequantize",
     "dequantize_reference",
     "row_bytes",
