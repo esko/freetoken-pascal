@@ -69,9 +69,12 @@ def _load_inventory(path: Path, *, expected_profile: str | None) -> dict[str, An
     )
     schema_path = ROOT / "schemas/hardware-inventory.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    errors = [error.message for error in checker.Draft202012Validator(
-        schema, format_checker=checker.FORMAT_CHECKER
-    ).iter_errors(inventory)]
+    errors = [
+        error.message
+        for error in checker.Draft202012Validator(
+            schema, format_checker=checker.FORMAT_CHECKER
+        ).iter_errors(inventory)
+    ]
     errors.extend(
         checker.validate_pascal_inventory(
             inventory,
@@ -85,8 +88,7 @@ def _load_inventory(path: Path, *, expected_profile: str | None) -> dict[str, An
         raise RuntimeError("dual-p4-short requires a profiled inventory")
     if expected_profile is not None and inventory["profile_id"] != expected_profile:
         raise RuntimeError(
-            f"inventory profile_id must be {expected_profile!r}, "
-            f"found {inventory['profile_id']!r}"
+            f"inventory profile_id must be {expected_profile!r}, found {inventory['profile_id']!r}"
         )
     return inventory
 
@@ -181,14 +183,10 @@ def _device_record(
         raise RuntimeError("dual-p4-short requires inventory GPU indices 0 and 1")
     for identity in ("uuid", "pci_bus_id"):
         if inventory_gpu.get(identity) != telemetry.get(identity):
-            raise RuntimeError(
-                f"GPU {output_index} {identity} changed between inventory and probe"
-            )
+            raise RuntimeError(f"GPU {output_index} {identity} changed between inventory and probe")
     if telemetry.get("compute_capability") != "6.1" or telemetry.get("name") != "Tesla P4":
         raise RuntimeError("dual-p4-short requires instantaneous Tesla P4 sm_61 telemetry")
-    ecc_profile = {"enabled": "ecc-on", "disabled": "ecc-off"}.get(
-        str(telemetry.get("ecc_mode"))
-    )
+    ecc_profile = {"enabled": "ecc-on", "disabled": "ecc-off"}.get(str(telemetry.get("ecc_mode")))
     if ecc_profile is None:
         raise RuntimeError("instantaneous ECC mode cannot be mapped to an evidence profile")
     if inventory_gpu.get("ecc_mode") != telemetry.get("ecc_mode"):

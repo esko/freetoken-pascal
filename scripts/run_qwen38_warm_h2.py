@@ -120,9 +120,8 @@ def load_inputs(
     manifest_path = ple_artifact_path / "manifest.json"
     manifest = _read_json(manifest_path, label="PLE manifest")
     payload = ple_artifact_path / str(manifest.get("payload", ""))
-    if (
-        manifest.get("sha256") != base_ple.get("sha256")
-        or payload.stat().st_size != int(base_ple.get("payload_bytes", -1))
+    if manifest.get("sha256") != base_ple.get("sha256") or payload.stat().st_size != int(
+        base_ple.get("payload_bytes", -1)
     ):
         raise RuntimeError("current PLE manifest identity does not match full-H2 evidence")
     return full_h2, inventory
@@ -265,9 +264,7 @@ def build_evidence(
     if not telemetry_samples:
         raise ValueError("warm H2 requires measured GPU telemetry")
     current = telemetry_samples[-1]
-    inventory_gpu = next(
-        (gpu for gpu in inventory["gpus"] if gpu["uuid"] == current["uuid"]), None
-    )
+    inventory_gpu = next((gpu for gpu in inventory["gpus"] if gpu["uuid"] == current["uuid"]), None)
     if inventory_gpu is None or inventory_gpu["pci_bus_id"] != current["pci_bus_id"]:
         raise ValueError("visible GPU identity does not match the bound inventory")
     profile = inventory["profile_id"]
