@@ -3,8 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,9 +96,7 @@ def test_allocator_snapshot_preserves_cuda_free_total_order() -> None:
         def max_memory_allocated(_device: object) -> int:
             return 2_500
 
-    snapshot = QSA_H2._allocator_snapshot(
-        SimpleNamespace(cuda=_AllocatorCuda()), object()
-    )
+    snapshot = QSA_H2._allocator_snapshot(SimpleNamespace(cuda=_AllocatorCuda()), object())
 
     assert snapshot["driver_free_bytes"] == 3_000
     assert snapshot["driver_total_bytes"] == 8_000
@@ -205,8 +203,8 @@ def test_workspace_record_uses_resolved_qsa_rotary_limit(monkeypatch: pytest.Mon
             self.__dict__.update(values)
 
     def fake_calculate(request: object) -> _Plan:
-        captured["max_position"] = getattr(request, "max_position")
-        captured["num_pages"] = getattr(request, "num_pages")
+        captured["max_position"] = request.max_position
+        captured["num_pages"] = request.num_pages
         return _Plan()
 
     workspace_module = SimpleNamespace(
