@@ -186,9 +186,14 @@
     },
     "execution_telemetry": {
       "type": "object",
-      "required": ["backend", "thread_count", "routes_executed", "bytes_read_packed"],
+      "required": ["backend", "kernel_census", "thread_count", "routes_executed", "bytes_read_packed"],
       "properties": {
-        "backend": {"const": "mixed_avx2"},
+        "backend": {"enum": ["q4_k_avx2", "mixed_gemv_avx2", "mixed_avx2"]},
+        "kernel_census": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "pattern": "_avx2$"}
+        },
         "thread_count": {"type": "integer", "minimum": 1},
         "routes_executed": {"type": "integer", "minimum": 0},
         "bytes_read_packed": {"type": "integer", "minimum": 0}
