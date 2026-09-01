@@ -327,16 +327,16 @@ def test_warm_gate_is_single_device_bounded_and_reuses_full_h2_identity() -> Non
 
 def test_router_gate_is_single_device_profile_bound_and_short() -> None:
     gate = GATE_SCRIPT.read_text(encoding="utf-8")
-    branch = gate.split("run_router_p4()", 1)[1].split("case \"$level\"", 1)[0]
+    branch = gate.split("run_router_p4()", 1)[1].split('case "$level"', 1)[0]
 
     assert '[[ "$smoke_gpu" != "0" ]]' in branch
-    assert 'timeout --foreground --signal=TERM --kill-after=5s 300s' in branch
+    assert "timeout --foreground --signal=TERM --kill-after=5s 300s" in branch
     assert "python scripts/run_router_pascal_h2.py" in branch
     assert "python -m pytest -q tests/moe/test_fused_moe.py -k fused_topk" in branch
     assert '--inventory "$inventory_path"' in branch
     assert '--expected-profile "$profile_id"' in branch
     assert '--gpus "device=$smoke_gpu"' in branch
-    assert 'qwen38-router-h2-${profile_id}.json' in branch
+    assert "qwen38-router-h2-${profile_id}.json" in branch
 
 
 def test_inventory_requires_thermal_state_to_remain_explicitly_unqualified() -> None:

@@ -98,15 +98,18 @@ def test_main_removes_stale_evidence_before_probe(
 
     monkeypatch.setattr(ROUTER_H2, "run_probe", fake_probe)
 
-    assert ROUTER_H2.main(
-        [
-            "--inventory",
-            str(tmp_path / "inventory.json"),
-            "--output",
-            str(output),
-            "--expected-profile",
-            "ecc-off",
-            "--repository-commit",
-            "1" * 40,
-        ]
-    ) == 0
+    assert (
+        ROUTER_H2.main(
+            [
+                "--inventory",
+                str(tmp_path / "inventory.json"),
+                "--output",
+                str(output),
+                "--expected-profile",
+                "ecc-off",
+                "--repository-commit",
+                "1" * 40,
+            ]
+        )
+        == 0
+    )
