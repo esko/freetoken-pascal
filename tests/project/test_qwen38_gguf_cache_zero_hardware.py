@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -194,6 +195,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
         try:
             # Do not probe CUDA before LLM/Engine construction: Engine intentionally requires
             # CUDA to be uninitialized while it binds the assigned P4.
+            startup_started = time.monotonic()
             llm = LLM(
                 str(model_path),
                 dtype=torch.bfloat16,
@@ -206,7 +208,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
                 moe_cache_size=0,
                 moe_cache_auto=False,
                 moe_cache_rate=None,
-                moe_cpu_threads=1,
+                moe_cpu_threads=int(os.environ.get("FREETOKEN_PASCAL_CPU_THREADS", "8")),
                 cuda_graph_bs=[],
                 cuda_graph_max_bs=0,
                 cache_type="naive",
@@ -215,6 +217,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
                 ple_warm_mode="cold",
                 ple_planner_mode="vectorized",
             )
+            startup_seconds = time.monotonic() - startup_started
         except Exception as error:
             pytest.fail(
                 "Qwen GGUF cache-zero Engine construction failed; no fallback was attempted: "
@@ -234,10 +237,12 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
         assert engine.graph_runner.graph_bs_list == []
 
         try:
+            generation_started = time.monotonic()
             result = llm.generate(
                 ["Write one short greeting."],
                 SamplingParams(temperature=0.0, max_tokens=2, ignore_eos=True),
             )
+            generation_seconds = time.monotonic() - generation_started
         except Exception as error:
             pytest.fail(
                 "Qwen GGUF cache-zero prefill+decode failed; no fallback was attempted: "
@@ -291,6 +296,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
                 "max_extend_tokens": engine.config.max_extend_tokens,
                 "max_seq_len": engine.config.max_seq_len,
                 "moe_backend": engine.config.moe_backend,
+                "moe_cpu_threads": engine.config.moe_cpu_threads,
                 "moe_cache_size": engine.config.moe_cache_size,
                 "cuda_graph_bs": engine.config.cuda_graph_bs,
                 "cuda_graph_max_bs": engine.config.cuda_graph_max_bs,
@@ -312,7 +318,11 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
                 "prompt": "Write one short greeting.",
                 "output_token_count": len(result[0]["token_ids"]),
                 "output_token_ids": result[0]["token_ids"],
+                "elapsed_seconds": generation_seconds,
+                "observed_tokens_per_second": len(result[0]["token_ids"])
+                / generation_seconds,
             },
+            "startup_seconds": startup_seconds,
         }
         _write_evidence(evidence)
     finally:
