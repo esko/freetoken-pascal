@@ -41,6 +41,219 @@ def _assert_selection_is_causal_prefix(indices: torch.Tensor, positions: torch.T
         ), f"row {row} (position {position}) did not select its whole causal prefix"
 
 
+def _cpu_reference_fixture(*, budget: int = 16) -> Fixture:
+    """Small real QSA pool/backend used for the P4-compatible Torch reference path."""
+    return Fixture(
+        parsed_config(num_layers=4, budget=budget, ratio=4),
+        num_pages=8,
+        device="cpu",
+        dtype=torch.bfloat16,
+    )
+
+
+def test_cpu_reference_norm_rope_matches_explicit_fp32_formula():
+    fixture = _cpu_reference_fixture()
+    backend = fixture.backend
+    x = torch.arange(backend.index_head_dim, dtype=torch.bfloat16).view(1, -1) / 17
+    weight = torch.linspace(-0.1, 0.1, backend.index_head_dim, dtype=torch.bfloat16)
+    position = torch.tensor([3], dtype=torch.int32)
+
+    got = backend._torch_index_norm_rope(x, position, weight, 1.0e-6)
+    value = x.float()
+    value = value * torch.rsqrt(value.square().mean(dim=-1, keepdim=True) + 1.0e-6)
+    value = value * (1.0 + weight.float())
+    cache = backend._index_rope_cache()[3]
+    cos, sin = cache[: backend._index_rope_cache().shape[1] // 2], cache[
+        backend._index_rope_cache().shape[1] // 2 : backend._index_rope_cache().shape[1]
+    ]
+    half = cos.numel()
+    rotated = value[:, : 2 * half]
+    partner = torch.cat((-rotated[:, half:], rotated[:, :half]), dim=-1)
+    expected = torch.cat(
+        (
+            rotated * torch.cat((cos, cos)) + partner * torch.cat((sin, sin)),
+            value[:, 2 * half :],
+        ),
+        dim=-1,
+    ).to(torch.bfloat16)
+    torch.testing.assert_close(got, expected)
+
+
+def test_cpu_reference_selection_has_stable_topk_and_causal_tail():
+    fixture = _cpu_reference_fixture(budget=8)
+    backend = fixture.backend
+    req = fixture.req(0, 0, 8)
+    batch = fixture.batch([req], "prefill")
+    md = batch.attn_metadata
+    md.positions = torch.tensor([2, 3, 4], dtype=torch.int32)
+    md.token_to_req = torch.zeros(3, dtype=torch.int32)
+    md.seq_lens = torch.tensor([8], dtype=torch.int32)
+    md.block_table = torch.tensor([[0]], dtype=torch.int32)
+    index = SimpleNamespace(
+        q=torch.zeros(3, backend.index_heads, backend.index_head_dim, dtype=torch.bfloat16),
+        q_norm_weight=torch.zeros(backend.index_head_dim, dtype=torch.bfloat16),
+        eps=1.0e-6,
+    )
+    got = backend._select_torch(index, md, 0)
+
+    assert torch.equal(got[0, :3], torch.tensor([0, 1, 2], dtype=torch.int32))
+    assert torch.equal(got[1, :4], torch.tensor([0, 1, 2, 3], dtype=torch.int32))
+    assert torch.equal(got[2, :5], torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32))
+    assert torch.equal(got[:, 5:], torch.full_like(got[:, 5:], -1))
+
+
+def test_cpu_reference_selection_tied_blocks_choose_lowest_block_first():
+    fixture = _cpu_reference_fixture(budget=8)
+    backend = fixture.backend
+    req = fixture.req(0, 0, 16)
+    fixture.pool.cmp_k_cache(0).zero_()
+    md = fixture.batch([req], "prefill").attn_metadata
+    md.positions = torch.tensor([15], dtype=torch.int32)
+    md.token_to_req = torch.zeros(1, dtype=torch.int32)
+    md.seq_lens = torch.tensor([16], dtype=torch.int32)
+    md.block_table = torch.tensor([[0]], dtype=torch.int32)
+    index = SimpleNamespace(
+        q=torch.zeros(1, backend.index_heads, backend.index_head_dim, dtype=torch.bfloat16),
+        q_norm_weight=torch.zeros(backend.index_head_dim, dtype=torch.bfloat16),
+        eps=1.0e-6,
+    )
+
+    got = backend._select(index, md, 0)
+
+    assert torch.equal(got[0, :8], torch.arange(8, dtype=torch.int32))
+    assert torch.equal(got[0, 8:], torch.full((3,), -1, dtype=torch.int32))
+
+
+def test_cpu_reference_attention_isolates_two_requests_by_physical_page():
+    fixture = _cpu_reference_fixture()
+    backend = fixture.backend
+    q = torch.zeros(2, 4, 256, dtype=torch.bfloat16)
+    k_cache = torch.zeros(2, 64, 2, 256, dtype=torch.bfloat16)
+    v_cache = torch.empty_like(k_cache)
+    v_cache[0].fill_(11)
+    v_cache[1].fill_(22)
+    indices = torch.zeros(2, 1, dtype=torch.int32)
+    block_table = torch.tensor([[1], [0]], dtype=torch.int32)
+    token_to_req = torch.tensor([0, 1], dtype=torch.int32)
+
+    got = backend._attend_torch(q, k_cache, v_cache, indices, block_table, token_to_req)
+
+    torch.testing.assert_close(got[0], torch.full_like(got[0], 22))
+    torch.testing.assert_close(got[1], torch.full_like(got[1], 11))
+
+
+@pytest.mark.parametrize("physical_page", [-1, 2])
+def test_cpu_reference_attention_rejects_negative_or_out_of_range_physical_page(
+    physical_page: int,
+):
+    fixture = _cpu_reference_fixture()
+    backend = fixture.backend
+    q = torch.zeros(1, 4, 256, dtype=torch.bfloat16)
+    k_cache = torch.zeros(2, 64, 2, 256, dtype=torch.bfloat16)
+    indices = torch.zeros(1, 1, dtype=torch.int32)
+    block_table = torch.tensor([[physical_page]], dtype=torch.int32)
+    token_to_req = torch.zeros(1, dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="selected physical row is out of bounds"):
+        backend._attend_torch(q, k_cache, k_cache, indices, block_table, token_to_req)
+
+
+def test_cpu_reference_select_dispatches_to_torch_reference(monkeypatch):
+    fixture = _cpu_reference_fixture()
+    backend = fixture.backend
+    expected = torch.tensor([[7]], dtype=torch.int32)
+    seen = {}
+
+    def fake_select_torch(index, md, slot):
+        seen["args"] = (index, md, slot)
+        return expected
+
+    monkeypatch.setattr(backend, "_select_torch", fake_select_torch)
+    got = backend._select(object(), object(), 3)
+
+    assert got is expected
+    assert seen["args"][2] == 3
+
+
+def test_cpu_reference_capture_graph_is_eager_only():
+    fixture = _cpu_reference_fixture()
+
+    with pytest.raises(NotImplementedError, match="eager-only"):
+        fixture.backend.init_capture_graph(max_seq_len=128, bs_list=[1])
+
+
+def test_cpu_reference_paged_gqa_uses_page_table_and_matches_dense_oracle():
+    fixture = _cpu_reference_fixture()
+    attn = fixture.layer(QSA_LAYER, seed=31)
+    req = fixture.req(0, 0, 8)
+    # Move the request's page away from page zero after allocation.  Both the K/V store and
+    # the reference gather must follow the authoritative page-table mapping.
+    fixture.page_table[0, : fixture.page_size] = torch.arange(
+        2 * fixture.page_size,
+        3 * fixture.page_size,
+        dtype=fixture.page_table.dtype,
+    )
+    x = _inputs(fixture, [8], seed=37)[0]
+    qsa = attn.forward(x, fixture.batch([req], "prefill"))
+
+    oracle = _dense_oracle(fixture)
+    fixture.ctx.attn_backend = oracle
+    oracle_req = fixture.req(1, 0, 8)
+    dense = attn.forward(x, fixture.batch([oracle_req], "prefill"))
+    torch.testing.assert_close(qsa.float(), dense.float(), rtol=2e-2, atol=2e-2)
+
+    for req, backend in ((req, fixture.backend), (oracle_req, oracle)):
+        req.cached_len, req.device_len, req.extend_len = 8, 9, 1
+        fixture.page_table[req.table_idx, 8] = 2 * fixture.page_size + 8
+        fixture.ctx.attn_backend = backend
+        step = attn.forward(
+            _inputs(fixture, [1], seed=41)[0],
+            fixture.batch([req], "decode"),
+        )
+        if backend is fixture.backend:
+            qsa_decode = step
+        else:
+            dense_decode = step
+    torch.testing.assert_close(qsa_decode.float(), dense_decode.float(), rtol=2e-2, atol=2e-2)
+
+
+def test_cpu_reference_group_straddle_matches_one_shot_prefill():
+    config_kwargs = dict(num_layers=4, budget=16, ratio=4)
+    one = Fixture(parsed_config(**config_kwargs), num_pages=8, device="cpu", dtype=torch.bfloat16)
+    split = Fixture(parsed_config(**config_kwargs), num_pages=8, device="cpu", dtype=torch.bfloat16)
+    one_attn = one.layer(QSA_LAYER, seed=43)
+    split_attn = split.layer(QSA_LAYER, seed=43)
+    x = _inputs(one, [9], seed=47)[0]
+    one_shot = one_attn.forward(x, one.batch([one.req(0, 0, 9)], "prefill"))
+
+    first_req = split.req(0, 0, 3)
+    split_attn.forward(x[:3], split.batch([first_req], "prefill"))
+    second_req = SimpleNamespace(table_idx=0, cached_len=3, device_len=9, extend_len=6)
+    chunked = split_attn.forward(x[3:], split.batch([second_req], "prefill"))
+    torch.testing.assert_close(chunked.float(), one_shot[3:].float(), rtol=2e-2, atol=2e-2)
+
+
+def test_cpu_reference_attention_fails_closed_for_all_invalid_rows():
+    fixture = _cpu_reference_fixture()
+    backend = fixture.backend
+    q = torch.randn(2, 4, 256, dtype=torch.bfloat16)
+    cache = torch.randn(2, 64, 2, 256, dtype=torch.bfloat16)
+    indices = torch.full((2, 7), -1, dtype=torch.int32)
+    block_table = torch.tensor([[0], [1]], dtype=torch.int32)
+    requests = torch.tensor([0, 1], dtype=torch.int32)
+    got = backend._attend_torch(q, cache, cache.clone(), indices, block_table, requests)
+    assert torch.equal(got, torch.zeros_like(got))
+    with pytest.raises(ValueError, match="integral GQA"):
+        backend._attend_torch(
+            torch.randn(2, 3, 256, dtype=torch.bfloat16),
+            cache,
+            cache,
+            indices,
+            block_table,
+            requests,
+        )
+
+
 @requires_cuda
 def test_prefill_is_dense_below_the_budget(monkeypatch):
     """bs=3 ragged prefill, longest request exactly at budget + ratio - 1."""
@@ -152,6 +365,8 @@ def test_chunked_prefill_matches_one_shot(cut: int):
 def test_decode_graph_replay_matches_eager():
     config = parsed_config()
     fixture = Fixture(config, num_pages=256)
+    if fixture.backend._torch_reference:
+        pytest.skip("Pascal QSA reference path is eager-only")
     attn = fixture.layer(QSA_LAYER)
     lengths, steps = [300, 411], 4
     bs = len(lengths)

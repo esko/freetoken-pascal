@@ -49,7 +49,14 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from freetoken.models import ModelConfig
 
-_CPU_PINNED = {"device": "cpu", "dtype": torch.int32, "pin_memory": True}
+# CPU-only reference fixtures do not have a CUDA pinned allocator.  Keep host metadata pinned
+# when CUDA is available (the production path), but make the reference path usable on a plain
+# CPU too.
+_CPU_PINNED = {
+    "device": "cpu",
+    "dtype": torch.int32,
+    "pin_memory": torch.cuda.is_available(),
+}
 # Block-score transient budget (vLLM's number): the fp32 [rows, n_blocks] logits tile is
 # 256 KB per row at a 1M-token context, so a long prefill must be scored in row chunks.
 _LOGITS_WORKSPACE_BYTES = QSA_LOGITS_WORKSPACE_BYTES
@@ -134,7 +141,12 @@ class QSASparseAttnBackend(BaseAttnBackend):
         self.rotary_config = group.rotary_config
         self._index_cos_sin: torch.Tensor | None = None
 
-        self._block_topk_kernel = _resolve_block_topk()
+        from freetoken.utils.arch import is_sm70_supported
+
+        self._torch_reference = self.reference_only or not is_sm70_supported()
+        self._block_topk_kernel = None if self._torch_reference else _resolve_block_topk()
+        path = "torch-fp32-reference" if self._torch_reference else "triton"
+        logger.info_rank0(f"QSA sparse attention path: {path}")
         # decode staging (static buffers under CUDA graphs; eager decode snapshots per step)
         self._graph: dict[str, torch.Tensor] = {}
         self.capture_bs: list[int] = []
@@ -201,7 +213,9 @@ class QSASparseAttnBackend(BaseAttnBackend):
             token_to_req = torch.repeat_interleave(
                 torch.arange(len(reqs), dtype=torch.int32),
                 torch.tensor(seqlens_q, dtype=torch.int32),
-            ).pin_memory()
+            )
+            if _CPU_PINNED["pin_memory"]:
+                token_to_req = token_to_req.pin_memory()
             md.cu_seqlens = qo_indptr.to(self.device, non_blocking=True)
             md.token_to_req = token_to_req.to(self.device, non_blocking=True)
             md.seq_lens = kv_len.to(self.device, non_blocking=True)
@@ -271,12 +285,13 @@ class QSASparseAttnBackend(BaseAttnBackend):
         layer_id: int,
         batch: Batch,
     ) -> torch.Tensor:
-        from freetoken.kernel.triton.qsa import qsa_sparse_paged_attention
-
         md = batch.attn_metadata
         assert isinstance(md, QSASparseMetadata)
         slot = self._idx_slot[layer_id]
-        self.kvcache.store_kv(k, v, batch.out_loc, layer_id)
+        if self._torch_reference:
+            self._store_kv_torch(k, v, batch.out_loc, layer_id)
+        else:
+            self.kvcache.store_kv(k, v, batch.out_loc, layer_id)
         if md.block_table is None:
             self._snapshot_decode(md, batch)
         if slot == 0 or md.cmp_rows is None:
@@ -284,6 +299,20 @@ class QSASparseAttnBackend(BaseAttnBackend):
             # capture batch runs its warmup and its capture through ONE metadata object, and a
             # cached plan would bake the warmup's addresses into the graph.
             self._plan_index_writes(md, batch)
+
+        if self._torch_reference:
+            self._update_index_cache_torch(index, md, slot, batch)
+            indices = self._select(index, md, slot)
+            return self._attend_torch(
+                q,
+                self.kvcache.k_cache(layer_id),
+                self.kvcache.v_cache(layer_id),
+                indices,
+                md.block_table,
+                md.token_to_req,
+            )
+
+        from freetoken.kernel.triton.qsa import qsa_sparse_paged_attention
 
         self._update_index_cache(index, md, slot)
         indices = self._select(index, md, slot)
@@ -296,6 +325,29 @@ class QSASparseAttnBackend(BaseAttnBackend):
             md.token_to_req,
             torch.empty_like(q),
         )
+
+    def _store_kv_torch(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        out_loc: torch.Tensor,
+        layer_id: int,
+    ) -> None:
+        """Store K/V through the authoritative paged-cache layout without a CUDA kernel."""
+        k_cache = self.kvcache.k_cache(layer_id)
+        v_cache = self.kvcache.v_cache(layer_id)
+        if k.ndim != 2 or v.shape != k.shape:
+            raise ValueError("QSA reference K/V must be [tokens, kv_heads * head_dim]")
+        expected = (k_cache.shape[-2], k_cache.shape[-1])
+        if tuple(k.shape[1:]) != (expected[0] * expected[1],):
+            raise ValueError(
+                "QSA reference K/V shape "
+                f"{tuple(k.shape)} does not match cache heads/dim {expected}"
+            )
+        if out_loc.ndim != 1 or out_loc.numel() != k.shape[0]:
+            raise ValueError("QSA reference K/V locations must match token rows")
+        k_cache.view(-1, *expected).index_copy_(0, out_loc.to(torch.long), k.view(-1, *expected))
+        v_cache.view(-1, *expected).index_copy_(0, out_loc.to(torch.long), v.view(-1, *expected))
 
     def _plan_index_writes(self, md: QSASparseMetadata, batch: Batch) -> None:
         """Per-token slab row and ring row for this forward; the other QSA layers reuse it
@@ -354,8 +406,212 @@ class QSASparseAttnBackend(BaseAttnBackend):
         # ones a straddling group just consumed.
         qsa_store_rows(ring, md.ring_rows, index.k)
 
+    def _torch_index_norm_rope(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+        *,
+        heads: int = 1,
+    ) -> torch.Tensor:
+        """FP32 reference for the indexer's grouped norm and partial NeoX rope."""
+        if x.ndim != 2 or x.shape[1] != self.index_head_dim:
+            raise ValueError(
+                "QSA reference index rows must be "
+                f"[rows, {self.index_head_dim}], got {tuple(x.shape)}"
+            )
+        if positions.ndim != 1 or heads <= 0 or x.shape[0] != positions.numel() * heads:
+            raise ValueError("QSA reference index positions must match row/head geometry")
+        if tuple(weight.shape) != (self.index_head_dim,):
+            raise ValueError("QSA reference index norm weight has invalid geometry")
+        cos_sin = self._index_rope_cache()
+        rotary_dim = cos_sin.shape[1]
+        if rotary_dim % 2 or rotary_dim > self.index_head_dim:
+            raise ValueError("QSA reference index rope needs an even rotary_dim <= head_dim")
+
+        value = x.float()
+        value = value * torch.rsqrt(value.square().mean(dim=-1, keepdim=True) + eps)
+        value = value * (1.0 + weight.float()).view(1, -1)
+        positions = positions.to(device=x.device, dtype=torch.long).repeat_interleave(heads)
+        cache = cos_sin.index_select(0, positions)
+        cos, sin = cache[:, : rotary_dim // 2], cache[:, rotary_dim // 2 : rotary_dim]
+        rotated = value[:, :rotary_dim]
+        half = rotary_dim // 2
+        partner = torch.cat((-rotated[:, half:], rotated[:, :half]), dim=-1)
+        rotated = rotated * torch.cat((cos, cos), dim=-1) + partner * torch.cat(
+            (sin, sin), dim=-1
+        )
+        return torch.cat((rotated, value[:, rotary_dim:]), dim=-1).to(dtype=x.dtype)
+
+    def _update_index_cache_torch(
+        self,
+        index,
+        md: QSASparseMetadata,
+        slot: int,
+        batch: Batch,
+    ) -> None:
+        """Compress pending/current index keys and store them with pure Torch operations."""
+        if md.positions is None or md.cmp_rows is None or md.ring_rows is None:
+            raise RuntimeError("QSA reference cache update requires planned index rows")
+        if index.k.ndim != 2 or index.k.shape[1] != self.index_head_dim:
+            raise ValueError("QSA reference index keys must be [tokens, index_head_dim]")
+        reqs = batch.padded_reqs if hasattr(batch, "padded_reqs") else batch.reqs
+        ring = self.kvcache.pending_ring(slot)
+        compressed = self.kvcache.cmp_k_cache(slot)
+        offset = 0
+        for request in reqs:
+            extend = int(request.extend_len)
+            start = int(request.cached_len)
+            end = int(request.device_len)
+            if extend != end - start or offset + extend > index.k.shape[0]:
+                raise ValueError("QSA reference request lengths do not match index rows")
+            current = index.k[offset : offset + extend]
+            current_positions = md.positions[offset : offset + extend]
+            ring_slot = int(request.table_idx)
+            first_end = ((start + self.ratio) // self.ratio) * self.ratio - 1
+            for group_end in range(first_end, end, self.ratio):
+                group_start = group_end - self.ratio + 1
+                members = []
+                for position in range(group_start, group_end + 1):
+                    if position < start:
+                        members.append(ring[ring_slot, position % self.ring_capacity])
+                    else:
+                        members.append(current[position - start])
+                pooled = torch.stack(members).float().mean(dim=0).to(dtype=index.k.dtype)
+                normalized = self._torch_index_norm_rope(
+                    pooled.view(1, -1),
+                    torch.tensor([group_start], dtype=torch.int32, device=index.k.device),
+                    index.k_norm_weight,
+                    index.eps,
+                )[0]
+                row = md.cmp_rows[offset + group_end - start]
+                if int(row) < 0 or int(row) >= compressed.shape[0]:
+                    raise ValueError("QSA reference compressed-row destination is out of bounds")
+                compressed[row.long()] = normalized
+
+            keep_start = max(start, end - self.ring_capacity)
+            for position in range(keep_start, end):
+                row = md.ring_rows[offset + position - start]
+                if int(row) >= 0:
+                    ring[ring_slot, position % self.ring_capacity] = current[position - start]
+            # Keep this assertion local to the reference path: a malformed batch must not
+            # silently leave stale rows in the next request's compression input.
+            if current_positions.numel() != extend:
+                raise ValueError("QSA reference index positions do not match request length")
+            offset += extend
+        if offset != index.k.shape[0]:
+            raise ValueError("QSA reference index rows contain an unowned suffix")
+
+    def _select_torch(self, index, md: QSASparseMetadata, slot: int) -> torch.Tensor:
+        """Normalize/rope queries, score paged compressed keys, top-k, and expand on device."""
+        if md.positions is None or md.block_table is None or md.token_to_req is None:
+            raise RuntimeError("QSA reference selection requires complete metadata")
+        rows = index.q.shape[0]
+        if index.q.ndim != 3 or index.q.shape[1:] != (self.index_heads, self.index_head_dim):
+            raise ValueError("QSA reference index queries have invalid geometry")
+        q_index = self._torch_index_norm_rope(
+            index.q.reshape(-1, self.index_head_dim),
+            md.positions,
+            index.q_norm_weight,
+            index.eps,
+            heads=self.index_heads,
+        ).view(rows, self.index_heads, self.index_head_dim)
+        cmp_pages = self._cmp_pages(slot)
+        indices = torch.full(
+            (rows, self.select_width), -1, dtype=torch.int32, device=index.q.device
+        )
+        reqs = md.token_to_req.to(torch.long)
+        for row in range(rows):
+            request = reqs[row]
+            if int(request) < 0 or int(request) >= md.block_table.shape[0]:
+                raise ValueError("QSA reference token-to-request index is out of bounds")
+            position = md.positions[row]
+            # Sequence lengths are device tensors, but this reference path deliberately uses
+            # scalar loop bounds: no host copy of keys/values occurs and correctness is clearer.
+            sequence_length = md.seq_lens[request]
+            visible_blocks = min(
+                int((position + 1) // self.ratio), int(sequence_length // self.ratio)
+            )
+            if visible_blocks:
+                block_ids = torch.arange(visible_blocks, dtype=torch.long, device=index.q.device)
+                page_ids = md.block_table[request].to(torch.long).index_select(
+                    0, torch.div(block_ids, self.cmp_page_size, rounding_mode="floor")
+                )
+                keys = cmp_pages[page_ids, block_ids % self.cmp_page_size, 0]
+                scores = torch.relu(q_index[row].float() @ keys.float().transpose(0, 1)).sum(0)
+                scores.mul_(self.index_head_dim**-0.5)
+                take = min(self.block_topk, visible_blocks)
+                chosen = torch.argsort(scores, descending=True, stable=True)[:take]
+            else:
+                chosen = torch.empty(0, dtype=torch.long, device=index.q.device)
+
+            tokens = []
+            for block in chosen:
+                block_start = int(block) * self.ratio
+                tokens.extend(range(block_start, block_start + self.ratio))
+            visible_tokens = int(position) + 1
+            tail_start = (visible_tokens // self.ratio) * self.ratio
+            tokens.extend(range(tail_start, tail_start + visible_tokens - tail_start))
+            if tokens:
+                values = torch.tensor(
+                    tokens[: self.select_width], dtype=torch.int32, device=index.q.device
+                )
+                indices[row, : values.numel()] = values
+        return indices
+
+    def _attend_torch(
+        self,
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        indices: torch.Tensor,
+        block_table: torch.Tensor,
+        token_to_req: torch.Tensor,
+    ) -> torch.Tensor:
+        """Exact selected-row paged GQA attention using FP32 Torch math."""
+        if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
+            raise ValueError("QSA reference attention received invalid Q/K/V shapes")
+        if k_cache.shape[2] <= 0 or q.shape[1] % k_cache.shape[2]:
+            raise ValueError("QSA reference attention requires integral GQA groups")
+        if q.shape[2] != k_cache.shape[3] or indices.shape[0] != q.shape[0]:
+            raise ValueError("QSA reference attention geometry does not match selection")
+        if block_table.ndim != 2 or token_to_req.shape != (q.shape[0],):
+            raise ValueError("QSA reference attention metadata has invalid shapes")
+        if indices.shape[1] <= 0:
+            raise ValueError("QSA reference attention requires positive selection width")
+        logical = indices.to(torch.long)
+        safe_logical = logical.clamp_min(0)
+        pages = torch.div(safe_logical, self.page_size, rounding_mode="floor")
+        offsets = safe_logical % self.page_size
+        request = token_to_req.to(torch.long)
+        if bool((request < 0).any()) or bool((request >= block_table.shape[0]).any()):
+            raise ValueError("QSA reference attention request indices are out of bounds")
+        if bool((pages >= block_table.shape[1]).any()):
+            raise ValueError("QSA reference attention selected page exceeds page table")
+        physical_pages = block_table[request.unsqueeze(1), pages]
+        physical = physical_pages * self.page_size + offsets
+        valid = logical >= 0
+        total_rows = k_cache.shape[0] * self.page_size
+        if bool((valid & ((physical_pages < 0) | (physical < 0) | (physical >= total_rows))).any()):
+            raise ValueError("QSA reference attention selected physical row is out of bounds")
+        selected_rows = torch.where(valid, physical, torch.zeros_like(physical)).to(torch.int32)
+        counts = valid.sum(dim=1, dtype=torch.int32)
+        from freetoken.kernel.triton.qsa_legacy import qsa_sparse_gqa
+
+        return qsa_sparse_gqa(
+            q,
+            k_cache.view(-1, k_cache.shape[-2], k_cache.shape[-1]),
+            v_cache.view(-1, v_cache.shape[-2], v_cache.shape[-1]),
+            selected_rows,
+            counts,
+            q.shape[-1] ** -0.5,
+        )
+
     def _select(self, index, md: QSASparseMetadata, slot: int) -> torch.Tensor:
         """Score complete visible blocks, take the top-k, expand them to token indices."""
+        if self._torch_reference:
+            return self._select_torch(index, md, slot)
         from freetoken.kernel.triton.qsa import (
             expand_qsa_block_indices,
             qsa_index_norm_rope,
@@ -458,6 +714,8 @@ class QSASparseAttnBackend(BaseAttnBackend):
 
     # ----- CUDA graph (decode) --------------------------------------------------------------
     def init_capture_graph(self, max_seq_len: int, bs_list: list[int]) -> None:
+        if self._torch_reference:
+            raise NotImplementedError("QSA torch-fp32-reference is eager-only")
         self.capture_bs = sorted(bs_list)
         max_bs = max(bs_list)
         width = get_global_ctx().page_table.shape[1]
