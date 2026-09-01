@@ -312,6 +312,16 @@ def test_qwen_cache_zero_startup_requires_dedicated_ple_artifact():
         )
 
 
+@pytest.mark.parametrize("mode", ["full-model-warm", "unknown"])
+def test_qwen_cache_zero_preflight_rejects_non_artifact_warm_mode(mode):
+    from freetoken.engine.engine import _preflight_qwen_gguf_cpu_engine_config
+
+    with pytest.raises(ValueError, match="dedicated PLE warm mode"):
+        _preflight_qwen_gguf_cpu_engine_config(
+            _config(ple_warm_mode=mode), require_ple_artifact=True
+        )
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
