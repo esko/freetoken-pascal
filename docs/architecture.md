@@ -141,8 +141,11 @@ and fails closed for CUDA capture, non-FP32 recurrent pools and tracking/checkpo
 metadata that the standalone adapter cannot preserve. Factory activation and automatic selection
 remain disabled pending end-to-end performance evidence. Before any Pascal convolution or state
 mutation, the model validates the scheduler proof's integer range, unique slot ownership, ragged
-offsets and initial-state binding. When present, the proof-owned slot tensor is the effective
-decode-convolution index source; generic FLA metadata remains untrusted staging data. H1 compilation
+offsets and initial-state binding. That preflight also checks pool geometry/dtype/device and binds
+the proof to the current metadata owner, batch phase, device and pool identity. Prefill reset slots
+come from proof-owned slots plus initial-state flags; decode requires one token per request, offsets
+exactly `[0..B]`, and no initial-state flags. When present, the proof-owned slot tensor is the
+effective decode-convolution index source; generic FLA metadata remains untrusted staging data. H1 compilation
 and source census are not hardware evidence.
 
 ## GGUF ingestion

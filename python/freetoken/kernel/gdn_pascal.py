@@ -42,6 +42,19 @@ class PascalGdnMetadataBinding:
     device: str
 
 
+@dataclass(frozen=True, slots=True)
+class PascalGdnPoolBinding:
+    """Identity and layout of a state-pool tensor bound to a metadata proof."""
+
+    object_id: int
+    data_ptr: int
+    storage_offset: int
+    stride: tuple[int, ...]
+    shape: tuple[int, ...]
+    dtype: str
+    device: str
+
+
 _METADATA_PROOF_SEAL = object()
 
 
@@ -61,6 +74,18 @@ def _metadata_binding(value: torch.Tensor) -> PascalGdnMetadataBinding:
         storage_offset=int(value.storage_offset()),
         stride=tuple(int(part) for part in value.stride()),
         version=_tensor_version(value),
+        shape=tuple(int(part) for part in value.shape),
+        dtype=str(value.dtype),
+        device=str(value.device),
+    )
+
+
+def _pool_binding(value: torch.Tensor) -> PascalGdnPoolBinding:
+    return PascalGdnPoolBinding(
+        object_id=id(value),
+        data_ptr=int(value.data_ptr()),
+        storage_offset=int(value.storage_offset()),
+        stride=tuple(int(part) for part in value.stride()),
         shape=tuple(int(part) for part in value.shape),
         dtype=str(value.dtype),
         device=str(value.device),
@@ -120,6 +145,10 @@ class PascalGdnMetadataProof:
         "_initial_values",
         "_initial_binding",
         "_trusted_initial_values",
+        "_owner_token",
+        "_phase",
+        "_device",
+        "_pool_bindings",
         "_initialized",
     )
 
@@ -132,6 +161,10 @@ class PascalGdnMetadataProof:
         slot_values: tuple[int, ...],
         offset_values: tuple[int, ...],
         initial_values: tuple[bool, ...] | None,
+        *,
+        owner_token: object | None = None,
+        phase: str | None = None,
+        pool_tensors: tuple[torch.Tensor, ...] | None = None,
     ) -> None:
         if seal is not _METADATA_PROOF_SEAL:
             raise PascalGdnContractError("Pascal GDN metadata proof is not scheduler-issued")
@@ -151,6 +184,14 @@ class PascalGdnMetadataProof:
             None if initial_state is None else _metadata_binding(initial_state),
         )
         object.__setattr__(self, "_trusted_initial_values", initial_values)
+        object.__setattr__(self, "_owner_token", owner_token)
+        object.__setattr__(self, "_phase", phase)
+        object.__setattr__(self, "_device", str(slot_indices.device))
+        object.__setattr__(
+            self,
+            "_pool_bindings",
+            None if pool_tensors is None else tuple(_pool_binding(tensor) for tensor in pool_tensors),
+        )
         object.__setattr__(self, "_seal", seal)
         object.__setattr__(self, "_initialized", True)
 
@@ -182,6 +223,44 @@ class PascalGdnMetadataProof:
     @property
     def initial_values(self) -> tuple[bool, ...] | None:
         return self._initial_values
+
+    def validate_context(
+        self,
+        *,
+        owner_token: object | None = None,
+        phase: str | None = None,
+        device: torch.device | None = None,
+        pool_tensors: tuple[torch.Tensor, ...] | None = None,
+        expected_slot_values: tuple[int, ...] | None = None,
+        expected_offset_values: tuple[int, ...] | None = None,
+        expected_initial_values: tuple[bool, ...] | None = None,
+    ) -> None:
+        """Reject a proof attached to a different forward, phase, or state pool."""
+
+        if self._seal is not _METADATA_PROOF_SEAL:
+            raise PascalGdnContractError("Pascal GDN metadata proof is not scheduler-issued")
+        if owner_token is not None and self._owner_token is not owner_token:
+            raise PascalGdnContractError("Pascal GDN metadata proof belongs to another forward")
+        if phase is not None and self._phase != phase:
+            raise PascalGdnContractError("Pascal GDN metadata proof phase mismatch")
+        if device is not None and self._device != str(device):
+            raise PascalGdnContractError("Pascal GDN metadata proof device mismatch")
+        if pool_tensors is not None:
+            actual = tuple(_pool_binding(tensor) for tensor in pool_tensors)
+            if self._pool_bindings != actual:
+                raise PascalGdnContractError("Pascal GDN metadata proof state pool mismatch")
+        if expected_slot_values is not None and self.slot_values != _int32_values(
+            "Pascal GDN slot metadata", expected_slot_values
+        ):
+            raise PascalGdnContractError("Pascal GDN metadata proof slot values mismatch")
+        if expected_offset_values is not None and self.offset_values != _int32_values(
+            "Pascal GDN offset metadata", expected_offset_values
+        ):
+            raise PascalGdnContractError("Pascal GDN metadata proof offset values mismatch")
+        if expected_initial_values is not None and self.initial_values != _initial_values(
+            expected_initial_values
+        ):
+            raise PascalGdnContractError("Pascal GDN metadata proof initial-state values mismatch")
 
     def values_for(
         self,
@@ -262,6 +341,9 @@ def _issue_pascal_gdn_metadata_proof(
     offset_values: tuple[int, ...],
     *,
     initial_values: tuple[bool, ...] | None = None,
+    owner_token: object | None = None,
+    phase: str | None = None,
+    pool_tensors: tuple[torch.Tensor, ...] | None = None,
 ) -> PascalGdnMetadataProof:
     """Issue dedicated Pascal metadata tensors from scheduler-owned host values."""
 
@@ -293,6 +375,9 @@ def _issue_pascal_gdn_metadata_proof(
         slots,
         offsets,
         initial,
+        owner_token=owner_token,
+        phase=phase,
+        pool_tensors=pool_tensors,
     )
 
 
@@ -318,6 +403,12 @@ def validate_pascal_gdn_metadata(
     num_tokens: int,
     initial_state: torch.Tensor | None = None,
     metadata_proof: PascalGdnMetadataProof | None = None,
+    phase: str | None = None,
+    owner_token: object | None = None,
+    pool_tensors: tuple[torch.Tensor, ...] | None = None,
+    expected_slot_values: tuple[int, ...] | None = None,
+    expected_offset_values: tuple[int, ...] | None = None,
+    expected_initial_values: tuple[bool, ...] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, list[bool] | None]:
     """Validate semantic ragged metadata before any convolution or state mutation.
 
@@ -342,6 +433,8 @@ def validate_pascal_gdn_metadata(
         raise PascalGdnContractError("Pascal GDN state pool must contain at least one slot")
     if num_tokens <= 0:
         raise PascalGdnContractError("Pascal GDN requires at least one token")
+    if phase not in (None, "prefill", "decode"):
+        raise PascalGdnContractError(f"Pascal GDN phase must be prefill or decode, got {phase!r}")
 
     if metadata_proof is None:
         slots = _checked_int32_tensor("slot_indices", slot_indices)
@@ -364,6 +457,15 @@ def validate_pascal_gdn_metadata(
     else:
         if not isinstance(metadata_proof, PascalGdnMetadataProof):
             raise PascalGdnContractError("metadata_proof must be a Pascal GDN metadata proof")
+        metadata_proof.validate_context(
+            owner_token=owner_token,
+            phase=phase,
+            device=slot_indices.device,
+            pool_tensors=pool_tensors,
+            expected_slot_values=expected_slot_values,
+            expected_offset_values=expected_offset_values,
+            expected_initial_values=expected_initial_values,
+        )
         effective_slots = metadata_proof.slot_indices
         effective_offsets = metadata_proof.cu_seqlens
         if (
@@ -397,6 +499,15 @@ def validate_pascal_gdn_metadata(
         or any(left > right for left, right in pairwise(offsets))
     ):
         raise PascalGdnContractError("cu_seqlens must be nondecreasing from 0 to T")
+    if phase == "decode":
+        if initial is not None:
+            raise PascalGdnContractError("Pascal GDN decode must not provide initial-state metadata")
+        if len(slots) != num_tokens:
+            raise PascalGdnContractError("Pascal GDN decode requires exactly one token per request")
+        if offsets != list(range(len(slots) + 1)):
+            raise PascalGdnContractError("Pascal GDN decode offsets must be exactly [0..B]")
+    elif phase == "prefill" and initial is None:
+        raise PascalGdnContractError("Pascal GDN prefill requires initial-state metadata")
     return effective_slots, effective_offsets, initial
 
 

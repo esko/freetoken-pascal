@@ -427,7 +427,11 @@ def validate_report_format(report: dict[str, Any]) -> None:
         block = proof_timings.get(case)
         if not isinstance(block, dict):
             raise ValueError(f"metadata proof timings missing {case} case")
-        for phase in ("cold_proof_construction", "warm_proof_validation"):
+        for phase in (
+            "first_cold_proof_construction",
+            "allocator_warm_proof_reissue",
+            "warm_proof_validation",
+        ):
             timing = block.get(phase)
             if not isinstance(timing, dict):
                 raise ValueError(f"metadata proof timings {case} missing {phase}")
@@ -436,7 +440,9 @@ def validate_report_format(report: dict[str, Any]) -> None:
                 raise ValueError(f"metadata proof timings {case} {phase} missing samples")
             for sample in samples:
                 if not isinstance(sample, dict):
-                    raise ValueError(f"metadata proof timing {case} {phase} sample must be a mapping")
+                    raise ValueError(
+                        f"metadata proof timing {case} {phase} sample must be a mapping"
+                    )
                 for clock in ("cuda_event_ms", "host_wall_ms"):
                     value = float(sample.get(clock, float("nan")))
                     if not math.isfinite(value) or value < 0:
@@ -778,27 +784,37 @@ def _measure_metadata_proof(
     num_tokens: int,
     repeats: int,
 ) -> dict[str, Any]:
-    """Measure cold proof construction separately from warm semantic validation."""
+    """Measure first cold construction, allocator-warm reissue, and warm validation."""
 
     metadata = getattr(batch, "fla_metadata", None)
     if metadata is None:
         raise RuntimeError("metadata proof benchmark requires prebuilt FLA metadata")
     slots = int(context.linear_state_pool.recurrent_states.shape[1])
 
-    cold_samples: list[dict[str, float | int]] = []
-    for index in range(repeats):
-        # Reset outside the timed region. The timed operation includes host tensor construction
-        # and the staged H2D copy, but not the bookkeeping assignment itself.
+    def construct() -> None:
+        with torch.inference_mode():
+            proof = operator._ensure_pascal_metadata_proof(
+                metadata,
+                device,
+                pool=context.linear_state_pool,
+                phase=batch.phase,
+            )
+        if proof is None:
+            raise RuntimeError("scheduler metadata did not produce a Pascal proof")
+
+    # Empty the CUDA allocator before the first issue so this sample is genuinely cold rather
+    # than merely proof-object cold. Subsequent proof reissues intentionally observe allocator
+    # reuse and are reported separately.
+    metadata.pascal_metadata_proof = None
+    torch.cuda.empty_cache()
+    cuda_ms, wall_ms = _timed_call(torch, device, construct)
+    first_cold_samples = [{"index": 0, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}]
+
+    allocator_warm_samples: list[dict[str, float | int]] = []
+    for index in range(max(1, repeats)):
         metadata.pascal_metadata_proof = None
-
-        def construct() -> None:
-            with torch.inference_mode():
-                proof = operator._ensure_pascal_metadata_proof(metadata, device)
-            if proof is None:
-                raise RuntimeError("scheduler metadata did not produce a Pascal proof")
-
         cuda_ms, wall_ms = _timed_call(torch, device, construct)
-        cold_samples.append(
+        allocator_warm_samples.append(
             {"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
         )
 
@@ -813,16 +829,21 @@ def _measure_metadata_proof(
                     metadata,
                     num_slots=slots,
                     num_tokens=num_tokens,
+                    device=device,
+                    phase=batch.phase,
+                    pool=context.linear_state_pool,
                 )
 
         cuda_ms, wall_ms = _timed_call(torch, device, validate)
-        warm_samples.append(
-            {"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
-        )
+        warm_samples.append({"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms})
     return {
-        "cold_proof_construction": {
-            "samples": cold_samples,
-            "statistics": _summary(cold_samples),
+        "first_cold_proof_construction": {
+            "samples": first_cold_samples,
+            "statistics": _summary(first_cold_samples),
+        },
+        "allocator_warm_proof_reissue": {
+            "samples": allocator_warm_samples,
+            "statistics": _summary(allocator_warm_samples),
         },
         "warm_proof_validation": {
             "samples": warm_samples,

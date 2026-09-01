@@ -54,6 +54,7 @@ class GraphCaptureBuffer:
         batch.fla_metadata = FLAMetadata(
             cu_seqlens=self.fla_cu_seqlens[: bs + 1],
             cache_indices=self.table_idx[_slice],
+            _pascal_metadata_phase="decode",
             pascal_metadata_proof=None,
         )
 

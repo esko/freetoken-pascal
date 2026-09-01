@@ -62,7 +62,11 @@ def _minimal_report() -> dict[str, object]:
             "samples": [{"cuda_event_ms": 0.0, "host_wall_ms": 0.0}],
             "statistics": {},
         }
-        for phase in ("cold_proof_construction", "warm_proof_validation")
+        for phase in (
+            "first_cold_proof_construction",
+            "allocator_warm_proof_reissue",
+            "warm_proof_validation",
+        )
     }
     return {
         "format_name": "raw-pascal-gdn-model-boundary-observation",

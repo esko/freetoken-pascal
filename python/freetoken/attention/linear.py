@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -42,6 +42,10 @@ class FLAMetadata:
     _pascal_host_slot_values: tuple[int, ...] | None = None
     _pascal_host_offset_values: tuple[int, ...] | None = None
     _pascal_host_initial_values: tuple[bool, ...] | None = None
+    # Every metadata object gets a unique owner token so a proof cannot be replayed on another
+    # batch even when the staged tensors happen to have the same shape and values.
+    _pascal_metadata_owner: object = field(default_factory=object, repr=False, compare=False)
+    _pascal_metadata_phase: str | None = field(default=None, repr=False, compare=False)
     # The proof is populated once by the first Pascal layer and reused by all later layers.
     pascal_metadata_proof: "PascalGdnMetadataProof | None" = None
 
@@ -54,6 +58,10 @@ class FLAMetadata:
     track_h_row: torch.Tensor | None = None      # [nt] int64 row into h (boh_i + aligned//CHUNK)
     track_conv_src: torch.Tensor | None = None   # [nt, kernel-1] int64 conv-input token positions
     track_boundary_row: torch.Tensor | None = None  # [nt] int64 forward-local row of the track boundary; states with their own left context (qwen4_exp PLE) derive their windows from it
+
+    def __post_init__(self) -> None:
+        # Do not let dataclasses.replace or caller-supplied field values clone a proof owner.
+        self._pascal_metadata_owner = object()
 
 
 def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
@@ -92,6 +100,7 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
                 None if slot_values is None else tuple(int(value) for value in slot_values)
             ),
             _pascal_host_offset_values=(tuple(range(bs + 1)) if slot_values is not None else None),
+            _pascal_metadata_phase="decode",
         )
 
     # prefill: cumsum of query (extend) lengths, per-request slot + continuation flags.
@@ -120,6 +129,7 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
         _pascal_host_slot_values=tuple(gdn_slot(r) for r in reqs),
         _pascal_host_offset_values=tuple(offsets),
         _pascal_host_initial_values=tuple(r.cached_len > 0 for r in reqs),
+        _pascal_metadata_phase="prefill",
         **track,
     )
 
