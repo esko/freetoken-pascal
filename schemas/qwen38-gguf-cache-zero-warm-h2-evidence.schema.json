@@ -7,8 +7,9 @@
   "additionalProperties": false,
   "required": [
     "schema_name", "schema_version", "evidence_status", "evidence_kind", "claim_status",
+    "repository_commit",
     "identity", "hardware_inventory", "request", "warmup", "timing", "thermal", "power",
-    "throttling", "performance", "ple", "execution", "claims"
+    "throttling", "performance", "ple", "execution", "output_token_ids", "claims"
   ],
   "properties": {
     "schema_name": {"const": "qwen38-gguf-cache-zero-warm-h2-evidence.schema.json"},
@@ -16,6 +17,7 @@
     "evidence_status": {"const": "measured"},
     "evidence_kind": {"const": "single-p4-warm-cache"},
     "claim_status": {"const": "bounded-correctness-only"},
+    "repository_commit": {"$ref": "#/$defs/commit"},
     "identity": {"$ref": "#/$defs/canonical_identity"},
     "hardware_inventory": {"$ref": "#/$defs/hardware_inventory"},
     "request": {"$ref": "#/$defs/request"},
@@ -27,6 +29,12 @@
     "performance": {"$ref": "#/$defs/performance"},
     "ple": {"$ref": "#/$defs/ple"},
     "execution": {"$ref": "#/$defs/execution"},
+    "output_token_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {"type": "integer"}
+    },
     "claims": {"$ref": "#/$defs/warm_claims"}
   },
   "$defs": {

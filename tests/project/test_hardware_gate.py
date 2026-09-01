@@ -310,6 +310,18 @@ def test_dual_short_gate_isolated_from_model_serving_path() -> None:
     assert "--expected-profile \"$profile_id\"" in gate
 
 
+def test_warm_gate_is_single_device_bounded_and_reuses_full_h2_identity() -> None:
+    gate = GATE_SCRIPT.read_text(encoding="utf-8")
+    branch = gate.split("warm-p4)", 1)[1].split("release)", 1)[0]
+
+    assert "run_warm_p4" in branch
+    assert "run_single_h2" not in branch
+    assert "scripts/run_qwen38_warm_h2.py" in gate
+    assert 'timeout 330 python scripts/run_qwen38_warm_h2.py' in gate
+    assert '--full-h2 "$full_h2"' in gate
+    assert '--gpus "device=$smoke_gpu"' in gate
+
+
 def test_inventory_requires_thermal_state_to_remain_explicitly_unqualified() -> None:
     measured = inventory(["6.1"])
     del measured["thermal_qualification"]["load_test"]

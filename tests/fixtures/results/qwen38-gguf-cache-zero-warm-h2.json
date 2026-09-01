@@ -4,6 +4,7 @@
   "evidence_status": "measured",
   "evidence_kind": "single-p4-warm-cache",
   "claim_status": "bounded-correctness-only",
+  "repository_commit": "3c9dc0422a4d52a973c85965287066c929068547",
   "identity": {
     "scope": "full-h2-model-ple-repository",
     "source_schema_name": "qwen38-gguf-cache-zero-h2-evidence.schema.json",
@@ -157,6 +158,7 @@
     "expert_execution": "cpu",
     "serving_scope": "single-p4-reference-only"
   },
+  "output_token_ids": [201519, 8691],
   "claims": {
     "model_execution": true,
     "single_p4_only": true,

@@ -58,6 +58,12 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _repository_commit() -> str:
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+    ).strip()
+
+
 def _load_inventory(path: Path, *, expected_profile: str | None) -> dict[str, Any]:
     try:
         inventory = json.loads(path.read_text(encoding="utf-8"))
@@ -252,6 +258,7 @@ def build_evidence(
         "evidence_status": "measured",
         "evidence_kind": "dual-p4-direct-device-smoke",
         "claim_status": "non-serving-device-only",
+        "repository_commit": _repository_commit(),
         "hardware_inventory": {
             "path": str(inventory_path),
             "sha256": inventory_sha256,

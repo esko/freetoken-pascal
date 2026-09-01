@@ -101,6 +101,13 @@ match are recorded without claiming a cryptographic content check. The dedicated
   `7594bce5b4`) recorded two ECC-disabled Tesla P4 cards on separate PCI roots and NUMA nodes,
   plus the PCIe Gen3 x4 NVMe on node 0. Seven short single-card tests and one dual-card discovery
   test passed. Active-load PCIe link qualification and cooling remain unqualified.
+- The bounded `dual-p4-short` producer at `df89b6d429` ran on both ECC-off cards without loading a
+  model. One isolated 1 MiB addition per device completed in 0.385 seconds (0.475 seconds total),
+  with both cards at 35 C and 23.27/23.60 W under the 75 W limit. The evidence binds inventory
+  SHA-256 `53bbac64d4669705ea796f4af92c4300eb31427ead5936d3924abdc9d67ebf0a`,
+  both UUID/PCI-root/NUMA identities, and explicit non-serving/no-TPS/no-thermal-qualification
+  claims. Raw evidence is retained on Gorilla as
+  `results/hardware/qwen38-dual-p4-device.json` for the H2/H3 investigation window.
 
 The complete 77.0 GiB expert bank was mapped/file-backed for this slice. No evidence was collected
 that all expert pages were prefaulted into DDR4 or protected from swap, so this run must not be

@@ -7,6 +7,7 @@
   "additionalProperties": false,
   "required": [
     "schema_name", "schema_version", "evidence_status", "evidence_kind", "claim_status",
+    "repository_commit",
     "request", "warmup", "timing", "thermal", "power", "throttling", "performance",
     "serving", "hardware_inventory", "devices", "claims"
   ],
@@ -16,6 +17,7 @@
     "evidence_status": {"const": "measured"},
     "evidence_kind": {"const": "dual-p4-direct-device-smoke"},
     "claim_status": {"const": "non-serving-device-only"},
+    "repository_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "hardware_inventory": {"$ref": "#/$defs/hardware_inventory"},
     "request": {"$ref": "#/$defs/request"},
     "warmup": {"$ref": "#/$defs/warmup"},
