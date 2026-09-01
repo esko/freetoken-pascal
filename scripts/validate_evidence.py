@@ -1027,6 +1027,189 @@ def _qwen38_router_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _qwen38_qsa_h2_semantic_errors(document: dict[str, Any]) -> list[str]:
+    """Validate QSA sweep bindings and derived raw timing/allocator fields."""
+    errors: list[str] = []
+    inventory = document["hardware_inventory"]
+    identity = inventory["gpu_identity"]
+    profile = inventory["profile_id"]
+    expected_ecc = "disabled" if profile == "ecc-off" else "enabled"
+    if identity["index"] != inventory["gpu_index"]:
+        errors.append("hardware_inventory.gpu_identity.index must match gpu_index")
+    if identity["ecc_mode"] != expected_ecc:
+        errors.append("hardware_inventory.gpu_identity.ecc_mode must match profile_id")
+
+    profile_record = document["profile"]
+    selected_path = profile_record["selected_path"]
+    expected_reference = selected_path == "torch-fp32-reference"
+    if profile_record["reference_only"] != expected_reference:
+        errors.append("profile.reference_only must match selected_path")
+    expected_topk = "torch" if expected_reference else "triton"
+    if profile_record["topk_backend"] != expected_topk:
+        errors.append("profile.topk_backend must match selected_path")
+
+    for index, sample in enumerate(document["telemetry"]):
+        for field in ("index", "uuid", "pci_bus_id", "name", "compute_capability", "memory_mib"):
+            if sample[field] != identity[field]:
+                errors.append(f"telemetry[{index}].{field} must match hardware inventory")
+        if sample["ecc_mode"] != expected_ecc:
+            errors.append(f"telemetry[{index}].ecc_mode must match profile_id")
+
+    workload = document["workload"]
+    contexts = tuple(workload["contexts"])
+    phases = tuple(workload["phases"])
+    samples = document["samples"]
+    sample_keys = [
+        (sample["context_tokens"], sample["phase"], sample["repeat"]) for sample in samples
+    ]
+    if len(sample_keys) != len(set(sample_keys)):
+        errors.append("QSA sweep samples must have unique context/phase/repeat identities")
+    expected_keys = {
+        (context, phase, repeat)
+        for context in contexts
+        for phase in phases
+        for repeat in range(workload["repeats"])
+    }
+    if workload["matrix_complete"] and set(sample_keys) != expected_keys:
+        errors.append("complete QSA sweep must contain every context/phase/repeat sample")
+    if document["summary"]["sample_count"] != len(samples):
+        errors.append("summary.sample_count must match raw QSA samples")
+    if document["summary"]["context_count"] != len(contexts):
+        errors.append("summary.context_count must match workload.contexts")
+    timing_statistics = document["timing_statistics"]
+    timing_keys = [(item["context_tokens"], item["phase"]) for item in timing_statistics]
+    if len(timing_keys) != len(set(timing_keys)):
+        errors.append("timing_statistics must have unique context/phase identities")
+    if workload["matrix_complete"] and set(timing_keys) != {
+        (context, phase) for context in contexts for phase in phases
+    }:
+        errors.append("complete QSA sweep must contain timing statistics for every context/phase")
+    statistics_by_key = {
+        (item["context_tokens"], item["phase"]): item for item in timing_statistics
+    }
+    for index, sample in enumerate(samples):
+        events = sample["phase_events"]
+        if sample["phase_event_count"] != len(events):
+            errors.append(f"samples[{index}].phase_event_count must match phase_events")
+        phase_sums = {
+            phase: sum(event["elapsed_ns"] for event in events if event["phase"] == phase)
+            for phase in sample["phase_elapsed_ns"]
+        }
+        if sample["phase_elapsed_ns"] != phase_sums:
+            errors.append(f"samples[{index}].phase_elapsed_ns must equal raw phase-event sums")
+        if set(event["path"] for event in events) != {selected_path}:
+            errors.append(f"samples[{index}].phase_events path must match profile.selected_path")
+        if set(event["phase"] for event in events) != set(sample["phase_elapsed_ns"]):
+            errors.append(f"samples[{index}] phase events must cover every composite phase")
+        before = sample["allocator_before"]
+        after = sample["allocator_after"]
+        for label, snapshot in (("before", before), ("after", after)):
+            if snapshot["allocator_allocated_bytes"] > snapshot["allocator_reserved_bytes"]:
+                errors.append(
+                    f"samples[{index}].allocator_{label} allocated bytes exceed reserved bytes"
+                )
+            if snapshot["allocator_high_water_bytes"] < snapshot["allocator_allocated_bytes"]:
+                errors.append(
+                    f"samples[{index}].allocator_{label} high-water is below allocated bytes"
+                )
+            if snapshot["allocator_reserved_bytes"] > snapshot["driver_total_bytes"]:
+                errors.append(
+                    f"samples[{index}].allocator_{label} reserved bytes exceed driver capacity"
+                )
+
+    for key, statistic in statistics_by_key.items():
+        selected = [
+            sample for sample in samples if (sample["context_tokens"], sample["phase"]) == key
+        ]
+        if statistic["total"]["sample_count"] != len(selected):
+            errors.append(f"timing_statistics {key} total sample_count must match raw samples")
+        total_values = [sample["total_elapsed_ns"] for sample in selected]
+        if total_values and (
+            statistic["total"]["min_ns"] != min(total_values)
+            or statistic["total"]["max_ns"] != max(total_values)
+        ):
+            errors.append(f"timing_statistics {key} total bounds must match raw samples")
+        expected_phase_names = {
+            "store_kv",
+            "index_cache_composite",
+            "selection_composite",
+            "selected_row_attention",
+        }
+        if set(statistic["composite_phases"]) != expected_phase_names:
+            errors.append(f"timing_statistics {key} composite phase names are malformed")
+        for phase_name in expected_phase_names.intersection(statistic["composite_phases"]):
+            phase_stat = statistic["composite_phases"][phase_name]
+            values = [sample["phase_elapsed_ns"][phase_name] for sample in selected]
+            if phase_stat["sample_count"] != len(values):
+                errors.append(
+                    f"timing_statistics {key} {phase_name} sample_count must match raw samples"
+                )
+            if values and (
+                phase_stat["min_ns"] != min(values) or phase_stat["max_ns"] != max(values)
+            ):
+                errors.append(f"timing_statistics {key} {phase_name} bounds must match raw samples")
+
+    plan_keys = [(item["context_tokens"], item["phase"]) for item in document["workspace_plans"]]
+    if len(plan_keys) != len(set(plan_keys)):
+        errors.append("QSA workspace plans must have unique context/phase identities")
+    expected_plan_keys = {(context, phase) for context in contexts for phase in phases}
+    if workload["matrix_complete"] and set(plan_keys) != expected_plan_keys:
+        errors.append("complete QSA sweep must contain every workspace context/phase plan")
+    for index, item in enumerate(document["workspace_plans"]):
+        if item["selected_path"] != selected_path:
+            errors.append(f"workspace_plans[{index}].selected_path must match profile")
+        if item["topk_backend"] != profile_record["topk_backend"]:
+            errors.append(f"workspace_plans[{index}].topk_backend must match profile")
+        plan = item["plan"]
+        if plan["headroom_bytes"] is not None and plan["capacity_bytes"] is not None:
+            if plan["headroom_bytes"] != plan["capacity_bytes"] - plan["required_bytes"]:
+                errors.append(
+                    f"workspace_plans[{index}] headroom must equal capacity minus required"
+                )
+        if plan["required_bytes"] != plan["persistent_bytes"] + plan["eager_transient_peak_bytes"]:
+            errors.append(
+                f"workspace_plans[{index}] required bytes must equal persistent plus eager peak"
+            )
+
+    checkpoints = document["allocator_checkpoints"]
+    checkpoint_names = [item["name"] for item in checkpoints]
+    if len(checkpoint_names) != len(set(checkpoint_names)):
+        errors.append("allocator checkpoint names must be unique")
+    for index, checkpoint in enumerate(checkpoints):
+        values = tuple(
+            checkpoint[field]
+            for field in (
+                "driver_total_bytes",
+                "driver_free_bytes",
+                "allocator_allocated_bytes",
+                "allocator_reserved_bytes",
+                "allocator_high_water_bytes",
+                "allocation_count",
+                "allocation_retries",
+                "allocation_failures",
+            )
+        )
+        if checkpoint["status"] == "measured":
+            if any(value is None for value in values):
+                errors.append(f"allocator_checkpoints[{index}] measured fields cannot be null")
+            else:
+                total, _free, allocated, reserved, high_water, _count, _retry, _failure = values
+                if allocated > reserved:
+                    errors.append(f"allocator_checkpoints[{index}] allocated exceeds reserved")
+                if high_water < allocated:
+                    errors.append(f"allocator_checkpoints[{index}] high-water is below allocated")
+                if reserved > total:
+                    errors.append(f"allocator_checkpoints[{index}] reserved exceeds capacity")
+        elif any(value is not None for value in values):
+            errors.append(f"allocator_checkpoints[{index}] unmeasured fields must be null")
+    required_unmeasured = {"startup_canary", "cancellation_state_restore"}
+    if not required_unmeasured.issubset(set(document["unmeasured"]["phases"])):
+        errors.append(
+            "unmeasured.phases must identify startup canary and cancellation/state restore"
+        )
+    return errors
+
+
 def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
     if not isinstance(document, dict):
         return ["document root must be an object"]
@@ -1126,6 +1309,8 @@ def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
         errors.extend(_qwen38_dual_p4_semantic_errors(document))
     elif schema_name == "qwen38-router-h2-evidence.schema.json":
         errors.extend(_qwen38_router_h2_semantic_errors(document))
+    elif schema_name == "qwen38-qsa-h2-evidence.schema.json":
+        errors.extend(_qwen38_qsa_h2_semantic_errors(document))
     if document.get("evidence_status") == "measured" and document.get("commit") == "0" * 40:
         errors.append("measured evidence cannot use the placeholder commit")
     return errors

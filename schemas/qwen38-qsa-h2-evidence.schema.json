@@ -1,0 +1,369 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esko/freetoken-pascal/schemas/qwen38-qsa-h2-evidence.schema.json",
+  "title": "FreeToken-Pascal bounded Qwen3.8 QSA context sweep evidence",
+  "description": "One-P4, tiny-geometry QSA prefill/decode observations with raw CUDA-event phase timings and allocator checkpoints. This document never qualifies throughput, thermals, sustained load, model quality, or a default.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_name", "schema_version", "evidence_status", "evidence_kind", "claim_status",
+    "repository_commit", "donor", "software", "hardware_inventory", "profile", "workload",
+    "workspace_plans", "allocator_checkpoints", "samples", "telemetry", "unmeasured",
+    "timing_statistics",
+    "duration_seconds", "hard_timeout_seconds", "summary", "claims"
+  ],
+  "properties": {
+    "schema_name": {"const": "qwen38-qsa-h2-evidence.schema.json"},
+    "schema_version": {"const": 1},
+    "evidence_status": {"enum": ["synthetic", "measured"]},
+    "evidence_kind": {"const": "qwen38-pascal-qsa-context-sweep"},
+    "claim_status": {"const": "bounded-qsa-context-sweep-only"},
+    "repository_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "donor": {"$ref": "#/$defs/donor"},
+    "software": {"$ref": "#/$defs/software"},
+    "hardware_inventory": {"$ref": "#/$defs/hardware_inventory"},
+    "profile": {"$ref": "#/$defs/profile"},
+    "workload": {"$ref": "#/$defs/workload"},
+    "workspace_plans": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/workspace_plan"}
+    },
+    "allocator_checkpoints": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/allocator_checkpoint"}
+    },
+    "samples": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/sample"}
+    },
+    "telemetry": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/telemetry"}
+    },
+    "unmeasured": {"$ref": "#/$defs/unmeasured"},
+    "timing_statistics": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/timing_statistics"}
+    },
+    "duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+    "hard_timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+    "summary": {"$ref": "#/$defs/summary"},
+    "claims": {"$ref": "#/$defs/claims"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonnegative_ns": {"type": "integer", "minimum": 0},
+    "donor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repository", "pull_request", "ref", "license", "method"],
+      "properties": {
+        "id": {"const": "freetoken-qwen4-pr257-merge"},
+        "repository": {"const": "https://github.com/FlashML-org/FreeToken"},
+        "pull_request": {"const": 257},
+        "ref": {"const": "bd8f3d519a48777bf22ee5c7c8f58f4f3ff31b40"},
+        "license": {"const": "Apache-2.0"},
+        "method": {"const": "upstream-qsa-context-sweep-reference"}
+      }
+    },
+    "software": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python", "torch", "cuda_runtime", "triton"],
+      "properties": {
+        "python": {"type": "string", "minLength": 1},
+        "torch": {"type": "string", "minLength": 1},
+        "cuda_runtime": {"const": "12.6"},
+        "triton": {"type": "string", "minLength": 1}
+      }
+    },
+    "hardware_inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "profile_id", "gpu_index", "gpu_identity"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "profile_id": {"enum": ["ecc-on", "ecc-off"]},
+        "gpu_index": {"type": "integer", "minimum": 0},
+        "gpu_identity": {"$ref": "#/$defs/gpu_identity"}
+      }
+    },
+    "gpu_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index", "name", "compute_capability", "memory_mib", "uuid", "pci_bus_id",
+        "ecc_mode", "pci_root", "numa_node"
+      ],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0},
+        "name": {"const": "Tesla P4"},
+        "compute_capability": {"const": "6.1"},
+        "memory_mib": {"type": "integer", "minimum": 7580, "maximum": 8192},
+        "uuid": {"type": "string", "pattern": "^GPU-[A-Za-z0-9-]+$"},
+        "pci_bus_id": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "ecc_mode": {"enum": ["enabled", "disabled"]},
+        "pci_root": {"type": "string", "pattern": "^pci[0-9a-f]{4}:[0-9a-f]{2}$"},
+        "numa_node": {"type": "integer", "minimum": 0}
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attention_backend", "selected_path", "reference_only", "topk_backend", "default_changed"],
+      "properties": {
+        "attention_backend": {"const": "qsa_sparse"},
+        "selected_path": {"enum": ["torch-fp32-reference", "triton"]},
+        "reference_only": {"type": "boolean"},
+        "topk_backend": {"enum": ["torch", "triton"]},
+        "default_changed": {"const": false}
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model", "geometry", "contexts", "phases", "batch_size", "repeats",
+        "matrix_complete", "max_duration_seconds", "sustained_load"
+      ],
+      "properties": {
+        "model": {"const": "Qwen3.8-Flash-Next"},
+        "geometry": {"const": "tiny-qwen4-qsa"},
+        "contexts": {
+          "type": "array", "uniqueItems": true, "items": {"enum": [128, 512, 2048]
+          }
+        },
+        "phases": {
+          "type": "array", "uniqueItems": true,
+          "items": {"enum": ["prefill", "decode"]}
+        },
+        "batch_size": {"const": 1},
+        "repeats": {"type": "integer", "minimum": 1, "maximum": 3},
+        "matrix_complete": {"type": "boolean"},
+        "max_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+        "sustained_load": {"const": false}
+      }
+    },
+    "workspace_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["context_tokens", "phase", "selected_path", "topk_backend", "plan"],
+      "properties": {
+        "context_tokens": {"enum": [128, 512, 2048]},
+        "phase": {"enum": ["prefill", "decode"]},
+        "selected_path": {"enum": ["torch-fp32-reference", "triton"]},
+        "topk_backend": {"enum": ["torch", "triton"]},
+        "plan": {"$ref": "#/$defs/plan"}
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "required_bytes", "capacity_bytes", "headroom_bytes", "persistent_bytes",
+        "capture_resident_bytes", "eager_transient_peak_bytes", "categories", "shapes", "request"
+      ],
+      "properties": {
+        "status": {"const": "unvalidated"},
+        "required_bytes": {"type": "integer", "minimum": 1},
+        "capacity_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "headroom_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "persistent_bytes": {"type": "integer", "minimum": 1},
+        "capture_resident_bytes": {"type": "integer", "minimum": 0},
+        "eager_transient_peak_bytes": {"type": "integer", "minimum": 1},
+        "categories": {
+          "type": "object", "additionalProperties": false,
+          "required": ["score", "top_k", "expand_gather", "attention", "state"],
+          "properties": {
+            "score": {"type": "integer", "minimum": 0},
+            "top_k": {"type": "integer", "minimum": 0},
+            "expand_gather": {"type": "integer", "minimum": 0},
+            "attention": {"type": "integer", "minimum": 0},
+            "state": {"type": "integer", "minimum": 0}
+          }
+        },
+        "shapes": {"type": "object"},
+        "request": {"type": "object"}
+      }
+    },
+    "allocator_checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "status", "context_tokens", "driver_total_bytes", "driver_free_bytes",
+        "allocator_allocated_bytes", "allocator_reserved_bytes", "allocator_high_water_bytes",
+        "allocation_count", "allocation_retries", "allocation_failures", "reason"
+      ],
+      "properties": {
+        "name": {"enum": ["post_load", "startup_canary", "first_small_prefill", "first_large_prefill", "steady_decode", "cancellation_state_restore"]},
+        "status": {"enum": ["measured", "unmeasured"]},
+        "context_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "driver_total_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "driver_free_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "allocator_allocated_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "allocator_reserved_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "allocator_high_water_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "allocation_count": {"type": ["integer", "null"], "minimum": 0},
+        "allocation_retries": {"type": ["integer", "null"], "minimum": 0},
+        "allocation_failures": {"type": ["integer", "null"], "minimum": 0},
+        "reason": {"type": ["string", "null"]}
+      }
+    },
+    "allocator_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["driver_total_bytes", "driver_free_bytes", "allocator_allocated_bytes", "allocator_reserved_bytes", "allocator_high_water_bytes"],
+      "properties": {
+        "driver_total_bytes": {"type": "integer", "minimum": 1},
+        "driver_free_bytes": {"type": "integer", "minimum": 0},
+        "allocator_allocated_bytes": {"type": "integer", "minimum": 0},
+        "allocator_reserved_bytes": {"type": "integer", "minimum": 0},
+        "allocator_high_water_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "phase_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "layer_id", "slot", "path", "elapsed_ns"],
+      "properties": {
+        "phase": {"enum": ["store_kv", "index_cache_composite", "selection_composite", "selected_row_attention"]},
+        "layer_id": {"type": "integer", "minimum": 0},
+        "slot": {"type": "integer", "minimum": 0},
+        "path": {"enum": ["torch-fp32-reference", "triton"]},
+        "elapsed_ns": {"$ref": "#/$defs/nonnegative_ns"}
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "context_tokens", "phase", "repeat", "status", "synchronized",
+        "total_elapsed_ns", "host_elapsed_ns", "phase_elapsed_ns", "phase_event_count",
+        "phase_events", "output_sha256", "output_shape", "allocator_before", "allocator_after"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "context_tokens": {"enum": [128, 512, 2048]},
+        "phase": {"enum": ["prefill", "decode"]},
+        "repeat": {"type": "integer", "minimum": 0, "maximum": 2},
+        "status": {"const": "passed"},
+        "synchronized": {"const": true},
+        "total_elapsed_ns": {"$ref": "#/$defs/nonnegative_ns"},
+        "host_elapsed_ns": {"$ref": "#/$defs/nonnegative_ns"},
+        "phase_elapsed_ns": {
+          "type": "object", "additionalProperties": false,
+          "required": ["store_kv", "index_cache_composite", "selection_composite", "selected_row_attention"],
+          "properties": {
+            "store_kv": {"$ref": "#/$defs/nonnegative_ns"},
+            "index_cache_composite": {"$ref": "#/$defs/nonnegative_ns"},
+            "selection_composite": {"$ref": "#/$defs/nonnegative_ns"},
+            "selected_row_attention": {"$ref": "#/$defs/nonnegative_ns"}
+          }
+        },
+        "phase_event_count": {"type": "integer", "minimum": 4},
+        "phase_events": {
+          "type": "array", "minItems": 4, "items": {"$ref": "#/$defs/phase_event"}
+        },
+        "output_sha256": {"$ref": "#/$defs/sha256"},
+        "output_shape": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}},
+        "allocator_before": {"$ref": "#/$defs/allocator_snapshot"},
+        "allocator_after": {"$ref": "#/$defs/allocator_snapshot"}
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captured_at", "index", "name", "uuid", "compute_capability", "memory_mib",
+        "pci_bus_id", "ecc_mode", "clocks", "temperature_celsius", "power_watts", "power_limit_watts"
+      ],
+      "properties": {
+        "captured_at": {"type": "string", "format": "date-time"},
+        "index": {"type": "integer", "minimum": 0},
+        "name": {"const": "Tesla P4"},
+        "uuid": {"type": "string", "pattern": "^GPU-[A-Za-z0-9-]+$"},
+        "compute_capability": {"const": "6.1"},
+        "memory_mib": {"type": "integer", "minimum": 7580, "maximum": 8192},
+        "pci_bus_id": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "ecc_mode": {"enum": ["enabled", "disabled"]},
+        "clocks": {
+          "type": "object", "additionalProperties": false,
+          "required": ["graphics_mhz", "memory_mhz"],
+          "properties": {"graphics_mhz": {"type": "integer", "minimum": 0}, "memory_mhz": {"type": "integer", "minimum": 0}}
+        },
+        "temperature_celsius": {"type": "number", "minimum": 0, "maximum": 100},
+        "power_watts": {"type": "number", "minimum": 0, "maximum": 100},
+        "power_limit_watts": {"type": "number", "exclusiveMinimum": 0, "maximum": 100}
+      }
+    },
+    "unmeasured": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phases", "limitations"],
+      "properties": {
+        "phases": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "limitations": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "statistics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sample_count", "min_ns", "median_ns", "max_ns", "coefficient_of_variation"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 1},
+        "min_ns": {"$ref": "#/$defs/nonnegative_ns"},
+        "median_ns": {"$ref": "#/$defs/nonnegative_ns"},
+        "max_ns": {"$ref": "#/$defs/nonnegative_ns"},
+        "coefficient_of_variation": {"type": "number", "minimum": 0}
+      }
+    },
+    "timing_statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["context_tokens", "phase", "total", "composite_phases"],
+      "properties": {
+        "context_tokens": {"enum": [128, 512, 2048]},
+        "phase": {"enum": ["prefill", "decode"]},
+        "total": {"$ref": "#/$defs/statistics"},
+        "composite_phases": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/statistics"}
+        }
+      }
+    },
+    "summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sample_count", "context_count", "phase_count", "all_samples_passed", "performance_claim", "end_to_end_claim", "thermal_qualification", "default_changed"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 1},
+        "context_count": {"type": "integer", "minimum": 1},
+        "phase_count": {"const": 2},
+        "all_samples_passed": {"const": true},
+        "performance_claim": {"const": false},
+        "end_to_end_claim": {"const": false},
+        "thermal_qualification": {"const": false},
+        "default_changed": {"const": false}
+      }
+    },
+    "claims": {
+      "type": "object", "additionalProperties": false,
+      "required": ["qsa_only", "context_sweep", "raw_samples", "phase_timings", "allocator_high_water", "performance", "end_to_end", "thermal_qualification", "sustained_load", "default_changed"],
+      "properties": {
+        "qsa_only": {"const": true},
+        "context_sweep": {"const": true},
+        "raw_samples": {"const": true},
+        "phase_timings": {"const": true},
+        "allocator_high_water": {"const": true},
+        "performance": {"const": false},
+        "end_to_end": {"const": false},
+        "thermal_qualification": {"const": false},
+        "sustained_load": {"const": false},
+        "default_changed": {"const": false}
+      }
+    }
+  }
+}

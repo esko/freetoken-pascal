@@ -42,6 +42,10 @@ exact comparison; fluent text alone is not evidence.
 Every example carries `evidence_status: synthetic`. Real runs must use `measured` and replace every
 placeholder checksum and hardware field with captured values.
 
+The QSA H2 context-sweep contract is `qwen38-qsa-h2-evidence.schema.json`.
+Its synthetic fixture covers the registered `qsa_sparse` backend at contexts 128, 512, and 2048, with prefill and decode raw samples, composite phase sums, workspace plans, and allocator checkpoints.
+The measured producer is intentionally limited to one tiny QSA layer and one request per context/phase, and records startup-canary, cancellation/restore, chunking, graph-capture, sustained-load, thermal, performance, and full-model limitations explicitly.
+
 ## Hardware gates and retention
 
 The ordinary hosted workflow is H0/H1 only. Both Tesla P4 cards are installed on Gorilla, while
