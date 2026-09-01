@@ -101,13 +101,15 @@ match are recorded without claiming a cryptographic content check. The dedicated
   `7594bce5b4`) recorded two ECC-disabled Tesla P4 cards on separate PCI roots and NUMA nodes,
   plus the PCIe Gen3 x4 NVMe on node 0. Seven short single-card tests and one dual-card discovery
   test passed. Active-load PCIe link qualification and cooling remain unqualified.
-- The bounded `dual-p4-short` producer at `df89b6d429` ran on both ECC-off cards without loading a
-  model. One isolated 1 MiB addition per device completed in 0.385 seconds (0.475 seconds total),
-  with both cards at 35 C and 23.27/23.60 W under the 75 W limit. The evidence binds inventory
-  SHA-256 `53bbac64d4669705ea796f4af92c4300eb31427ead5936d3924abdc9d67ebf0a`,
+- The bounded `dual-p4-short` producer at `bb0c29d734` ran on both ECC-off cards without loading a
+  model. One isolated 1 MiB addition per device completed in 0.377 seconds (0.465 seconds total),
+  with a 39 C peak and 23.69 W peak under the 75 W limit. The evidence binds the dedicated
+  inventory SHA-256 `bd2dbdbbc02794117751661bfef001e0a8864c3c7e267258dda87b9c50203ba7`,
   both UUID/PCI-root/NUMA identities, and explicit non-serving/no-TPS/no-thermal-qualification
   claims. Raw evidence is retained on Gorilla as
-  `results/hardware/qwen38-dual-p4-device.json` for the H2/H3 investigation window.
+  `results/hardware/qwen38-dual-p4-device.json` with SHA-256
+  `6cb6547b2af96679127895f80ee237a499809a4563fa63c9ff98369097071c1f` for the H2/H3
+  investigation window.
 - The bounded warm-cache producer at `fe6e7ca91c` reused canonical full-H2 artifact
   SHA-256 `740e0c1ab79acf5f5473c70751f645bd6f1e91235cc0b826cb14e18529f16b7e`
   instead of rehashing the four model shards; normal Engine startup still performed the dedicated
@@ -119,7 +121,9 @@ match are recorded without claiming a cryptographic content check. The dedicated
   state across the two requests was 52 C and 29.93 W under the 75 W limit. This is a single bounded
   warm-call observation, not decode-only or steady-state TPS. Raw evidence is retained on Gorilla
   as `results/hardware/qwen38-gguf-cache-zero-warm-h2.json` with SHA-256
-  `9f35348c8338db3d87d8be9c3af2d1b70a487564e8233e193001e5a33811eac4`.
+  `f4d0ad2189e62615554c7f15136921a60af11a8251a1b7e01871bf6b66e06385`; its dedicated
+  ECC-off inventory has SHA-256
+  `51d6e6654444b5b0983b83f3da5f0525888eccb5c1de894c1037bcafc6745a98`.
 
 The complete 77.0 GiB expert bank was mapped/file-backed for this slice. No evidence was collected
 that all expert pages were prefaulted into DDR4 or protected from swap, so this run must not be
