@@ -32,6 +32,17 @@ from freetoken.kvcache.linear_state_pool import (
 logger = init_logger(__name__)
 
 
+class _QwenGGUFCompositionCleanupError(RuntimeError):
+    """Startup cleanup failed while an owned Qwen GGUF bundle remained live."""
+
+    def __init__(self, primary: BaseException, cleanup: BaseException, bundle: Any) -> None:
+        self.bundle = bundle
+        super().__init__(
+            f"{primary}; startup cleanup also failed: "
+            f"{type(cleanup).__name__}: {cleanup}"
+        )
+
+
 def _load_model_host_resources(model, config: EngineConfig) -> int:
     """Acquire model-owned host resources through exactly one compatible hook.
 
@@ -127,18 +138,29 @@ def _initialize_qwen_gguf_cpu_composition(model, config: EngineConfig):
                 "Qwen GGUF cache-zero startup requires model eager CPU expert attachment"
             )
         attach_experts(bundle)
-    except BaseException:
+    except BaseException as primary_error:
+        cleanup_error: BaseException | None = None
         close_host_resources = getattr(model, "close_host_resources", None)
         if callable(close_host_resources):
             try:
                 close_host_resources()
-            except BaseException:
-                pass
-        try:
-            bundle.close()
-        except BaseException:
-            pass
-        raise
+            except BaseException as error:
+                cleanup_error = error
+        # Do not close the bundle while model-owned host resources are still live:
+        # the model may borrow the bundle's PLE mapping.  The Engine (or a direct
+        # caller) can retry cleanup from the explicit exception ownership seam.
+        if cleanup_error is None:
+            try:
+                bundle.close()
+            except BaseException as error:
+                cleanup_error = error
+        if cleanup_error is None:
+            raise
+        raise _QwenGGUFCompositionCleanupError(
+            primary_error,
+            cleanup_error,
+            bundle,
+        ) from primary_error
     return bundle, host_bytes
 
 
@@ -432,7 +454,14 @@ class Engine:
                 _preflight_qwen_gguf_cpu_engine_config(config, require_ple_artifact=True)
                 _preflight_qwen_gguf_ple_artifact(config)
             self._initialize(config)
-        except BaseException:
+        except BaseException as error:
+            # A composition helper can return ownership through its cleanup
+            # exception when bundle.close() itself failed.  Adopt it before the
+            # common rollback path so a later retry cannot leak the mapping.
+            pending_bundle = getattr(error, "bundle", None)
+            if pending_bundle is not None and self._gguf_cpu_expert_bundle is None:
+                self._gguf_cpu_expert_bundle = pending_bundle
+                self._gguf_cpu_expert_bundle_owned = True
             # Host-bank resources may already be live when any later startup step
             # (KV, backend attachment, graph capture, or warmup) fails.  Cleanup is
             # best-effort and must never mask the startup exception.
@@ -1226,10 +1255,19 @@ class Engine:
         )
 
     def shutdown(self) -> None:
-        self.graph_runner.destroy_cuda_graphs()
-        self._cleanup_host_bank_resources()
-        torch.distributed.destroy_process_group()
-        destroy_distributed()
+        try:
+            self.graph_runner.destroy_cuda_graphs()
+        finally:
+            # Host mappings and CPU workers must be released even when graph
+            # destruction fails.  Keep distributed teardown in the nested
+            # finally so a cleanup failure cannot strand the process group.
+            try:
+                self._cleanup_host_bank_resources()
+            finally:
+                try:
+                    torch.distributed.destroy_process_group()
+                finally:
+                    destroy_distributed()
 
     def attach_qwen_gguf_cpu_expert_bundle(
         self,

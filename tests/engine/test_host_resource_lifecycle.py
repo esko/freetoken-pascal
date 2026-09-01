@@ -134,6 +134,36 @@ def test_shutdown_closes_model_host_resources_once_and_is_repeatable():
     assert calls == ["graphs", "close", "graphs"]
 
 
+def test_shutdown_cleans_host_resources_when_graph_destruction_fails():
+    from freetoken.engine.engine import Engine
+
+    calls = []
+
+    class Model:
+        def close_host_resources(self):
+            calls.append("close")
+
+    def destroy_graphs():
+        calls.append("graphs")
+        raise RuntimeError("graph teardown failed")
+
+    engine = Engine.__new__(Engine)
+    engine.model = Model()
+    engine.graph_runner = SimpleNamespace(destroy_cuda_graphs=destroy_graphs)
+    engine.moe_offload_cache = None
+    engine.cpu_moe_executor = None
+    engine._expert_banks = None
+
+    with (
+        patch("freetoken.engine.engine.destroy_distributed"),
+        patch("torch.distributed.destroy_process_group"),
+    ):
+        with pytest.raises(RuntimeError, match="graph teardown failed"):
+            engine.shutdown()
+
+    assert calls == ["graphs", "close"]
+
+
 def test_qwen_model_host_resource_close_detaches_tables_and_is_idempotent():
     from freetoken.models.qwen4_exp.model import Qwen4ExpModel
 

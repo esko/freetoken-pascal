@@ -302,6 +302,74 @@ def test_qwen_cache_zero_startup_rolls_back_bundle_when_attachment_fails(monkeyp
     assert bundle.close_calls == 1
 
 
+def test_qwen_cache_zero_composition_exposes_bundle_when_cleanup_close_fails(monkeypatch):
+    from freetoken.engine.engine import _initialize_qwen_gguf_cpu_composition
+
+    class CloseFailBundle(_Bundle):
+        def close(self):
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("bundle close is temporarily unavailable")
+
+    bundle = CloseFailBundle()
+    monkeypatch.setattr(
+        "freetoken.moe.gguf_cpu.open_qwen_gguf_cpu_expert_bundle",
+        lambda *_args, **_kwargs: bundle,
+    )
+
+    class FailingModel(_Model):
+        def attach_gguf_cpu_eager_bridge(self, value, *, transfer=None):
+            del value, transfer
+            raise RuntimeError("adapter construction failed")
+
+        def close_host_resources(self):
+            return None
+
+    with pytest.raises(RuntimeError, match="adapter construction") as raised:
+        _initialize_qwen_gguf_cpu_composition(FailingModel(), _config())
+
+    assert raised.value.bundle is bundle
+    assert bundle.close_calls == 1
+    bundle.close()
+    assert bundle.close_calls == 2
+
+
+def test_engine_startup_adopts_bundle_when_composition_cleanup_close_fails(monkeypatch):
+    from freetoken.engine.engine import Engine, _initialize_qwen_gguf_cpu_composition
+
+    class CloseFailBundle(_Bundle):
+        def close(self):
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("bundle close is temporarily unavailable")
+
+    bundle = CloseFailBundle()
+    monkeypatch.setattr(
+        "freetoken.moe.gguf_cpu.open_qwen_gguf_cpu_expert_bundle",
+        lambda *_args, **_kwargs: bundle,
+    )
+    captured = {}
+
+    def initialize(self, config):
+        self.config = config
+        self.model = _Model()
+        self.moe_offload_cache = None
+        self.cpu_moe_executor = None
+        self._expert_banks = None
+        captured["engine"] = self
+        _initialize_qwen_gguf_cpu_composition(self.model, config)
+
+    monkeypatch.setattr(Engine, "_initialize", initialize)
+    monkeypatch.setattr("freetoken.engine.engine._preflight_qwen_gguf_ple_artifact", lambda _: None)
+    with pytest.raises(RuntimeError, match=r"adapter|Qwen GGUF"):
+        Engine(_config())
+
+    engine = captured["engine"]
+    assert bundle.close_calls == 2
+    assert engine._gguf_cpu_expert_bundle is None
+    assert engine._gguf_cpu_expert_bundle_owned is False
+
+
 def test_qwen_cache_zero_startup_requires_dedicated_ple_artifact():
     from freetoken.engine.engine import _initialize_qwen_gguf_cpu_composition
 
