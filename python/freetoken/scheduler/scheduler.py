@@ -339,7 +339,12 @@ class Scheduler(SchedulerIOMixin):
                 next_token = int(next_token.item())
                 # EOS / stop-string -> "stop", output budget exhausted -> "length";
                 # EOS and stop strings win over length.
-                hit_length = not req.can_decode
+                can_decode_after_forward = batch.can_decode_after_forward
+                hit_length = not (
+                    can_decode_after_forward[i]
+                    if can_decode_after_forward is not None
+                    else req.can_decode
+                )
                 hit_eos = (
                     not req.sampling_params.ignore_eos and next_token in self.eos_token_ids
                 )

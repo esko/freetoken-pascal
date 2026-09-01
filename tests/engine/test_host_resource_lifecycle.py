@@ -75,7 +75,7 @@ def test_engine_loader_accepts_models_without_host_resources():
     assert _load_model_host_resources(object(), _config()) == 0
 
 
-def test_startup_failure_closes_acquired_model_host_resources():
+def test_startup_failure_closes_acquired_model_host_resources(monkeypatch):
     from freetoken.engine.engine import Engine
 
     calls = []
@@ -98,6 +98,10 @@ def test_startup_failure_closes_acquired_model_host_resources():
         raise RuntimeError("failure after PLE acquisition")
 
     with patch.object(Engine, "_initialize", initialize):
+        # This test uses a synthetic config and exercises late rollback, not artifact parsing.
+        monkeypatch.setattr(
+            "freetoken.engine.engine._preflight_qwen_gguf_ple_artifact", lambda _: None
+        )
         with pytest.raises(RuntimeError, match="failure after PLE acquisition"):
             Engine(_config())
 
@@ -128,6 +132,36 @@ def test_shutdown_closes_model_host_resources_once_and_is_repeatable():
         engine.shutdown()
 
     assert calls == ["graphs", "close", "graphs"]
+
+
+def test_shutdown_cleans_host_resources_when_graph_destruction_fails():
+    from freetoken.engine.engine import Engine
+
+    calls = []
+
+    class Model:
+        def close_host_resources(self):
+            calls.append("close")
+
+    def destroy_graphs():
+        calls.append("graphs")
+        raise RuntimeError("graph teardown failed")
+
+    engine = Engine.__new__(Engine)
+    engine.model = Model()
+    engine.graph_runner = SimpleNamespace(destroy_cuda_graphs=destroy_graphs)
+    engine.moe_offload_cache = None
+    engine.cpu_moe_executor = None
+    engine._expert_banks = None
+
+    with (
+        patch("freetoken.engine.engine.destroy_distributed"),
+        patch("torch.distributed.destroy_process_group"),
+    ):
+        with pytest.raises(RuntimeError, match="graph teardown failed"):
+            engine.shutdown()
+
+    assert calls == ["graphs", "close"]
 
 
 def test_qwen_model_host_resource_close_detaches_tables_and_is_idempotent():

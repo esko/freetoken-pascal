@@ -459,6 +459,23 @@ def test_qwen4_gguf_v_head_reorder_roundtrip():
     assert torch.equal(grouped.flatten().index_select(0, indices), tiled)
 
 
+def test_qwen4_gguf_static_permutation_ignores_meta_model_context():
+    with torch.device("meta"):
+        indices = _grouped_to_tiled_indices(2, 3, 4)
+
+    assert indices.device.type == "cpu"
+    assert torch.equal(
+        indices,
+        torch.tensor(
+            [
+                0, 1, 2, 3, 12, 13, 14, 15,
+                4, 5, 6, 7, 16, 17, 18, 19,
+                8, 9, 10, 11, 20, 21, 22, 23,
+            ]
+        ),
+    )
+
+
 def test_qwen4_gguf_centered_norm_subtracts_before_bf16_narrowing():
     effective = torch.tensor([1.001, 0.999], dtype=torch.float32)
     tensor = SimpleNamespace(
@@ -478,6 +495,50 @@ def test_qwen4_gguf_centered_norm_subtracts_before_bf16_narrowing():
         rtol=0,
     )
 
+
+def test_qwen4_gguf_merges_hyperconnection_down_inject_and_zero_pad(monkeypatch):
+    from freetoken.models.qwen4_exp import gguf as qwen_gguf
+
+    down_source = object()
+    inject_source = object()
+    down = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.bfloat16)
+    inject = torch.tensor([[7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.bfloat16)
+    monkeypatch.setattr(
+        qwen_gguf,
+        "_to_dense",
+        lambda tensor, dtype: (down if tensor is down_source else inject).to(dtype),
+    )
+
+    merged = qwen_gguf._merge_hyperconnection_parts(
+        down_source,
+        inject_source,
+        SimpleNamespace(ple_state_width=3, hc_lowrank=2, hc_count=3),
+        name="hc.attn.0",
+    )
+
+    assert merged.dtype == torch.bfloat16
+    assert merged.shape == (16, 3)
+    torch.testing.assert_close(merged[:2], down)
+    torch.testing.assert_close(merged[2:5], inject)
+    assert torch.count_nonzero(merged[5:]) == 0
+
+
+def test_qwen4_gguf_rejects_malformed_hyperconnection_parts(monkeypatch):
+    from freetoken.models.qwen4_exp import gguf as qwen_gguf
+
+    monkeypatch.setattr(
+        qwen_gguf,
+        "_to_dense",
+        lambda tensor, dtype: torch.zeros(tensor, dtype=dtype),
+    )
+
+    with pytest.raises(ValueError, match="invalid hyperconnection geometry"):
+        qwen_gguf._merge_hyperconnection_parts(
+            (2, 4),
+            (3, 3),
+            SimpleNamespace(ple_state_width=3, hc_lowrank=2, hc_count=3),
+            name="hc.ffn.0",
+        )
 
 def test_mixed_gguf_projection_allocates_independent_buffers():
     from freetoken.layers.gguf import GGUFLinear, GGUFMergedLinear, gguf_merged_or_plain
@@ -512,6 +573,34 @@ def test_real_qwen_q4_and_q3_rows_match_pinned_reference_outputs():
         digest = hashlib.sha256(output.numpy().astype("<f4").tobytes()).hexdigest()
         assert output.numel() == row["elements"]
         assert digest == row["reference_f32_sha256"]
+
+
+def test_sensitive_q8_0_scale_and_dequant_match_pinned_oracle():
+    from freetoken.gguf_types import GGML_Q8_0
+    from freetoken.models.gguf.dequant import dequantize, dequantize_reference
+
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/sensitive/q8-0-packed-scale-parity.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    packed_bytes = base64.b64decode(fixture["packed_base64"])
+    assert hashlib.sha256(packed_bytes).hexdigest() == fixture["packed_sha256"]
+    packed = torch.frombuffer(bytearray(packed_bytes), dtype=torch.uint8)
+
+    output = dequantize(packed, GGML_Q8_0, torch.float32)
+    oracle = dequantize_reference(packed, GGML_Q8_0, torch.float32)
+
+    torch.testing.assert_close(output, oracle, atol=0, rtol=0)
+    torch.testing.assert_close(
+        output,
+        torch.tensor(fixture["expected_values"], dtype=torch.float32),
+        atol=0,
+        rtol=0,
+    )
+    assert hashlib.sha256(output.numpy().astype("<f4").tobytes()).hexdigest() == fixture[
+        "reference_f32_sha256"
+    ]
 
 
 def test_metadata_export_accepts_a_zero_tensor_first_shard(tmp_path: Path):

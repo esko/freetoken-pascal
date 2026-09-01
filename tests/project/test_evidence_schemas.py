@@ -31,7 +31,7 @@ def test_all_example_evidence_is_schema_valid() -> None:
 def test_all_evidence_schemas_are_valid_draft_2020_12() -> None:
     schemas = sorted(SCHEMA_DIR.glob("*.schema.json"))
 
-    assert len(schemas) == 6
+    assert len(schemas) == 7
     for path in schemas:
         Draft202012Validator.check_schema(json.loads(path.read_text(encoding="utf-8")))
 

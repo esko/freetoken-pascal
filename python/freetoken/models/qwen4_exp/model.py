@@ -50,9 +50,10 @@ class _MoeExecutionContext:
 
 
 def _validate_eager_moe_context(context: _MoeExecutionContext) -> None:
-    if context.phase != "decode":
+    if context.phase not in ("prefill", "decode"):
         raise ValueError(
-            f"eager GGUF expert attachment is decode-only; phase={context.phase!r} is unsupported"
+            "eager GGUF expert attachment requires phase='prefill' or 'decode'; "
+            f"got {context.phase!r}"
         )
     if context.group_size != 1:
         raise ValueError(
@@ -132,7 +133,7 @@ class _SparseMoE(Qwen4ExpMoE):
 class _MappedPLETable(PLETableBackend):
     """Adapter from the downstream CPU/NVMe PLE table to the upstream PLE backend contract."""
 
-    def __init__(self, table, head_dim: int):
+    def __init__(self, table, head_dim: int, *, owns_table: bool = True):
         try:
             descriptor = table.descriptor
             rows = int(descriptor.rows)
@@ -145,6 +146,7 @@ class _MappedPLETable(PLETableBackend):
                 f"rows={rows}, elements_per_row={elements_per_row}, head_dim={head_dim}"
             )
         self._table = table
+        self._owns_table = bool(owns_table)
         self.num_rows = rows
         self.head_dim = int(head_dim)
         self.dtype = torch.bfloat16
@@ -219,10 +221,11 @@ class _MappedPLETable(PLETableBackend):
                 self._wait_for_prefetch_locked()
             except BaseException as error:
                 failure = error
-            try:
-                self._table.close()
-            except BaseException as error:
-                failure = failure or error
+            if self._owns_table:
+                try:
+                    self._table.close()
+                except BaseException as error:
+                    failure = failure or error
         if failure is not None:
             raise failure
 
@@ -322,6 +325,29 @@ class Qwen4ExpModel(BaseOP):
         transfer: EagerTransferSeam | None = None,
     ) -> None:
         attach_gguf_cpu_eager_bridge(self, bundle, transfer=transfer)
+
+    def attach_gguf_cpu_host_resources(self, bundle: QwenGGUFCpuExpertBundle) -> int:
+        """Attach the bundle's PLE mapping without opening a second GGUF owner.
+
+        The CPU expert bundle owns both heterogeneous expert banks and the PLE mapping.
+        The model only borrows a PLE adapter; closing the bundle remains the sole release
+        operation for the mapped file.
+        """
+        if getattr(self, "_host_resources_closed", False):
+            raise RuntimeError("Qwen host resources are already closed")
+        if not hasattr(bundle, "host") or getattr(bundle, "closed", False):
+            raise ValueError("Qwen GGUF CPU bundle must be open and expose its host mapping")
+        if not self._ple:
+            return 0
+        args = self._config.qwen4_args
+        table = _MappedPLETable(bundle.host.ple, args.ngram_head_dim, owns_table=False)
+        try:
+            self._attach_ple_table(table)
+        except BaseException:
+            if not any(owner is table for owner in self._ple_tables):
+                table.close()
+            raise
+        return int(getattr(bundle.host.ple.descriptor, "tensor_bytes", 0))
 
     def detach_gguf_cpu_expert_bundle(self) -> None:
         detach_gguf_cpu_expert_bundle(self)
@@ -652,6 +678,9 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         transfer: EagerTransferSeam | None = None,
     ) -> None:
         self.model.attach_gguf_cpu_eager_bridge(bundle, transfer=transfer)
+
+    def attach_gguf_cpu_host_resources(self, bundle: QwenGGUFCpuExpertBundle) -> int:
+        return self.model.attach_gguf_cpu_host_resources(bundle)
 
     def detach_gguf_cpu_expert_bundle(self) -> None:
         self.model.detach_gguf_cpu_expert_bundle()

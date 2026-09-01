@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import CancelledError
+from dataclasses import replace
 from pathlib import Path
 
 import gguf
@@ -23,6 +24,8 @@ from freetoken.gguf_host import (
     host_memory_report_from_census,
     inspect_qwen_host_layout,
     open_qwen_host_weights,
+    validate_ple_artifact,
+    validate_ple_artifact_handoff,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -218,6 +221,73 @@ def test_ple_hash_size_and_short_range_fail_closed(tmp_path: Path) -> None:
         MappedPLETable.open_from_gguf(short)
     with pytest.raises(ValueError):
         MappedPLETable.open_from_gguf(short, backend="pread")
+
+
+def test_validate_dedicated_ple_artifact_checks_hash_and_source_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+
+    descriptor = validate_ple_artifact(artifact, source_path=FIXTURE)
+    source = inspect_qwen_host_layout(FIXTURE).ple
+    assert descriptor.rows == source.rows
+    assert descriptor.elements_per_row == source.elements_per_row
+    assert descriptor.row_bytes == source.row_bytes
+    assert descriptor.tensor_bytes == source.tensor_bytes
+    assert descriptor.codec == source.codec
+
+    manifest_path = artifact / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["rows"] += 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="geometry"):
+        validate_ple_artifact(artifact, source_path=FIXTURE)
+
+    manifest["rows"] -= 1
+    manifest["sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="sha256"):
+        validate_ple_artifact(artifact, source_path=FIXTURE)
+
+    manifest["sha256"] = hashlib.sha256((artifact / "ple.bin").read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    source_layout = inspect_qwen_host_layout(FIXTURE)
+    monkeypatch.setattr(
+        "freetoken.gguf_host.inspect_qwen_host_layout",
+        lambda _path: replace(
+            source_layout,
+            ple=replace(source_layout.ple, rows=source_layout.ple.rows + 1),
+        ),
+    )
+    with pytest.raises(ValueError, match="source GGUF descriptor: rows"):
+        validate_ple_artifact(artifact, source_path=FIXTURE)
+
+
+def test_validated_ple_handoff_reuses_checksum_and_rechecks_file_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import freetoken.gguf_host as gguf_host
+
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+    calls = 0
+    real_hash = gguf_host._sha256_file
+
+    def replacing_hash(path: Path | int, *args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        result = real_hash(path, *args, **kwargs)
+        if calls == 1:
+            replacement = artifact / "ple.replacement"
+            replacement.write_bytes(b"\x00" * (artifact / "ple.bin").stat().st_size)
+            os.replace(replacement, artifact / "ple.bin")
+        return result
+
+    monkeypatch.setattr("freetoken.gguf_host._sha256_file", replacing_hash)
+    handoff = validate_ple_artifact_handoff(artifact, source_path=FIXTURE)
+    assert calls == 1
+    with pytest.raises(ValueError, match="payload changed"):
+        MappedPLETable.open_from_artifact(artifact, validated_artifact=handoff)
+    assert calls == 1
 
 
 def test_source_ple_rejects_unknown_backend_before_opening() -> None:
@@ -460,9 +530,41 @@ def test_dedicated_ple_artifact_round_trip_and_manifest(tmp_path: Path) -> None:
     convert_gguf_ple_to_artifact(FIXTURE, artifact)
     manifest = json.loads((artifact / "manifest.json").read_text())
     assert manifest["format"] == "freetoken-pascal-ple-v1"
+    assert manifest["data_offset"] == 0
     assert manifest["tensor_bytes"] == (artifact / "ple.bin").stat().st_size
     with MappedPLETable.open_from_artifact(artifact) as table:
         assert table.lookup(np.array([0, 31])).shape == (2, 160)
+
+
+@pytest.mark.parametrize("backend", ["mmap", "pread"])
+def test_dedicated_ple_maps_only_raw_ple_payload_at_offset_zero(
+    tmp_path: Path, backend: str
+) -> None:
+    artifact = tmp_path / backend
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+
+    with MappedPLETable.open_from_artifact(artifact, backend=backend) as table:
+        assert table.descriptor.data_offset == 0
+        assert table.descriptor.shard_path == str(artifact / "ple.bin")
+        assert table._model_shard_paths == (str(artifact / "ple.bin"),)
+        if backend == "mmap":
+            assert table.mapping is not None
+            assert table.mapping.path == artifact / "ple.bin"
+            assert table.mapping._prefix == 0
+            assert table.mapping.length == table.descriptor.tensor_bytes
+        else:
+            assert table.mapping is None
+
+
+def test_dedicated_ple_rejects_nonzero_artifact_data_offset(tmp_path: Path) -> None:
+    artifact = tmp_path / "bad-offset"
+    convert_gguf_ple_to_artifact(FIXTURE, artifact)
+    manifest_path = artifact / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["data_offset"] = 1
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="data_offset must be zero"):
+        MappedPLETable.open_from_artifact(artifact)
 
 
 @pytest.mark.parametrize("backend", ["mmap", "pread"])

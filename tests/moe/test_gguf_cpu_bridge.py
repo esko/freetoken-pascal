@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
@@ -523,7 +524,6 @@ def test_bundle_preserves_mixed_layout_and_kernel_census() -> None:
         ({"backend": "hybrid"}, "CPU-only"),
         ({"backend": "offload"}, "CPU-only"),
         ({"cache_size": 1}, "cache_size=0"),
-        ({"prefill": True}, "prefill"),
         ({"grouped": True}, "group"),
     ],
 )
@@ -541,6 +541,55 @@ def test_bundle_rejects_closed_host_before_building_executor() -> None:
     host.close()
     with pytest.raises(RuntimeError, match="closed"):
         QwenGGUFCpuExpertBundle.from_host(host, top_k=1, mode="scalar")
+
+
+def test_bundle_accepts_single_request_prefill_mode() -> None:
+    torch = pytest.importorskip("torch")
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle
+
+    bundle = QwenGGUFCpuExpertBundle.from_host(
+        _host(), top_k=1, mode="scalar", prefill=True, max_tokens=2
+    )
+    output = bundle.prefill(
+        0,
+        torch.ones((2, 256), dtype=torch.float32),
+        torch.ones((2, 1), dtype=torch.float32),
+        torch.zeros((2, 1), dtype=torch.int32),
+    )
+    assert output.shape == (2, 256)
+    bundle.close()
+
+
+def test_bundle_reuses_configured_workspace_and_rejects_over_bound_before_growth() -> None:
+    torch = pytest.importorskip("torch")
+    from freetoken.moe.gguf_cpu import QwenGGUFCpuExpertBundle, UnsupportedGGUFCpuConfiguration
+
+    bundle = QwenGGUFCpuExpertBundle.from_host(
+        _host(), top_k=1, mode="scalar", max_tokens=2, max_routes=1
+    )
+    try:
+        plan = bundle.workspace_plan
+        output = bundle.prefill(
+            0,
+            torch.ones((2, 256), dtype=torch.float32),
+            torch.ones((2, 1), dtype=torch.float32),
+            torch.zeros((2, 1), dtype=torch.int32),
+        )
+        assert output.shape == (2, 256)
+        assert bundle.workspace_plan is plan
+        with pytest.raises(UnsupportedGGUFCpuConfiguration, match="workspace bound 2"):
+            bundle.prefill(
+                0,
+                torch.ones((3, 256), dtype=torch.float32),
+                torch.ones((3, 1), dtype=torch.float32),
+                torch.zeros((3, 1), dtype=torch.int32),
+            )
+        assert bundle.workspace_plan is plan
+        with pytest.raises(UnsupportedGGUFCpuConfiguration, match="workspace bound 1"):
+            bundle.prepare(max_tokens=2, max_routes=2)
+        assert bundle.workspace_plan is plan
+    finally:
+        bundle.close()
 
 
 def test_bundle_does_not_replace_explicit_zero_route_workspace() -> None:
@@ -951,6 +1000,36 @@ def test_cpu_tensor_decode_adapter_returns_cpu_tensor() -> None:
     assert output.dtype == hidden.dtype
     assert tuple(output.shape) == (1, 256)
     bundle.close()
+
+
+@pytest.mark.parametrize("ple_backend", ["mmap", "pread"])
+def test_bundle_owns_dedicated_ple_artifact_for_each_io_backend(
+    tmp_path: Path, ple_backend: str
+) -> None:
+    from freetoken.gguf_host import convert_gguf_ple_to_artifact
+    from freetoken.moe.gguf_cpu import open_qwen_gguf_cpu_expert_bundle
+
+    source = Path(__file__).resolve().parents[1] / "fixtures" / "gguf" / "qwen4-tiny-experts.gguf"
+    artifact = tmp_path / "ple-artifact"
+    convert_gguf_ple_to_artifact(source, artifact)
+    bundle = open_qwen_gguf_cpu_expert_bundle(
+        source,
+        top_k=2,
+        mode="scalar",
+        max_tokens=1,
+        ple_artifact_path=artifact,
+        ple_backend=ple_backend,
+    )
+    try:
+        assert bundle.host.ple.source_kind == "dedicated-artifact"
+        assert bundle.host.ple.backend == ple_backend
+        assert bundle.host.ple.descriptor.rows == bundle.host.layout.ple.rows
+        with pytest.raises(RuntimeError, match="owned by a CPU expert bundle"):
+            bundle.host.close()
+    finally:
+        bundle.close()
+    assert bundle.closed
+    assert bundle.host.closed
 
 
 def test_tensor_decode_rejects_non_cpu_inputs() -> None:

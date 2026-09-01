@@ -2,8 +2,8 @@
 
 The regular engine's :class:`~freetoken.moe.offload_cache.OffloadMoeCache` owns a
 homogeneous GPU slot layout.  Qwen GGUF expert banks are intentionally heterogeneous,
-so this module keeps the mapped source as the source of truth and stops at a decode-only
-CPU boundary until the model layer can consume that boundary directly.
+so this module keeps the mapped source as the source of truth and exposes a serial
+CPU boundary for one-request prefill and decode.
 """
 
 from __future__ import annotations
@@ -14,7 +14,11 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from freetoken.gguf_host import QwenGGUFHostWeights, open_qwen_host_weights
+from freetoken.gguf_host import (
+    QwenGGUFHostWeights,
+    ValidatedPLEArtifact,
+    open_qwen_host_weights,
+)
 from freetoken.moe.cpu_abi import (
     CpuAbiError,
     CpuExecutionTelemetry,
@@ -35,7 +39,7 @@ class GGUFCpuBridgeError(RuntimeError):
 
 
 class UnsupportedGGUFCpuConfiguration(ValueError):
-    """A requested runtime mode is outside the decode-only bridge contract."""
+    """A requested runtime mode is outside the one-request CPU bridge contract."""
 
 
 _SUPPORTED_QUANTS = frozenset({"Q4_K", "Q5_K", "Q5_1", "Q8_0", "IQ3_XXS", "IQ4_NL", "IQ4_XS"})
@@ -184,14 +188,9 @@ def _validate_cpu_bridge_config(
         raise UnsupportedGGUFCpuConfiguration(
             "Qwen GGUF CPU bridge requires cache_size=0; GPU slot allocation is unsupported"
         )
-    if prefill:
-        raise UnsupportedGGUFCpuConfiguration(
-            "Qwen GGUF CPU bridge currently supports decode only; prefill is unsupported"
-        )
     if grouped:
         raise UnsupportedGGUFCpuConfiguration(
-            "Qwen GGUF CPU bridge currently supports one decode request; "
-            "grouped execution is unsupported"
+            "Qwen GGUF CPU bridge currently supports one request; grouped execution is unsupported"
         )
 
 
@@ -210,7 +209,8 @@ class QwenGGUFCpuExpertBundle:
     """Owned Qwen GGUF host mappings, heterogeneous CPU layout, and Q4 executor.
 
     The bundle owns ``host`` for its entire lifetime.  Its public runtime operation is
-    one decode request at a time; prefill and grouped execution remain explicit errors.
+    one request at a time; prefill and decode share the serial correctness path while
+    grouped execution remains an explicit error.
     """
 
     def __init__(
@@ -223,6 +223,8 @@ class QwenGGUFCpuExpertBundle:
         requested_num_threads: int | None = None,
         effective_num_threads: int = 1,
         worker_plan: WorkerPlan | None = None,
+        workspace_max_tokens: int = 1,
+        workspace_max_routes: int = 0,
     ) -> None:
         self.host = host
         self.layout = layout
@@ -231,6 +233,10 @@ class QwenGGUFCpuExpertBundle:
         self._requested_num_threads = requested_num_threads
         self._effective_num_threads = effective_num_threads
         self._worker_plan = worker_plan
+        self._workspace_max_tokens = _checked_int(workspace_max_tokens, "workspace_max_tokens")
+        self._workspace_max_routes = _checked_int(workspace_max_routes, "workspace_max_routes")
+        if self._workspace_max_tokens <= 0 or self._workspace_max_routes < 0:
+            raise ValueError("workspace bounds must be positive tokens and non-negative routes")
         self._last_execution_telemetry: CpuExecutionTelemetry | None = None
         self._closed = False
         self._host_owner_token: object | None = None
@@ -329,6 +335,7 @@ class QwenGGUFCpuExpertBundle:
             message += ", ".join(unsupported)
             raise UnsupportedGGUFCpuConfiguration(message)
         executor: Q4KExecutor | None = None
+        resolved_max_routes = max_routes if max_routes is not None else top_k
         try:
             executor = Q4KExecutor(
                 layout,
@@ -343,7 +350,7 @@ class QwenGGUFCpuExpertBundle:
             )
             executor.prepare(
                 max_tokens=max_tokens,
-                max_routes=max_routes if max_routes is not None else top_k,
+                max_routes=resolved_max_routes,
             )
         except BaseException:
             if executor is not None:
@@ -363,6 +370,8 @@ class QwenGGUFCpuExpertBundle:
                 requested_num_threads=requested_num_threads,
                 effective_num_threads=effective_num_threads,
                 worker_plan=worker_plan,
+                workspace_max_tokens=max_tokens,
+                workspace_max_routes=resolved_max_routes,
             )
             bundle._host_owner_token = host.claim_cpu_bridge()
             return bundle
@@ -446,6 +455,18 @@ class QwenGGUFCpuExpertBundle:
 
     def prepare(self, max_tokens: int, max_routes: int) -> Any:
         self._require_open()
+        max_tokens = _checked_int(max_tokens, "max_tokens")
+        max_routes = _checked_int(max_routes, "max_routes")
+        if max_tokens > self._workspace_max_tokens:
+            raise UnsupportedGGUFCpuConfiguration(
+                f"requested max_tokens={max_tokens} exceeds configured CPU workspace bound "
+                f"{self._workspace_max_tokens}"
+            )
+        if max_routes > self._workspace_max_routes:
+            raise UnsupportedGGUFCpuConfiguration(
+                f"requested max_routes={max_routes} exceeds configured CPU workspace bound "
+                f"{self._workspace_max_routes}"
+            )
         return self.executor.prepare(max_tokens=max_tokens, max_routes=max_routes)
 
     @property
@@ -487,6 +508,28 @@ class QwenGGUFCpuExpertBundle:
             if value.device.type != "cpu":
                 raise ValueError(f"{name} must be a CPU tensor, got {value.device}")
 
+        # Reject over-bound requests before Torch->NumPy conversion or any workspace
+        # re-preparation.  The configured bound is established by Engine startup from the
+        # scheduler/model limits and is deliberately finite for this correctness slice.
+        if hidden_states.ndim != 2:
+            raise ValueError(f"hidden_states must be rank 2, got {tuple(hidden_states.shape)}")
+        if topk_weights.ndim != 2 or topk_ids.ndim != 2:
+            raise ValueError("topk_weights and topk_ids must be rank 2")
+        if topk_weights.shape != topk_ids.shape:
+            raise ValueError("topk_weights and topk_ids shapes disagree")
+        requested_tokens = int(hidden_states.shape[0])
+        requested_routes = int(topk_ids.shape[1])
+        if requested_tokens > self._workspace_max_tokens:
+            raise UnsupportedGGUFCpuConfiguration(
+                f"request token count {requested_tokens} exceeds configured CPU workspace "
+                f"bound {self._workspace_max_tokens}"
+            )
+        if requested_routes > self._workspace_max_routes:
+            raise UnsupportedGGUFCpuConfiguration(
+                f"request route count {requested_routes} exceeds configured CPU workspace "
+                f"bound {self._workspace_max_routes}"
+            )
+
         allowed_hidden = {torch.float16, torch.float32}
         if hasattr(torch, "bfloat16"):
             allowed_hidden.add(torch.bfloat16)
@@ -505,6 +548,14 @@ class QwenGGUFCpuExpertBundle:
         hidden_np = hidden_states.detach().contiguous().to(dtype=torch.float32).numpy()
         weights_np = topk_weights.detach().contiguous().to(dtype=torch.float32).numpy()
         ids_np = topk_ids.detach().contiguous().to(dtype=torch.int32).numpy()
+        plan = self.workspace_plan
+        # The executor was prepared to the configured bound at startup.  Keep this check in
+        # the adapter as a defensive invariant in case a caller manually re-prepared it smaller.
+        if requested_tokens > int(plan.max_tokens) or requested_routes > int(plan.max_routes):
+            raise UnsupportedGGUFCpuConfiguration(
+                f"request shape ({requested_tokens}, {requested_routes}) exceeds prepared "
+                f"workspace ({plan.max_tokens}, {plan.max_routes})"
+            )
         try:
             result = self.executor.execute(
                 layer_id,
@@ -523,10 +574,22 @@ class QwenGGUFCpuExpertBundle:
             dtype=hidden_states.dtype,
         )
 
-    def prefill(self, *_args: Any, **_kwargs: Any) -> None:
-        self._require_open()
-        raise UnsupportedGGUFCpuConfiguration(
-            "Qwen GGUF CPU bridge currently supports decode only; prefill is unsupported"
+    def prefill(
+        self,
+        layer_id: int,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        *,
+        num_token_non_padded: int | None = None,
+    ) -> torch.Tensor:
+        """Execute one prefill token matrix through the same serial CPU ABI as decode."""
+        return self.decode(
+            layer_id,
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            num_token_non_padded=num_token_non_padded,
         )
 
     def execute_group(self, *_args: Any, **_kwargs: Any) -> None:
@@ -543,12 +606,24 @@ class QwenGGUFCpuExpertBundle:
     def host_weight_telemetry(self) -> dict[str, object]:
         self._require_open()
         execution = self._last_execution_telemetry
+        ple = self.host.ple
+        ple_telemetry = getattr(ple, "telemetry", None)
+        ple_telemetry = ple_telemetry() if callable(ple_telemetry) else {}
         return {
-            "source": "gguf-mmap",
+            "source": getattr(ple, "source_kind", "gguf-mmap"),
+            "ple_backend": getattr(ple, "backend", "mmap"),
+            "ple_codec_identity": ple_telemetry.get("codec_identity"),
+            # Routed experts are always read from the immutable host GGUF mappings and
+            # executed by this CPU bridge.  Keep these explicit so hardware evidence cannot
+            # confuse the dedicated PLE artifact source with an expert execution backend.
+            "expert_source": "gguf-host-mmap",
+            "expert_execution_device": "cpu",
             "memory": self.host.memory_report(),
             "kernel_census": self.kernel_census,
             "requested_num_threads": self._requested_num_threads,
             "effective_num_threads": self._effective_num_threads,
+            "workspace_max_tokens": self._workspace_max_tokens,
+            "workspace_max_routes": self._workspace_max_routes,
             "actual_thread_count": None if execution is None else execution.thread_count,
             "threading_fallback_reason": self.threading_fallback_reason,
             "affinity_telemetry": self.affinity_telemetry,
@@ -597,6 +672,9 @@ def open_qwen_gguf_cpu_expert_bundle(
     prefill: bool = False,
     grouped: bool = False,
     supported_expert_types: Collection[int] | None = None,
+    ple_artifact_path: str | Path | None = None,
+    ple_artifact_validation: ValidatedPLEArtifact | None = None,
+    ple_backend: str = "mmap",
     ple_warm_mode: str = "cold",
     ple_planner_mode: str = "vectorized",
     ple_planner_direct_threshold: int = 8,
@@ -613,6 +691,9 @@ def open_qwen_gguf_cpu_expert_bundle(
     host = open_qwen_host_weights(
         path,
         supported_expert_types=supported_expert_types,
+        ple_artifact_path=ple_artifact_path,
+        ple_artifact_validation=ple_artifact_validation,
+        ple_backend=ple_backend,
         ple_warm_mode=ple_warm_mode,
         ple_planner_mode=ple_planner_mode,
         ple_planner_direct_threshold=ple_planner_direct_threshold,
@@ -648,8 +729,8 @@ def register_qwen_gguf_cpu_expert_bundle(
 ) -> QwenGGUFCpuExpertBundle:
     """Narrow registration seam for callers that can provide a CPU-only config.
 
-    The regular CUDA engine must not call this until its model MoE layer accepts the bundle;
-    registering it today is deliberately explicit and never creates a homogeneous cache.
+    The explicit registration helper never creates a homogeneous cache. Engine startup uses
+    its own transactional composition seam so it can also attach the dedicated PLE owner.
     """
     bridge_config_kwargs = {
         name: kwargs[name]

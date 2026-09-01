@@ -263,6 +263,26 @@ def test_offline_handler_ignores_online_prompt_accounting_signal():
     LLM.offline_send_result(offline, [PromptAdmittedMsg(uid=1, prompt_tokens=10)])
 
 
+def test_offline_handler_keeps_length_finished_eos_when_eos_is_ignored():
+    from freetoken.llm.llm import LLM
+
+    status = SimpleNamespace(output_ids=[])
+    offline = SimpleNamespace(status_map={1: status}, eos_token_ids={7})
+
+    LLM.offline_send_result(
+        offline,
+        [DetokenizeMsg(uid=1, next_token=7, finished=True, finish_reason="length")],
+    )
+    assert status.output_ids == [7]
+
+    status.output_ids.clear()
+    LLM.offline_send_result(
+        offline,
+        [DetokenizeMsg(uid=1, next_token=7, finished=True, finish_reason="stop")],
+    )
+    assert status.output_ids == []
+
+
 def test_frontend_manager_generates_unique_uuid_instance_ids():
     config = SimpleNamespace()
     first = FrontendManager(config=config, send_tokenizer=None, recv_tokenizer=None)

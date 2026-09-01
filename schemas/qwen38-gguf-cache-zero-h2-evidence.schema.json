@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esko/freetoken-pascal/schemas/qwen38-gguf-cache-zero-h2-evidence.schema.json",
+  "title": "FreeToken-Pascal Qwen3.8 GGUF cache-zero H2 evidence",
+  "description": "Measured single-P4 cache-zero vertical-path evidence. Nested runtime telemetry remains extensible, while artifact identity and the selected execution path are typed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_name", "schema_version", "evidence_status", "repository_commit", "model", "ple_artifact",
+    "hardware", "config", "expert_quant_census", "expert_source", "ple_telemetry",
+    "expert_telemetry", "generation", "startup_seconds"
+  ],
+  "properties": {
+    "schema_name": {"const": "qwen38-gguf-cache-zero-h2-evidence.schema.json"},
+    "schema_version": {"const": 1},
+    "evidence_status": {"const": "measured"},
+    "repository_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "model": {"$ref": "#/$defs/model"},
+    "ple_artifact": {"$ref": "#/$defs/ple_artifact"},
+    "hardware": {"$ref": "#/$defs/hardware"},
+    "config": {"$ref": "#/$defs/config"},
+    "expert_quant_census": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "expert_source": {"$ref": "#/$defs/expert_source"},
+    "ple_telemetry": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/ple_telemetry"}
+    },
+    "expert_telemetry": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/expert_telemetry"}
+    },
+    "generation": {"$ref": "#/$defs/generation"},
+    "startup_seconds": {"type": "number", "exclusiveMinimum": 0}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision", "variant", "shards", "quant_type_counts"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "minLength": 1},
+        "variant": {"const": "UD-Q4_K_XL"},
+        "shards": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/model_shard"}
+        },
+        "observed_sizes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "integer", "minimum": 1}
+        },
+        "quant_type_counts": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "model_shard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "size", "sha256", "observed_sha256", "sha256_status"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "size": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "observed_sha256": {"$ref": "#/$defs/sha256"},
+        "sha256_status": {"const": "verified"}
+      }
+    },
+    "ple_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path", "sha256", "payload", "payload_bytes", "tensor_name", "quant_name",
+        "codec", "rows", "elements_per_row", "row_bytes", "tensor_bytes"
+      ],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "payload": {"const": "ple.bin"},
+        "payload_bytes": {"type": "integer", "minimum": 1},
+        "tensor_name": {"type": "string", "minLength": 1},
+        "quant_name": {"type": "string", "minLength": 1},
+        "codec": {"type": "object", "minProperties": 1, "additionalProperties": true},
+        "rows": {"type": "integer", "minimum": 1},
+        "elements_per_row": {"type": "integer", "minimum": 1},
+        "row_bytes": {"type": "integer", "minimum": 1},
+        "tensor_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "compute_capability", "usable_memory_mib"],
+      "properties": {
+        "name": {"const": "Tesla P4"},
+        "compute_capability": {"const": "6.1"},
+        "usable_memory_mib": {"type": "integer", "minimum": 7580, "maximum": 8192}
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tp_size", "max_running_req", "max_extend_tokens", "max_seq_len", "moe_backend",
+        "moe_cpu_threads", "moe_cache_size", "cuda_graph_bs", "cuda_graph_max_bs",
+        "offload_moe_cache", "cache_type", "ple_backend"
+      ],
+      "properties": {
+        "tp_size": {"const": 1},
+        "max_running_req": {"const": 1},
+        "max_extend_tokens": {"type": "integer", "minimum": 1},
+        "max_seq_len": {"type": "integer", "minimum": 1},
+        "moe_backend": {"const": "cpu"},
+        "moe_cpu_threads": {"type": "integer", "minimum": 1},
+        "moe_cache_size": {"const": 0},
+        "cuda_graph_bs": {"const": []},
+        "cuda_graph_max_bs": {"const": 0},
+        "offload_moe_cache": {"const": false},
+        "cache_type": {"type": "string", "minLength": 1},
+        "ple_backend": {"enum": ["mmap", "pread"]}
+      }
+    },
+    "expert_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "execution_device", "ssd_execution", "memory"],
+      "properties": {
+        "kind": {"const": "gguf-host-mmap"},
+        "execution_device": {"const": "cpu"},
+        "ssd_execution": {"const": false},
+        "memory": {"$ref": "#/$defs/memory"}
+      }
+    },
+    "memory": {
+      "type": "object",
+      "required": ["expert_mapped_bytes", "anonymous_host_source_bytes", "pinned_host_source_bytes"],
+      "properties": {
+        "expert_mapped_bytes": {"type": "integer", "minimum": 1},
+        "anonymous_host_source_bytes": {"const": 0},
+        "pinned_host_source_bytes": {"const": 0}
+      },
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "ple_telemetry": {
+      "type": "object",
+      "required": ["backend", "source_kind", "mapped_bytes"],
+      "properties": {
+        "backend": {"enum": ["mmap", "pread"]},
+        "source_kind": {"const": "dedicated-artifact"},
+        "mapped_bytes": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "expert_telemetry": {
+      "type": "object",
+      "required": ["expert_source", "expert_execution_device", "memory", "affinity_telemetry", "execution_telemetry"],
+      "properties": {
+        "expert_source": {"const": "gguf-host-mmap"},
+        "expert_execution_device": {"const": "cpu"},
+        "memory": {"$ref": "#/$defs/memory"},
+        "affinity_telemetry": {"$ref": "#/$defs/affinity_telemetry"},
+        "execution_telemetry": {"$ref": "#/$defs/execution_telemetry"}
+      },
+      "additionalProperties": true
+    },
+    "affinity_telemetry": {
+      "type": "object",
+      "required": ["affinity_status", "verification_status", "affinity_verified", "worker_affinity_errors"],
+      "properties": {
+        "affinity_status": {"const": "verified"},
+        "verification_status": {"const": "verified"},
+        "affinity_verified": {"const": true},
+        "worker_affinity_errors": {"const": []}
+      },
+      "additionalProperties": true
+    },
+    "execution_telemetry": {
+      "type": "object",
+      "required": ["backend", "kernel_census", "thread_count", "routes_executed", "bytes_read_packed"],
+      "properties": {
+        "backend": {"enum": ["q4_k_avx2", "mixed_gemv_avx2", "mixed_avx2"]},
+        "kernel_census": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "pattern": "_avx2$"}
+        },
+        "thread_count": {"type": "integer", "minimum": 1},
+        "routes_executed": {"type": "integer", "minimum": 0},
+        "bytes_read_packed": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt", "output_token_count", "output_token_ids", "elapsed_seconds", "observed_tokens_per_second"],
+      "properties": {
+        "prompt": {"type": "string", "minLength": 1},
+        "output_token_count": {"type": "integer", "minimum": 1},
+        "output_token_ids": {"type": "array", "minItems": 1, "items": {"type": "integer"}},
+        "elapsed_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "observed_tokens_per_second": {"type": "number", "exclusiveMinimum": 0}
+      }
+    }
+  }
+}

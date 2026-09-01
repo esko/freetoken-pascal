@@ -60,7 +60,10 @@ def _grouped_to_tiled_indices(
     values_per_key: int,
     head_dim: int,
 ) -> torch.Tensor:
-    grouped = torch.arange(num_key_heads * values_per_key * head_dim)
+    # Model construction runs under a temporary meta-device context.  This is
+    # immutable operator metadata, not a model parameter, and must contain real
+    # values before GGUFInputPermutedLinear stores its CPU copy.
+    grouped = torch.arange(num_key_heads * values_per_key * head_dim, device="cpu")
     return grouped.reshape(num_key_heads, values_per_key, head_dim).permute(1, 0, 2).flatten()
 
 
@@ -75,6 +78,32 @@ def _centered_norm(tensor) -> torch.Tensor:
     # bf16 first can round it to exactly one and erase the learned centered
     # offset that GemmaPlusOneRMSNorm expects.
     return (_to_dense(tensor, torch.float32) - 1.0).to(torch.bfloat16)
+
+
+def _merge_hyperconnection_parts(down_tensor, inject_tensor, args, *, name: str) -> torch.Tensor:
+    """Reproduce the reconciled loader's down/inject/pad row order for GGUF."""
+    down = _to_dense(down_tensor, torch.bfloat16)
+    inject = _to_dense(inject_tensor, torch.bfloat16)
+    expected_width = args.ple_state_width
+    expected_down = (args.hc_lowrank, expected_width)
+    expected_inject = (args.hc_count, expected_width)
+    if tuple(down.shape) != expected_down or tuple(inject.shape) != expected_inject:
+        raise ValueError(
+            f"{name}: invalid hyperconnection geometry: "
+            f"down={tuple(down.shape)}, inject={tuple(inject.shape)}, "
+            f"expected={expected_down}/{expected_inject}"
+        )
+    pad_rows = (-(args.hc_lowrank + args.hc_count)) % 16
+    parts = [down, inject]
+    if pad_rows:
+        parts.append(
+            torch.zeros(
+                (pad_rows, expected_width),
+                dtype=torch.bfloat16,
+                device=down.device,
+            )
+        )
+    return torch.cat(parts, dim=0)
 
 
 def _require_tp1(what: str) -> None:
@@ -124,9 +153,15 @@ def iter_gguf_weights(
         assert multipliers is not None and vocab_sizes is not None and offsets is not None
         for layer_id in args.ple_layer_ids:
             prefix = f"model.layers.{layer_id}.ple.ple_embedding"
-            yield f"{prefix}.layer_multipliers", torch.tensor(multipliers, dtype=torch.int64)
-            yield f"{prefix}.ngram_heads_vocab_sizes", torch.tensor(vocab_sizes, dtype=torch.int64)
-            yield f"{prefix}.ngram_heads_offsets", torch.tensor(offsets, dtype=torch.int64)
+            yield f"{prefix}.layer_multipliers", torch.tensor(
+                multipliers, dtype=torch.int64, device="cpu"
+            )
+            yield f"{prefix}.ngram_heads_vocab_sizes", torch.tensor(
+                vocab_sizes, dtype=torch.int64, device="cpu"
+            )
+            yield f"{prefix}.ngram_heads_offsets", torch.tensor(
+                offsets, dtype=torch.int64, device="cpu"
+            )
     values_per_key = linear_group.num_value_heads // linear_group.num_key_heads
     qk_rows = 2 * linear_group.num_key_heads * linear_group.key_head_dim
     value_rows = linear_group.num_value_heads * linear_group.value_head_dim
@@ -154,6 +189,29 @@ def iter_gguf_weights(
                 for index, part in enumerate(slots):
                     yield f"{target}.qweight_{index}", group[part].packed()
             del buffers[name]
+
+    def merged_hyperconnection_group(
+        name: str,
+        slot: str,
+        target: str,
+        tensor,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """Materialize the correctness-first BF16 down/inject control projection.
+
+        The reconciled Qwen graph fuses the quantized low-rank down rows with the
+        source-precision residual-write-gate rows and a 16-row alignment pad.  A
+        native GGUF linear cannot represent that heterogeneous source pair, so the
+        cache-zero reference path retains the same dense merged parameter used by
+        the safetensors loader.
+        """
+        group = buffers.setdefault(name, {})
+        group[slot] = tensor
+        if "down" not in group or "inject" not in group:
+            return
+        yield target, _merge_hyperconnection_parts(
+            group["down"], group["inject"], args, name=name
+        )
+        del buffers[name]
 
     for tensor in iter_gguf_tensors(model_path):
         name = tensor.name
@@ -193,14 +251,29 @@ def iter_gguf_weights(
         dense_map = {
             "ffn_gate_inp.weight": f"{base}.mlp.gate.weight",
             "ffn_gate_inp_shexp.weight": f"{base}.mlp.shared_expert_gate.weight",
-            "hc_attn_inject.weight": f"{base}.attn_hyper_connection.block_inject_weight.weight",
-            "hc_ffn_inject.weight": f"{base}.mlp_hyper_connection.block_inject_weight.weight",
         }
         if suffix in dense_map:
             value = _to_dense(tensor, torch.bfloat16)
             if suffix == "ffn_gate_inp_shexp.weight":
                 value = value.reshape(1, -1)
             yield dense_map[suffix], value
+            continue
+
+        if suffix in {
+            "hc_attn_down.weight",
+            "hc_attn_inject.weight",
+            "hc_ffn_down.weight",
+            "hc_ffn_inject.weight",
+        }:
+            kind = "attn" if suffix.startswith("hc_attn") else "ffn"
+            slot = "down" if "_down." in suffix else "inject"
+            owner = "attn_hyper_connection" if kind == "attn" else "mlp_hyper_connection"
+            yield from merged_hyperconnection_group(
+                f"hc.{kind}.{layer}",
+                slot,
+                f"{base}.{owner}.input_mix_weight_down_block_inject.weight",
+                tensor,
+            )
             continue
 
         norm_map = {
@@ -220,9 +293,7 @@ def iter_gguf_weights(
             continue
 
         packed_map = {
-            "hc_attn_down.weight": f"{base}.attn_hyper_connection.input_mix_weight_down.qweight",
             "hc_attn_up.weight": f"{base}.attn_hyper_connection.input_mix_weight_up.qweight",
-            "hc_ffn_down.weight": f"{base}.mlp_hyper_connection.input_mix_weight_down.qweight",
             "hc_ffn_up.weight": f"{base}.mlp_hyper_connection.input_mix_weight_up.qweight",
             "ffn_down_shexp.weight": f"{base}.mlp.shared_expert.down_proj.qweight",
             "ple_key.weight": f"{base}.ple.key_proj.qweight",
@@ -457,7 +528,6 @@ def convert_qwen4_to_gguf(model, config: ModelConfig, *, model_path: str) -> Non
             (layer.attn_hyper_connection, "hc_attn"),
             (layer.mlp_hyper_connection, "hc_ffn"),
         ):
-            swap(hyper, "input_mix_weight_down", layer_index, f"{prefix}_down.weight")
             swap(hyper, "input_mix_weight_up", layer_index, f"{prefix}_up.weight")
 
         width = config.shared_expert_intermediate_size

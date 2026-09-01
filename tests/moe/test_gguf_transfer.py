@@ -263,7 +263,7 @@ def test_mid_transfer_failure_preserves_only_completed_copy_telemetry() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"phase": "prefill"}, "decode-only"),
+        ({"phase": "invalid"}, "phase"),
         ({"phase": "decode", "group_size": 2}, "grouped"),
         ({"phase": "decode", "graph_capture": True}, "graph capture"),
         ({"phase": "decode", "workspace": object()}, "workspace"),
@@ -303,8 +303,8 @@ def test_failed_request_clears_success_telemetry_and_does_not_return_stale_outpu
     bridge.routed_forward(hidden, weights, ids, phase="decode")
     assert bridge.last_telemetry is not None
 
-    with pytest.raises(ValueError, match="decode-only"):
-        bridge.routed_forward(hidden, weights, ids, phase="prefill")
+    with pytest.raises(ValueError, match="phase"):
+        bridge.routed_forward(hidden, weights, ids, phase="invalid")
     assert bridge.last_telemetry is None
     assert bridge.last_error_telemetry is not None
     assert bridge.last_error_telemetry.error == "UnsupportedGGUFCpuConfiguration"
@@ -332,7 +332,7 @@ def test_delayed_older_error_cannot_overwrite_later_success_telemetry() -> None:
 
     def fail_old_request() -> None:
         try:
-            bridge.routed_forward(hidden, weights, ids, phase="prefill")
+            bridge.routed_forward(hidden, weights, ids, phase="invalid")
         except Exception as error:
             failures.append(error)
 

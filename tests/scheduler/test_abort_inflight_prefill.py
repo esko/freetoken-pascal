@@ -75,13 +75,25 @@ def _setup():
     return pool, cm, tm, dm, pm, sent, stub
 
 
-def _launch_req(pool, cm, tm, prompt, *, cls=Req, track_seqlen=None):
+def _launch_req(
+    pool,
+    cm,
+    tm,
+    prompt,
+    *,
+    cls=Req,
+    output_len=4,
+    ignore_eos=False,
+    track_seqlen=None,
+):
     """A launched (forward in flight) hybrid req: handle locked, pages allocated,
     GDN slots held, cached_len advanced -- the state _process_last_data will drain."""
     mr = cm.match_req(SimpleNamespace(input_ids=prompt, input_len=len(prompt),
                                       mm_embeds=None))
-    req = cls(input_ids=prompt, table_idx=tm.allocate(), cached_len=0, output_len=4,
-              uid=UID, sampling_params=SamplingParams(max_tokens=4),
+    req = cls(input_ids=prompt, table_idx=tm.allocate(), cached_len=0, output_len=output_len,
+              uid=UID, sampling_params=SamplingParams(
+                  max_tokens=output_len, ignore_eos=ignore_eos
+              ),
               cache_handle=mr.cuda_handle)
     req.linear_slot_idx = pool.alloc(1)[0]
     req.mamba_ping_pong = tuple(pool.alloc(2))
@@ -91,6 +103,43 @@ def _launch_req(pool, cm, tm, prompt, *, cls=Req, track_seqlen=None):
     req.complete_one()
     req.mamba_last_track_seqlen = track_seqlen
     return req
+
+
+def test_overlap_length_budget_counts_drained_outputs_not_reserved_slot():
+    """A prefetched decode reservation must not consume one output-token budget slot."""
+    pool, cm, tm, dm, _pm, sent, stub = _setup()
+    stub.eos_token_ids = {42}
+    stub.cache_manager.cache_req = lambda _req, finished: None
+    req = _launch_req(
+        pool,
+        cm,
+        tm,
+        torch.arange(1, 13, dtype=torch.int32),
+        output_len=2,
+        ignore_eos=True,
+    )
+    prefill = Batch(reqs=[req], phase="prefill")
+    prefill.can_decode_after_forward = (True,)
+    dm.filter_reqs(prefill.reqs)
+
+    # Overlap launches decode before the prefill reply drains; Engine.forward_batch's
+    # complete_one() advances the request state for that in-flight decode reservation.
+    req.complete_one()
+    dm.filter_reqs([req])
+    Scheduler._process_last_data(stub, _as_last_data(prefill))
+
+    assert len(sent) == 1
+    assert not sent[0].finished
+    assert req.table_idx != -1
+
+    decode = Batch(reqs=[req], phase="decode")
+    decode.can_decode_after_forward = (False,)
+    Scheduler._process_last_data(stub, _as_last_data(decode))
+
+    assert len(sent) == 2
+    assert sent[1].finished
+    assert sent[1].finish_reason == "length"
+    assert req.table_idx == -1
 
 
 def _as_last_data(batch):

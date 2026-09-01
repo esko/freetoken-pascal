@@ -49,6 +49,20 @@ A tiny Qwen4 model passes CPU/reference tests on the completed #77/#81 reconcili
 
 After P4 installation, one-P4 GDN end-to-end qualification, PLE I/O behavior, and safe cache-disabled decode must pass on hardware. Standalone and explicit model-boundary GDN parity now pass, but the optimized `pascal-fp32` path remains factory-disabled until same-workload end-to-end evidence improves performance outside noise.
 
+The first correctness-first vertical H2 slice now passes on Gorilla with ECC disabled and the
+pinned `UD-Q4_K_XL` artifact: both random-advised `mmap` and `pread` PLE providers completed the
+same five-token prompt and two-token ordinary-decode request through the real Engine. The run used
+the dedicated 28.8 GB IQ4_NL PLE artifact, the complete 77.0 GB mapped/file-backed GGUF expert
+bank, observed eight-thread AVX2 expert execution, cache size zero, and the visible Pascal QSA/GDN
+reference fallbacks. “Mapped/file-backed” records the ownership and addressability proven by this
+slice; it does not claim that the full bank was prefaulted, resident in DDR4, or protected from
+swap. This is integration evidence, not profile qualification or a throughput target; cold cache,
+sustained decode, long-context quality, placement, residency/no-swap, and optimized QSA/GDN work
+remain gated. The earlier stacked-branch run IDs map by exact patch diff to clean-branch commits
+`d924ba4b9a` for the mmap run (`0b5cadb0a7`) and `c34648dbbe` for the pread run (`3b52df561c`).
+Those clean commits provide source provenance, not a claim that the hardware runs were rerun after
+the branch was cleaned; a clean-branch rerun remains a reproducibility follow-up.
+
 ## Phase 2 — AVX2 host expert backend and model profiles
 
 ### Outcomes
@@ -65,35 +79,39 @@ After P4 installation, one-P4 GDN end-to-end qualification, PLE I/O behavior, an
 - controlled broken fixtures that mis-scale a shared-expert gate and perturb/reduce a GDN state-control tensor, with the quality harness required to fail on both;
 - gate/up activation/down fused at the right boundary;
 - bounded pinned-memory and NUMA-aware host bank;
-- load and pre-fault the complete quantized routed-expert bank into its DDR4 serving allocation, keep it as the sole steady-state source for CPU execution and P4 cache fills, and account separately for PLE Linux page-cache residency without creating an uncontrolled duplicate full-bank copy;
+- define and qualify loading and prefaulting the complete quantized routed-expert bank into its DDR4 serving allocation, keep that resident bank as the sole steady-state source for CPU execution and P4 cache fills, and account separately for PLE Linux page-cache residency without creating an uncontrolled duplicate full-bank copy; until H2/H3 residency evidence exists, the cache-zero path must describe its expert bank as mapped/file-backed rather than resident or no-swap;
 - SSD expert reads are startup backing or an explicitly gated experiment, not the serving design;
 - parity, quality and microbenchmark suite, including long-horizon multi-turn coding, repeated tool calls/results, state-dependent reasoning, structured transformations, long generation, loop/token-ceiling detection, checkpoint/restore and suffix replay with intermediate router/gate/GDN state where feasible.
 
 The ABI slice precedes AVX2 kernels. It defines immutable heterogeneous expert-bank descriptors, prepare/execute/group/cancel/telemetry contracts, caller-owned partial accumulation, bounded workspace and explicit decoder/thread-pool/NUMA hooks. Its microbenchmark interface records raw repeated timings for the supplied production geometry and every requested miss width from 1 through top-k; it does not by itself constitute a performance claim. The issue #16 threaded route adapter is opt-in, native-only, and census-gated per layer; it keeps serial execution for scalar, unsupported, and mixed-reference configurations.
 
-The standalone Qwen GGUF CPU bridge is decode-only and owns its mapped host weights for the
-life of its heterogeneous CPU layout and Q4 executor. The CUDA engine rejects this GGUF
-combination until the production layer ABI can consume per-projection mappings without a
-homogeneous GPU cache; this is an integration blocker, not a hardware-performance claim.
+The Qwen GGUF CPU bridge owns its mapped host weights for the life of its heterogeneous CPU
+layout and Q4 executor, and serves one-request prefill and decode serially. Engine startup
+uses a cache-zero composition for this model: routed expert tensors are omitted from the
+dense resident load, the bundle is the sole expert-plus-PLE owner, and no homogeneous GPU
+cache is created. The Engine startup slice requires the dedicated `--ple-artifact-path`
+and honors its mmap/pread, warm, and planner settings; it does not silently use embedded
+GGUF PLE bytes. Startup rollback and shutdown close the bundle after detaching model
+adapters.
 
-The H0 `QwenGGUFCpuMoELayer` is an explicit CPU-only adapter around that bundle. It supports routed decode with the exact full-softmax Torch reference when CPU router logits are supplied, plus precomputed routes for direct parity tests. Its Qwen default preserves the model's unrenormalized selected probabilities. Calls require phase `decode` and group size one. It does not provide prefill, grouped, CUDA, TP>1 or performance evidence.
+The H0 `QwenGGUFCpuMoELayer` is an explicit CPU-only adapter around that bundle. It supports routed prefill and decode with the exact full-softmax Torch reference when CPU router logits are supplied, plus precomputed routes for direct parity tests. Its Qwen default preserves the model's unrenormalized selected probabilities. Calls require group size one. It does not provide grouped, CUDA, TP>1 or performance evidence.
 
 The H0 model-graph bridge transactionally replaces routed experts only for construction, lifecycle and correctness tests. The bundle remains caller-owned. This foundation does not make the CUDA-oriented trunk, router, shared expert, or LM head CPU-runnable and does not remove the Engine guard.
 
 An initialized Engine may explicitly borrow the same bundle through
 `Engine.attach_qwen_gguf_cpu_expert_bundle()` and its matching detach method after its
-model is available, provided the registration is TP1, cache-free, decode-only,
-graph-free, and one-request. The Engine detaches its owned bridge wrappers during
-cleanup while the caller closes the bundle. Startup, CLI defaults, GGUF opening,
-prefill, graphs, serving and the homogeneous-cache guard remain unchanged.
+model is available, provided the registration is TP1, cache-free, graph-free, and
+one-request. The Engine detaches its bridge wrappers during cleanup; the explicit seam
+continues to borrow the caller's bundle. The automatic Qwen GGUF startup path owns and
+closes its bundle transactionally.
 
-The standalone `GGUFCpuEagerBridge` is an explicit experimental H0/H1 wrapper around the CPU layer. It rejects prefill, grouped requests, graph capture and caller workspaces before transfer. CPU inputs use the adapter directly; non-CPU inputs use an injected blocking transfer seam, execute the adapter once, and copy the independent routed result back. It makes no stream, pinned-memory, overlap or performance claim. Real CUDA transfer behavior is H2-unverified.
+The standalone `GGUFCpuEagerBridge` is an explicit experimental H0/H1 wrapper around the CPU layer. It accepts one prefill or decode request and rejects grouped requests, graph capture and caller workspaces before transfer. CPU inputs use the adapter directly; non-CPU inputs use an injected blocking transfer seam, execute the adapter once, and copy the independent routed result back. It makes no stream, pinned-memory, overlap or performance claim. Real CUDA transfer behavior is H2-unverified.
 
 ### Exit gate
 
 ### H0 exit gate
 
-For each shipping quant and shape, CPU expert output passes error tolerances against dequantize-plus-reference matmul. Every profile has a complete sensitive-tensor census and explicit precision/scale provenance, shared-gate/control scale/dequant parity passes, and deliberately mis-scaled shared-gate and degraded GDN-control fixtures fail the quality harness. The loaded, pre-faulted DDR4 expert bank is the sole steady-state CPU/cache-fill source and PLE page-cache accounting is recorded. The cache-zero CPU reference path and tiny-model composition tests remain correct, and Q4/Q3/AP identities and conversion evidence are complete; no Q3 or component precision choice is a release default yet.
+For each shipping quant and shape, CPU expert output passes error tolerances against dequantize-plus-reference matmul. Every profile has a complete sensitive-tensor census and explicit precision/scale provenance, shared-gate/control scale/dequant parity passes, and deliberately mis-scaled shared-gate and degraded GDN-control fixtures fail the quality harness. The cache-zero slice proves a complete mapped/file-backed expert bank as the configured CPU/cache-fill source and records PLE page-cache accounting; a loaded, prefaulted DDR4 resident bank and no-swap behavior remain explicit H2/H3 acceptance gates. The cache-zero CPU reference path and tiny-model composition tests remain correct, and Q4/Q3/AP identities and conversion evidence are complete; no Q3 or component precision choice is a release default yet.
 
 ### Deferred H2/H3 qualification
 
