@@ -101,14 +101,14 @@ match are recorded without claiming a cryptographic content check. The dedicated
   `7594bce5b4`) recorded two ECC-disabled Tesla P4 cards on separate PCI roots and NUMA nodes,
   plus the PCIe Gen3 x4 NVMe on node 0. Seven short single-card tests and one dual-card discovery
   test passed. Active-load PCIe link qualification and cooling remain unqualified.
-- The bounded `dual-p4-short` producer at `bb0c29d734` ran on both ECC-off cards without loading a
-  model. One isolated 1 MiB addition per device completed in 0.377 seconds (0.465 seconds total),
-  with a 39 C peak and 23.69 W peak under the 75 W limit. The evidence binds the dedicated
-  inventory SHA-256 `bd2dbdbbc02794117751661bfef001e0a8864c3c7e267258dda87b9c50203ba7`,
-  both UUID/PCI-root/NUMA identities, and explicit non-serving/no-TPS/no-thermal-qualification
-  claims. Raw evidence is retained on Gorilla as
-  `results/hardware/qwen38-dual-p4-device.json` with SHA-256
-  `6cb6547b2af96679127895f80ee237a499809a4563fa63c9ff98369097071c1f` for the H2/H3
+- The identity-hardened bounded `dual-p4-short` producer at `cd8ce1dc44` ran on both ECC-off cards
+  without loading a model. One isolated 1 MiB addition per device completed in 0.394 seconds
+  (0.483 seconds total), with a 35 C peak and 23.58 W peak under the 75 W limit. The evidence binds
+  the dedicated inventory SHA-256
+  `d64d287fa25d429dcedcd097ace0c3a99fd5f2d6a5a62301165655848c986d17`, both unique
+  UUID/PCI-root/NUMA identities, and explicit non-serving/no-TPS/no-thermal-qualification claims.
+  Raw evidence is retained on Gorilla as `results/hardware/qwen38-dual-p4-device.json` with
+  SHA-256 `308583cfdcdac106727e25351f930039aee9d1a026cfd3b51c6a806f880f52c9` for the H2/H3
   investigation window.
 - The bounded warm-cache producer at `fe6e7ca91c` reused canonical full-H2 artifact
   SHA-256 `740e0c1ab79acf5f5473c70751f645bd6f1e91235cc0b826cb14e18529f16b7e`
@@ -126,6 +126,15 @@ match are recorded without claiming a cryptographic content check. The dedicated
   `51d6e6654444b5b0983b83f3da5f0525888eccb5c1de894c1037bcafc6745a98`.
   This retained observation predates the strengthened producer contract and is historical only:
   same-size model content drift was not excluded cryptographically during that short run.
+- The identity-hardened warm producer at `cd8ce1dc44` then rehashed all four current model shards
+  against the canonical full-H2 identities before GPU acquisition. It retained the mandatory PLE
+  integrity pass and completed under the separate-process 300-second GPU-ownership watchdog.
+  Startup took 149.908 seconds, the deterministic warmup took 114.457 seconds, and the identical
+  measured request took 5.067 seconds; both returned `[201519, 8691]`. The measured request again
+  read 96 unique PLE rows/8,640 packed bytes through `pread`, with zero major faults and zero
+  observed physical storage-read bytes. Peak sampled state was 52 C and 30.31 W. Raw evidence has
+  SHA-256 `386afae5680e4f7ff8f2717f2e95e79137fe5c3f05fac572001fa1dc0747795b`; its dedicated
+  inventory has SHA-256 `ca6fc4b81d48b2a38e456f2ae187844f863dc4c2009414e786caab7f4f159156`.
 
 The complete 77.0 GiB expert bank was mapped/file-backed for this slice. No evidence was collected
 that all expert pages were prefaulted into DDR4 or protected from swap, so this run must not be
