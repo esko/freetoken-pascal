@@ -430,6 +430,7 @@ class Engine:
             # not create a model and then fail after a partial weight load.
             if _is_qwen_gguf_expert_config(getattr(config, "model_config", None)):
                 _preflight_qwen_gguf_cpu_engine_config(config, require_ple_artifact=True)
+                _preflight_qwen_gguf_ple_artifact(config)
             self._initialize(config)
         except BaseException:
             # Host-bank resources may already be live when any later startup step
@@ -1601,6 +1602,31 @@ def _preflight_qwen_gguf_cpu_engine_config(
             "Qwen GGUF CPU Engine moe_cpu_threads must be non-negative, "
             f"got {threads!r}"
         )
+
+
+def _preflight_qwen_gguf_ple_artifact(config: EngineConfig) -> None:
+    """Validate the dedicated PLE artifact before model/CUDA initialization.
+
+    This is deliberately a file/metadata-only check.  It does not construct a
+    model, map the payload, open a descriptor, or touch CUDA.  The resource
+    acquisition path validates again when it obtains the mapping.
+    """
+    artifact = getattr(config, "ple_artifact_path", None)
+    model_path = getattr(config, "model_path", None)
+    if not isinstance(artifact, (str, bytes, os.PathLike)) or not str(artifact).strip():
+        # The pure config preflight reports the specific missing-path error.
+        return
+    if not isinstance(model_path, (str, bytes, os.PathLike)) or not str(model_path).strip():
+        raise ValueError("Qwen GGUF PLE preflight requires a model_path")
+    from freetoken.gguf_host import validate_ple_artifact
+
+    try:
+        validate_ple_artifact(artifact, source_path=model_path)
+    except (OSError, TypeError, ValueError) as error:
+        raise ValueError(
+            "Qwen GGUF dedicated PLE artifact preflight failed: "
+            f"{type(error).__name__}: {error}"
+        ) from error
 
 
 def _validate_qwen_gguf_cpu_engine_config(config: EngineConfig) -> None:

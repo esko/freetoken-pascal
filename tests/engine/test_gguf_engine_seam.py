@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -249,9 +250,7 @@ def test_qwen_cache_zero_startup_composes_one_bundle_and_ple_owner(monkeypatch):
         events.append(("open", path, kwargs))
         return bundle
 
-    monkeypatch.setattr(
-        "freetoken.moe.gguf_cpu.open_qwen_gguf_cpu_expert_bundle", open_bundle
-    )
+    monkeypatch.setattr("freetoken.moe.gguf_cpu.open_qwen_gguf_cpu_expert_bundle", open_bundle)
 
     class StartupModel(_Model):
         def attach_gguf_cpu_host_resources(self, value):
@@ -307,9 +306,7 @@ def test_qwen_cache_zero_startup_requires_dedicated_ple_artifact():
     from freetoken.engine.engine import _initialize_qwen_gguf_cpu_composition
 
     with pytest.raises(ValueError, match="dedicated PLE"):
-        _initialize_qwen_gguf_cpu_composition(
-            _Model(), _config(ple_artifact_path=None)
-        )
+        _initialize_qwen_gguf_cpu_composition(_Model(), _config(ple_artifact_path=None))
 
 
 @pytest.mark.parametrize("mode", ["full-model-warm", "unknown"])
@@ -345,6 +342,29 @@ def test_engine_qwen_preflight_rejects_before_initialize(monkeypatch, changes, m
     monkeypatch.setattr(Engine, "_initialize", unexpected_initialize)
     with pytest.raises(ValueError, match=message):
         Engine(_config(**changes))
+    assert calls == []
+
+
+def test_engine_rejects_invalid_ple_artifact_before_initialize(tmp_path, monkeypatch):
+    from freetoken.engine.engine import Engine
+    from freetoken.gguf_host import convert_gguf_ple_to_artifact
+
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "gguf" / "qwen-host-layout.gguf"
+    artifact = convert_gguf_ple_to_artifact(fixture, tmp_path / "ple")
+    manifest_path = artifact / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    config = _config(model_path=str(fixture), ple_artifact_path=str(artifact))
+    calls = []
+
+    def unexpected_initialize(self, _config):
+        calls.append("initialize")
+        raise AssertionError("invalid PLE artifact reached Engine initialization")
+
+    monkeypatch.setattr(Engine, "_initialize", unexpected_initialize)
+    with pytest.raises(ValueError, match=r"dedicated PLE artifact preflight.*sha256"):
+        Engine(config)
     assert calls == []
 
 
@@ -419,6 +439,8 @@ def test_engine_startup_rollback_retries_owned_bundle_after_late_failure(monkeyp
         raise RuntimeError("late startup failure")
 
     monkeypatch.setattr(Engine, "_initialize", initialize)
+    # This test uses a synthetic config and exercises late rollback, not artifact parsing.
+    monkeypatch.setattr("freetoken.engine.engine._preflight_qwen_gguf_ple_artifact", lambda _: None)
     with pytest.raises(RuntimeError, match="late startup failure"):
         Engine(_config())
 

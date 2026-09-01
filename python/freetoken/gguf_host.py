@@ -34,6 +34,16 @@ from freetoken.gguf_validation import inspect_gguf
 _EXPERT_RE = re.compile(r"^blk\.(?P<layer>[0-9]+)\.ffn_(?P<projection>gate|up|down)_exps\.weight$")
 _PLE_TENSOR = "per_layer_token_embd.weight"
 _PROJECTIONS = ("gate", "up", "down")
+_PLE_DESCRIPTOR_FIELDS = (
+    "tensor_name",
+    "quant_type",
+    "quant_name",
+    "rows",
+    "elements_per_row",
+    "row_bytes",
+    "tensor_bytes",
+    "codec",
+)
 
 
 @dataclass(frozen=True)
@@ -830,6 +840,120 @@ def inspect_qwen_host_layout(
     )
 
 
+def _read_validated_ple_artifact(path: str | Path) -> PLEDescriptor:
+    """Read and validate a dedicated PLE artifact without opening any mapping.
+
+    This is deliberately a pure file/metadata operation.  It is used by Engine
+    startup before model construction and by the mapping backend itself.  Keeping
+    the complete manifest, geometry, payload-size, codec, and checksum checks in
+    one helper prevents the preflight and serving paths from accepting different
+    artifact identities.
+    """
+    root = Path(path)
+    try:
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as error:
+        raise ValueError(f"invalid PLE artifact manifest: {root}") from error
+    if not isinstance(manifest, Mapping):
+        raise ValueError("PLE artifact manifest must be a JSON object")
+    if manifest.get("format") != "freetoken-pascal-ple-v1" or manifest.get("version") != 1:
+        raise ValueError("unsupported PLE artifact format")
+    required = ("rows", "elements_per_row", "row_bytes", "tensor_bytes", "sha256")
+    if any(key not in manifest for key in required):
+        raise ValueError("PLE artifact manifest missing geometry or checksum")
+    if manifest.get("payload") != "ple.bin":
+        raise ValueError("invalid PLE artifact payload name")
+    artifact_data_offset = manifest.get("data_offset", manifest.get("offset", 0))
+    if (
+        isinstance(artifact_data_offset, bool)
+        or not isinstance(artifact_data_offset, int)
+        or artifact_data_offset != 0
+    ):
+        raise ValueError("PLE artifact data_offset must be zero")
+    codec_value = manifest.get("codec")
+    if codec_value is None:
+        # The original v1 artifact schema identified IQ4_NL through the quant
+        # fields alone. Keep those immutable artifacts readable while newly
+        # emitted manifests carry the explicit descriptor.
+        codec_descriptor = IQ4_NL_CODEC_DESCRIPTOR
+    else:
+        try:
+            codec_descriptor = PLECodecDescriptor.from_manifest(codec_value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"invalid PLE artifact codec descriptor: {error}") from error
+    PLE_CODEC_REGISTRY.resolve(codec_descriptor)
+    if (
+        manifest.get("tensor_name") != _PLE_TENSOR
+        or manifest.get("quant_type") != GGML_IQ4_NL
+        or manifest.get("quant_name") != "IQ4_NL"
+    ):
+        raise ValueError("unsupported PLE artifact tensor")
+    values = tuple(manifest[key] for key in required[:4])
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        raise ValueError("invalid PLE artifact geometry")
+    rows, elements, row_bytes, tensor_bytes = values
+    if min(rows, elements, row_bytes, tensor_bytes) <= 0 or tensor_bytes != rows * row_bytes:
+        raise ValueError("invalid PLE artifact geometry")
+    try:
+        codec_descriptor.validate_row_geometry(elements, row_bytes)
+    except ValueError as error:
+        raise ValueError(f"invalid PLE artifact geometry: {error}") from error
+    payload = root / str(manifest.get("payload", "ple.bin"))
+    try:
+        payload_size = payload.stat().st_size
+    except OSError as error:
+        raise ValueError("PLE artifact payload is missing") from error
+    if not payload.is_file() or payload_size != tensor_bytes:
+        raise ValueError("PLE artifact payload is truncated or has a gap")
+    if not isinstance(manifest["sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", manifest["sha256"]
+    ):
+        raise ValueError("invalid PLE artifact sha256")
+    actual_sha256 = _sha256_file(payload)
+    if actual_sha256 != manifest["sha256"]:
+        raise ValueError("PLE artifact sha256 mismatch")
+    return PLEDescriptor(
+        tensor_name=str(manifest.get("tensor_name", _PLE_TENSOR)),
+        quant_type=GGML_IQ4_NL,
+        quant_name="IQ4_NL",
+        rows=rows,
+        elements_per_row=elements,
+        row_bytes=row_bytes,
+        tensor_bytes=tensor_bytes,
+        shard_index=0,
+        shard_path=str(payload),
+        data_offset=0,
+        codec=codec_descriptor,
+    )
+
+
+def validate_ple_artifact(
+    path: str | Path,
+    *,
+    source_path: str | Path | None = None,
+) -> PLEDescriptor:
+    """Validate a dedicated PLE artifact and optionally its source GGUF identity.
+
+    No mmap, file descriptor, tensor, or CUDA resource is acquired.  When a
+    ``source_path`` is supplied, its parsed PLE descriptor must match every
+    semantic field of the artifact, including codec and row geometry.
+    """
+    descriptor = _read_validated_ple_artifact(path)
+    if source_path is not None:
+        source = inspect_qwen_host_layout(source_path).ple
+        mismatches = [
+            name
+            for name in _PLE_DESCRIPTOR_FIELDS
+            if getattr(descriptor, name) != getattr(source, name)
+        ]
+        if mismatches:
+            raise ValueError(
+                "dedicated PLE artifact does not match source GGUF descriptor: "
+                + ", ".join(mismatches)
+            )
+    return descriptor
+
+
 def host_memory_report(layout: QwenHostLayout) -> dict[str, int]:
     expert_bytes = sum(descriptor.tensor_bytes for descriptor in layout.experts.descriptors)
     return {
@@ -1409,75 +1533,9 @@ class MappedPLETable:
         )
         if backend not in {"mmap", "pread"}:
             raise ValueError(f"unknown PLE backend {backend!r}")
-        root = Path(path)
-        try:
-            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError) as error:
-            raise ValueError(f"invalid PLE artifact manifest: {root}") from error
-        if manifest.get("format") != "freetoken-pascal-ple-v1" or manifest.get("version") != 1:
-            raise ValueError("unsupported PLE artifact format")
-        required = ("rows", "elements_per_row", "row_bytes", "tensor_bytes", "sha256")
-        if any(key not in manifest for key in required):
-            raise ValueError("PLE artifact manifest missing geometry or checksum")
-        if manifest.get("payload") != "ple.bin":
-            raise ValueError("invalid PLE artifact payload name")
-        artifact_data_offset = manifest.get("data_offset", manifest.get("offset", 0))
-        if (
-            isinstance(artifact_data_offset, bool)
-            or not isinstance(artifact_data_offset, int)
-            or artifact_data_offset != 0
-        ):
-            raise ValueError("PLE artifact data_offset must be zero")
-        codec_value = manifest.get("codec")
-        if codec_value is None:
-            # The original v1 artifact schema identified IQ4_NL through the
-            # quant fields alone. Keep those immutable artifacts readable while
-            # every newly emitted v1 manifest records the explicit descriptor.
-            codec_descriptor = IQ4_NL_CODEC_DESCRIPTOR
-        else:
-            try:
-                codec_descriptor = PLECodecDescriptor.from_manifest(codec_value)
-            except (TypeError, ValueError) as error:
-                raise ValueError(f"invalid PLE artifact codec descriptor: {error}") from error
-        PLE_CODEC_REGISTRY.resolve(codec_descriptor)
-        if (
-            manifest.get("tensor_name") != _PLE_TENSOR
-            or manifest.get("quant_type") != GGML_IQ4_NL
-            or manifest.get("quant_name") != "IQ4_NL"
-        ):
-            raise ValueError("unsupported PLE artifact tensor")
-        values = tuple(manifest[key] for key in required[:4])
-        if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
-            raise ValueError("invalid PLE artifact geometry")
-        rows, elements, row_bytes, tensor_bytes = values
-        if min(rows, elements, row_bytes, tensor_bytes) <= 0 or tensor_bytes != rows * row_bytes:
-            raise ValueError("invalid PLE artifact geometry")
-        try:
-            codec_descriptor.validate_row_geometry(elements, row_bytes)
-        except ValueError as error:
-            raise ValueError(f"invalid PLE artifact geometry: {error}") from error
-        payload = root / str(manifest.get("payload", "ple.bin"))
-        if not payload.is_file() or payload.stat().st_size != tensor_bytes:
-            raise ValueError("PLE artifact payload is truncated or has a gap")
-        if not isinstance(manifest["sha256"], str) or not re.fullmatch(
-            r"[0-9a-f]{64}", manifest["sha256"]
-        ):
-            raise ValueError("invalid PLE artifact sha256")
-        if _sha256_file(payload) != manifest["sha256"]:
-            raise ValueError("PLE artifact sha256 mismatch")
-        descriptor = PLEDescriptor(
-            tensor_name=str(manifest.get("tensor_name", _PLE_TENSOR)),
-            quant_type=GGML_IQ4_NL,
-            quant_name="IQ4_NL",
-            rows=rows,
-            elements_per_row=elements,
-            row_bytes=row_bytes,
-            tensor_bytes=tensor_bytes,
-            shard_index=0,
-            shard_path=str(payload),
-            data_offset=0,
-            codec=codec_descriptor,
-        )
+        descriptor = validate_ple_artifact(path)
+        payload = Path(descriptor.shard_path)
+        tensor_bytes = descriptor.tensor_bytes
         mapping: MappedFileRange | None = None
         table: MappedPLETable | None = None
         pread_fd: int | None = None
@@ -1487,10 +1545,11 @@ class MappedPLETable:
                     str(payload),
                     offset=0,
                     length=tensor_bytes,
-                    rows=rows,
-                    row_bytes=row_bytes,
-                    expected_file_sha256=manifest["sha256"],
-                    verify_file_sha256=True,
+                    rows=descriptor.rows,
+                    row_bytes=descriptor.row_bytes,
+                    # ``validate_ple_artifact`` has already verified the immutable
+                    # payload before any mapping is acquired.
+                    verify_file_sha256=False,
                 )
             else:
                 pread_fd = _open_validated_pread_fd(payload, offset=0, length=tensor_bytes)
@@ -2141,4 +2200,5 @@ __all__ = [
     "host_memory_report_from_census",
     "inspect_qwen_host_layout",
     "open_qwen_host_weights",
+    "validate_ple_artifact",
 ]

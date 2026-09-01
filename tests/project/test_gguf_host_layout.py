@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import CancelledError
+from dataclasses import replace
 from pathlib import Path
 
 import gguf
@@ -23,6 +24,7 @@ from freetoken.gguf_host import (
     host_memory_report_from_census,
     inspect_qwen_host_layout,
     open_qwen_host_weights,
+    validate_ple_artifact,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -218,6 +220,46 @@ def test_ple_hash_size_and_short_range_fail_closed(tmp_path: Path) -> None:
         MappedPLETable.open_from_gguf(short)
     with pytest.raises(ValueError):
         MappedPLETable.open_from_gguf(short, backend="pread")
+
+
+def test_validate_dedicated_ple_artifact_checks_hash_and_source_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = convert_gguf_ple_to_artifact(FIXTURE, tmp_path / "ple")
+
+    descriptor = validate_ple_artifact(artifact, source_path=FIXTURE)
+    source = inspect_qwen_host_layout(FIXTURE).ple
+    assert descriptor.rows == source.rows
+    assert descriptor.elements_per_row == source.elements_per_row
+    assert descriptor.row_bytes == source.row_bytes
+    assert descriptor.tensor_bytes == source.tensor_bytes
+    assert descriptor.codec == source.codec
+
+    manifest_path = artifact / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["rows"] += 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="geometry"):
+        validate_ple_artifact(artifact, source_path=FIXTURE)
+
+    manifest["rows"] -= 1
+    manifest["sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="sha256"):
+        validate_ple_artifact(artifact, source_path=FIXTURE)
+
+    manifest["sha256"] = hashlib.sha256((artifact / "ple.bin").read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    source_layout = inspect_qwen_host_layout(FIXTURE)
+    monkeypatch.setattr(
+        "freetoken.gguf_host.inspect_qwen_host_layout",
+        lambda _path: replace(
+            source_layout,
+            ple=replace(source_layout.ple, rows=source_layout.ple.rows + 1),
+        ),
+    )
+    with pytest.raises(ValueError, match="source GGUF descriptor: rows"):
+        validate_ple_artifact(artifact, source_path=FIXTURE)
 
 
 def test_source_ple_rejects_unknown_backend_before_opening() -> None:

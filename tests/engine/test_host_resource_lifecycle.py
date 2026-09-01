@@ -75,7 +75,7 @@ def test_engine_loader_accepts_models_without_host_resources():
     assert _load_model_host_resources(object(), _config()) == 0
 
 
-def test_startup_failure_closes_acquired_model_host_resources():
+def test_startup_failure_closes_acquired_model_host_resources(monkeypatch):
     from freetoken.engine.engine import Engine
 
     calls = []
@@ -98,6 +98,10 @@ def test_startup_failure_closes_acquired_model_host_resources():
         raise RuntimeError("failure after PLE acquisition")
 
     with patch.object(Engine, "_initialize", initialize):
+        # This test uses a synthetic config and exercises late rollback, not artifact parsing.
+        monkeypatch.setattr(
+            "freetoken.engine.engine._preflight_qwen_gguf_ple_artifact", lambda _: None
+        )
         with pytest.raises(RuntimeError, match="failure after PLE acquisition"):
             Engine(_config())
 
