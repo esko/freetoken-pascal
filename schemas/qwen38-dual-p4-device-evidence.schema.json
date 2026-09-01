@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esko/freetoken-pascal/schemas/qwen38-dual-p4-device-evidence.schema.json",
+  "title": "FreeToken-Pascal bounded dual-P4 device smoke evidence",
+  "description": "A short direct-device arithmetic smoke test for two Tesla P4 devices. It is explicitly non-serving and cannot qualify throughput, thermal behavior, or a dual-GPU execution policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_name", "schema_version", "evidence_status", "evidence_kind", "claim_status",
+    "request", "warmup", "timing", "thermal", "power", "throttling", "performance",
+    "serving", "hardware_inventory", "devices", "claims"
+  ],
+  "properties": {
+    "schema_name": {"const": "qwen38-dual-p4-device-evidence.schema.json"},
+    "schema_version": {"const": 1},
+    "evidence_status": {"const": "measured"},
+    "evidence_kind": {"const": "dual-p4-direct-device-smoke"},
+    "claim_status": {"const": "non-serving-device-only"},
+    "hardware_inventory": {"$ref": "#/$defs/hardware_inventory"},
+    "request": {"$ref": "#/$defs/request"},
+    "warmup": {"$ref": "#/$defs/warmup"},
+    "timing": {"$ref": "#/$defs/timing"},
+    "thermal": {"$ref": "#/$defs/thermal"},
+    "power": {"$ref": "#/$defs/power"},
+    "throttling": {"$ref": "#/$defs/throttling"},
+    "performance": {"$ref": "#/$defs/performance"},
+    "serving": {"$ref": "#/$defs/serving"},
+    "devices": {"$ref": "#/$defs/devices"},
+    "claims": {"$ref": "#/$defs/claims"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "request_count", "prompt_tokens", "output_tokens", "timeout_seconds"],
+      "properties": {
+        "kind": {"const": "direct-device-smoke"},
+        "request_count": {"const": 0},
+        "prompt_tokens": {"const": 0},
+        "output_tokens": {"const": 0},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 30}
+      }
+    },
+    "warmup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["iterations", "elapsed_seconds", "max_duration_seconds"],
+      "properties": {
+        "iterations": {"type": "integer", "minimum": 0, "maximum": 3},
+        "elapsed_seconds": {"type": "number", "minimum": 0, "maximum": 300},
+        "max_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300}
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "operation_seconds", "total_seconds", "measured_iterations"],
+      "properties": {
+        "scope": {"const": "short-device-smoke"},
+        "operation_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 30},
+        "total_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+        "measured_iterations": {"type": "integer", "minimum": 1, "maximum": 3}
+      }
+    },
+    "thermal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qualification", "peak_celsius", "observation_seconds"],
+      "properties": {
+        "qualification": {"const": "unqualified"},
+        "peak_celsius": {"type": "number", "minimum": 0, "maximum": 85},
+        "observation_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60}
+      }
+    },
+    "power": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qualification", "peak_watts", "power_limit_watts"],
+      "properties": {
+        "qualification": {"const": "observed-only"},
+        "peak_watts": {"type": "number", "minimum": 0, "maximum": 75},
+        "power_limit_watts": {"type": "number", "exclusiveMinimum": 0, "maximum": 75}
+      }
+    },
+    "throttling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qualification", "assessment", "throttle_events", "claim"],
+      "properties": {
+        "qualification": {"const": "not-qualified"},
+        "assessment": {"const": "not-assessed"},
+        "throttle_events": {"type": "integer", "minimum": 0, "maximum": 3},
+        "claim": {"const": false}
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "claim", "steady_state", "tokens_per_second"],
+      "properties": {
+        "status": {"const": "not-claimed"},
+        "claim": {"const": false},
+        "steady_state": {"const": false},
+        "tokens_per_second": {"const": null}
+      }
+    },
+    "serving": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "model_loaded", "model_forward", "tps_claimed", "thermal_qualified", "dual_gpu_policy"],
+      "properties": {
+        "classification": {"const": "non-serving"},
+        "model_loaded": {"const": false},
+        "model_forward": {"const": false},
+        "tps_claimed": {"const": false},
+        "thermal_qualified": {"const": false},
+        "dual_gpu_policy": {"const": "not-selected"}
+      }
+    },
+    "hardware_inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "profile_id"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "profile_id": {"enum": ["ecc-on", "ecc-off"]}
+      }
+    },
+    "devices": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": ["index"],
+            "properties": {"index": {"const": 0}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["index"],
+            "properties": {"index": {"const": 1}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ],
+      "items": {"$ref": "#/$defs/device"}
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index", "name", "compute_capability", "memory_mib", "uuid", "pci_bus_id", "pci_root",
+        "numa_node", "ecc_profile", "clocks", "temperature_celsius", "power_watts",
+        "power_limit_watts", "throttle_status", "operation", "iterations", "allocation_bytes", "result"
+      ],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0, "maximum": 1},
+        "name": {"const": "Tesla P4"},
+        "compute_capability": {"const": "6.1"},
+        "memory_mib": {"type": "integer", "minimum": 7580, "maximum": 8192},
+        "uuid": {"type": "string", "pattern": "^GPU-[A-Za-z0-9-]+$"},
+        "pci_bus_id": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "pci_root": {"type": "string", "pattern": "^pci[0-9a-f]{4}:[0-9a-f]{2}$"},
+        "numa_node": {"type": "integer", "minimum": 0, "maximum": 1},
+        "ecc_profile": {"enum": ["ecc-on", "ecc-off"]},
+        "clocks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["graphics_mhz", "memory_mhz"],
+          "properties": {
+            "graphics_mhz": {"type": "integer", "minimum": 0, "maximum": 2000},
+            "memory_mhz": {"type": "integer", "minimum": 0, "maximum": 10000}
+          }
+        },
+        "temperature_celsius": {"type": "number", "minimum": 0, "maximum": 85},
+        "power_watts": {"type": "number", "minimum": 0, "maximum": 75},
+        "power_limit_watts": {"type": "number", "exclusiveMinimum": 0, "maximum": 75},
+        "throttle_status": {"const": "not-assessed"},
+        "operation": {"const": "direct-device-addition"},
+        "iterations": {"type": "integer", "minimum": 1, "maximum": 3},
+        "allocation_bytes": {"type": "integer", "minimum": 1, "maximum": 4194304},
+        "result": {"const": "passed"}
+      }
+    },
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_execution", "steady_state_tps", "thermal_qualification", "dual_p4_serving"],
+      "properties": {
+        "model_execution": {"const": false},
+        "steady_state_tps": {"const": false},
+        "thermal_qualification": {"const": false},
+        "dual_p4_serving": {"const": false}
+      }
+    }
+  }
+}
