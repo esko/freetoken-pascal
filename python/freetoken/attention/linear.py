@@ -20,8 +20,10 @@ class FLAMetadata:
 
     Fields:
       cu_seqlens          query indptr; decode = arange(bs+1) (1 token/req), prefill =
-                          cumsum of extend_len. int32 on device.
-      cache_indices       per-request recurrent/conv state slot (= Req.table_idx). int32.
+                          cumsum of extend_len. Generic prefill metadata may remain int64;
+                          Pascal proof tensors are int32.
+      cache_indices       per-request recurrent/conv state slot (= Req.table_idx). Generic
+                          staging preserves its caller dtype; Pascal proof tensors are int32.
       has_initial_state   prefill only: whether each request continues a cached prefix
                           (cached_len > 0). None for decode (state always present).
       fresh_state_indices prefill only: the state-pool slots whose sequence is fresh

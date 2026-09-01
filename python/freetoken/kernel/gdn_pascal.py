@@ -9,6 +9,7 @@ or performance qualification is implied by compiling or invoking this module.
 from __future__ import annotations
 
 import functools
+import operator
 from dataclasses import dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING
@@ -64,6 +65,35 @@ def _metadata_binding(value: torch.Tensor) -> PascalGdnMetadataBinding:
         dtype=str(value.dtype),
         device=str(value.device),
     )
+
+
+def _int32_values(name: str, values) -> tuple[int, ...]:
+    """Normalize host metadata and reject values that cannot cross the CUDA ABI."""
+
+    import torch
+
+    limit = torch.iinfo(torch.int32)
+    normalized = []
+    for value in values:
+        try:
+            converted = operator.index(value)
+        except TypeError as error:
+            raise PascalGdnContractError(f"{name} must contain integers") from error
+        if converted < limit.min or converted > limit.max:
+            raise PascalGdnContractError(f"{name} exceeds the int32 ABI range")
+        normalized.append(int(converted))
+    return tuple(normalized)
+
+
+def _initial_values(values: tuple[bool, ...] | None) -> tuple[bool, ...] | None:
+    if values is None:
+        return None
+    normalized = []
+    for value in values:
+        if type(value) is not bool:
+            raise PascalGdnContractError("Pascal GDN initial-state proof values must be bool")
+        normalized.append(value)
+    return tuple(normalized)
 
 
 class PascalGdnMetadataProof:
@@ -173,15 +203,18 @@ class PascalGdnMetadataProof:
             raise PascalGdnContractError("Pascal GDN slot metadata proof is stale or unbound")
         if _metadata_binding(cu_seqlens) != self._offset_binding:
             raise PascalGdnContractError("Pascal GDN offset metadata proof is stale or unbound")
-        if initial_state is not None and self._initial_binding is not None:
-            if _metadata_binding(initial_state) != self._initial_binding:
-                raise PascalGdnContractError("Pascal GDN initial-state proof is stale or unbound")
-        elif initial_state is not None:
-            raise PascalGdnContractError("Pascal GDN initial-state proof is unexpectedly present")
+        if (initial_state is None) != (self._initial_binding is None):
+            raise PascalGdnContractError(
+                "Pascal GDN initial-state proof requires its bound tensor"
+            )
+        if initial_state is not None and _metadata_binding(initial_state) != self._initial_binding:
+            raise PascalGdnContractError("Pascal GDN initial-state proof is stale or unbound")
         if len(self.slot_values) != int(slot_indices.numel()):
             raise PascalGdnContractError("Pascal GDN slot metadata proof length mismatch")
         if len(self.offset_values) != int(cu_seqlens.numel()):
             raise PascalGdnContractError("Pascal GDN offset metadata proof length mismatch")
+        if self.initial_values is not None and len(self.initial_values) != int(slot_indices.numel()):
+            raise PascalGdnContractError("Pascal GDN initial-state proof length mismatch")
         initial = None if self.initial_values is None else list(self.initial_values)
         return list(self.slot_values), list(self.offset_values), initial
 
@@ -234,9 +267,13 @@ def _issue_pascal_gdn_metadata_proof(
 
     import torch
 
-    slots = tuple(int(value) for value in slot_values)
-    offsets = tuple(int(value) for value in offset_values)
-    initial = None if initial_values is None else tuple(bool(value) for value in initial_values)
+    slots = _int32_values("Pascal GDN slot metadata", slot_values)
+    offsets = _int32_values("Pascal GDN offset metadata", offset_values)
+    initial = _initial_values(initial_values)
+    if len(offsets) != len(slots) + 1:
+        raise PascalGdnContractError("Pascal GDN offset metadata must contain B + 1 entries")
+    if initial is not None and len(initial) != len(slots):
+        raise PascalGdnContractError("Pascal GDN initial-state proof length mismatch")
     # Preserve version counters even when the scheduler is called from an inference-mode
     # section. These tensors are immutable launch metadata and are not the generic FLA tensors.
     with torch.inference_mode(False):
@@ -257,6 +294,110 @@ def _issue_pascal_gdn_metadata_proof(
         offsets,
         initial,
     )
+
+
+def _checked_int32_tensor(name: str, value: torch.Tensor) -> list[int]:
+    """Read direct-call metadata once, rejecting non-ABI integer values."""
+
+    import torch
+
+    if value.dtype not in (torch.int32, torch.int64):
+        raise PascalGdnContractError(
+            f"{name} must use int32 or int64 metadata, got {value.dtype}"
+        )
+    values = _cpu_int_values(name, value)
+    _int32_values(name, values)
+    return values
+
+
+def validate_pascal_gdn_metadata(
+    slot_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    *,
+    num_slots: int,
+    num_tokens: int,
+    initial_state: torch.Tensor | None = None,
+    metadata_proof: PascalGdnMetadataProof | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, list[bool] | None]:
+    """Validate semantic ragged metadata before any convolution or state mutation.
+
+    When a scheduler-issued proof is present, its dedicated tensors and immutable host values
+    are returned. Generic FLA tensors remain untrusted staging metadata and are not used for
+    Pascal addressing. Direct callers use synchronous host reads and retain the same checks.
+    """
+
+    import torch
+
+    for name, value in (("slot_indices", slot_indices), ("cu_seqlens", cu_seqlens)):
+        _require_tensor(name, value)
+        if value.ndim != 1 or not value.is_contiguous():
+            raise PascalGdnContractError(f"{name} must be a contiguous rank-1 tensor")
+        if value.dtype not in (torch.int32, torch.int64):
+            raise PascalGdnContractError(
+                f"{name} must use int32 or int64 metadata, got {value.dtype}"
+            )
+    if slot_indices.device != cu_seqlens.device:
+        raise PascalGdnContractError("Pascal GDN metadata tensors must share a device")
+    if num_slots <= 0:
+        raise PascalGdnContractError("Pascal GDN state pool must contain at least one slot")
+    if num_tokens <= 0:
+        raise PascalGdnContractError("Pascal GDN requires at least one token")
+
+    if metadata_proof is None:
+        slots = _checked_int32_tensor("slot_indices", slot_indices)
+        offsets = _checked_int32_tensor("cu_seqlens", cu_seqlens)
+        effective_slots = slot_indices
+        effective_offsets = cu_seqlens
+        if initial_state is None:
+            initial = None
+        else:
+            if (
+                initial_state.device != slot_indices.device
+                or initial_state.dtype != torch.bool
+                or initial_state.ndim != 1
+                or not initial_state.is_contiguous()
+            ):
+                raise PascalGdnContractError(
+                    "Pascal GDN initial-state metadata must be contiguous bool [B]"
+                )
+            initial = [bool(value) for value in _cpu_int_values("initial_state", initial_state)]
+    else:
+        if not isinstance(metadata_proof, PascalGdnMetadataProof):
+            raise PascalGdnContractError("metadata_proof must be a Pascal GDN metadata proof")
+        effective_slots = metadata_proof.slot_indices
+        effective_offsets = metadata_proof.cu_seqlens
+        if (
+            effective_slots.device != slot_indices.device
+            or effective_offsets.device != cu_seqlens.device
+            or effective_slots.dtype != torch.int32
+            or effective_offsets.dtype != torch.int32
+            or effective_slots.ndim != 1
+            or effective_offsets.ndim != 1
+            or not effective_slots.is_contiguous()
+            or not effective_offsets.is_contiguous()
+        ):
+            raise PascalGdnContractError("Pascal GDN metadata proof has invalid effective tensors")
+        slots, offsets, initial = metadata_proof.values_for(
+            effective_slots, effective_offsets, metadata_proof.initial_state
+        )
+
+    if len(slots) <= 0:
+        raise PascalGdnContractError("slot_indices must contain at least one request")
+    if len(offsets) != len(slots) + 1:
+        raise PascalGdnContractError("cu_seqlens must contain B + 1 entries")
+    if len(initial or ()) not in (0, len(slots)):
+        raise PascalGdnContractError("initial-state metadata must contain B entries")
+    if any(slot < 0 or slot >= num_slots for slot in slots):
+        raise PascalGdnContractError("slot_indices contains an out-of-range pool slot")
+    if len(set(slots)) != len(slots):
+        raise PascalGdnContractError("slot_indices must be unique per launch")
+    if (
+        offsets[0] != 0
+        or offsets[-1] != num_tokens
+        or any(left > right for left, right in pairwise(offsets))
+    ):
+        raise PascalGdnContractError("cu_seqlens must be nondecreasing from 0 to T")
+    return effective_slots, effective_offsets, initial
 
 
 def validate_pascal_gdn_inputs(
@@ -358,23 +499,13 @@ def validate_pascal_gdn_inputs(
         # device error.  This distinction lets hosted tests inspect all shape/failure paths.
         pass
 
-    if metadata_proof is None:
-        slots = _cpu_int_values("slot_indices", slot_indices)
-        offsets = _cpu_int_values("cu_seqlens", cu_seqlens)
-    else:
-        if not isinstance(metadata_proof, PascalGdnMetadataProof):
-            raise PascalGdnContractError("metadata_proof must be a Pascal GDN metadata proof")
-        slots, offsets, _initial_values = metadata_proof.values_for(slot_indices, cu_seqlens)
-    if any(slot < 0 or slot >= num_slots for slot in slots):
-        raise PascalGdnContractError("slot_indices contains an out-of-range pool slot")
-    if len(set(slots)) != len(slots):
-        raise PascalGdnContractError("slot_indices must be unique per launch")
-    if (
-        offsets[0] != 0
-        or offsets[-1] != num_tokens
-        or any(left > right for left, right in pairwise(offsets))
-    ):
-        raise PascalGdnContractError("cu_seqlens must be nondecreasing from 0 to T")
+    validate_pascal_gdn_metadata(
+        slot_indices,
+        cu_seqlens,
+        num_slots=num_slots,
+        num_tokens=num_tokens,
+        metadata_proof=metadata_proof,
+    )
     return PascalGdnLaunch(
         head_dim=head_dim,
         num_tokens=num_tokens,
@@ -448,5 +579,6 @@ __all__ = [
     "PascalGdnMetadataBinding",
     "PascalGdnMetadataProof",
     "pascal_gdn_recurrence",
+    "validate_pascal_gdn_metadata",
     "validate_pascal_gdn_inputs",
 ]

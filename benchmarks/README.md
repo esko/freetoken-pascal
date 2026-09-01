@@ -69,8 +69,10 @@ and not a complete-model or release benchmark. The host wall clock includes Pyth
 synchronous Pascal metadata validation when the cold fallback is selected; scheduler-issued
 metadata proofs avoid that repeated device-to-host validation. Device-scoped CUDA events include
 device work plus any stream idle caused by synchronous dispatch. Paired sample order alternates.
-The report's `selected_behavior.metadata_validation` identifies the selected path. Keep the run short,
-and capture `nvidia-smi` telemetry separately:
+The report's `selected_behavior.metadata_validation` identifies the selected path. The
+`metadata_proof_timings` block separately measures cold proof construction, including staged
+metadata allocation/copy, and warm semantic proof validation for both prefill and decode. Keep the
+run short, and capture `nvidia-smi` telemetry separately:
 
 Every timed sample also contains phase-level CUDA-event and host-wall intervals plus aggregate
 `phase_statistics`. The required phases are layer total, projection, convolution, qkv preparation,

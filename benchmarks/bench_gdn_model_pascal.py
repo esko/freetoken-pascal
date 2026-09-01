@@ -420,6 +420,32 @@ def validate_report_format(report: dict[str, Any]) -> None:
                 raise ValueError(
                     f"timings {case} {side} missing phase statistics: {sorted(missing_statistics)}"
                 )
+    proof_timings = report.get("metadata_proof_timings")
+    if not isinstance(proof_timings, dict):
+        raise ValueError("benchmark report missing metadata_proof_timings")
+    for case in ("prefill", "decode"):
+        block = proof_timings.get(case)
+        if not isinstance(block, dict):
+            raise ValueError(f"metadata proof timings missing {case} case")
+        for phase in ("cold_proof_construction", "warm_proof_validation"):
+            timing = block.get(phase)
+            if not isinstance(timing, dict):
+                raise ValueError(f"metadata proof timings {case} missing {phase}")
+            samples = timing.get("samples")
+            if not isinstance(samples, list) or not samples:
+                raise ValueError(f"metadata proof timings {case} {phase} missing samples")
+            for sample in samples:
+                if not isinstance(sample, dict):
+                    raise ValueError(f"metadata proof timing {case} {phase} sample must be a mapping")
+                for clock in ("cuda_event_ms", "host_wall_ms"):
+                    value = float(sample.get(clock, float("nan")))
+                    if not math.isfinite(value) or value < 0:
+                        raise ValueError(
+                            f"invalid {clock} for metadata proof timing {case} {phase}"
+                        )
+            statistics_block = timing.get("statistics")
+            if not isinstance(statistics_block, dict):
+                raise ValueError(f"metadata proof timings {case} {phase} missing statistics")
     json.dumps(report, allow_nan=False)
 
 
@@ -742,6 +768,69 @@ def _timed_call(torch: Any, device: Any, operation: Callable[[], Any]) -> tuple[
     return cuda_event_ms, host_wall_ms
 
 
+def _measure_metadata_proof(
+    torch: Any,
+    device: Any,
+    *,
+    operator: Any,
+    context: Any,
+    batch: Any,
+    num_tokens: int,
+    repeats: int,
+) -> dict[str, Any]:
+    """Measure cold proof construction separately from warm semantic validation."""
+
+    metadata = getattr(batch, "fla_metadata", None)
+    if metadata is None:
+        raise RuntimeError("metadata proof benchmark requires prebuilt FLA metadata")
+    slots = int(context.linear_state_pool.recurrent_states.shape[1])
+
+    cold_samples: list[dict[str, float | int]] = []
+    for index in range(repeats):
+        # Reset outside the timed region. The timed operation includes host tensor construction
+        # and the staged H2D copy, but not the bookkeeping assignment itself.
+        metadata.pascal_metadata_proof = None
+
+        def construct() -> None:
+            with torch.inference_mode():
+                proof = operator._ensure_pascal_metadata_proof(metadata, device)
+            if proof is None:
+                raise RuntimeError("scheduler metadata did not produce a Pascal proof")
+
+        cuda_ms, wall_ms = _timed_call(torch, device, construct)
+        cold_samples.append(
+            {"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
+        )
+
+    if getattr(metadata, "pascal_metadata_proof", None) is None:
+        raise RuntimeError("cold metadata proof construction did not leave a proof")
+    warm_samples: list[dict[str, float | int]] = []
+    for index in range(repeats):
+
+        def validate() -> None:
+            with torch.inference_mode():
+                operator._validate_pascal_metadata(
+                    metadata,
+                    num_slots=slots,
+                    num_tokens=num_tokens,
+                )
+
+        cuda_ms, wall_ms = _timed_call(torch, device, validate)
+        warm_samples.append(
+            {"index": index, "cuda_event_ms": cuda_ms, "host_wall_ms": wall_ms}
+        )
+    return {
+        "cold_proof_construction": {
+            "samples": cold_samples,
+            "statistics": _summary(cold_samples),
+        },
+        "warm_proof_validation": {
+            "samples": warm_samples,
+            "statistics": _summary(warm_samples),
+        },
+    }
+
+
 def _time_case(
     torch: Any,
     device: Any,
@@ -965,6 +1054,27 @@ def run_benchmark(
         torch, core, reference_context, device, phase="decode", tokens=config.prefill_tokens
     )
 
+    metadata_proof_timings = {
+        "prefill": _measure_metadata_proof(
+            torch,
+            device,
+            operator=pascal,
+            context=pascal_context,
+            batch=prefill_batch_pascal,
+            num_tokens=config.prefill_tokens,
+            repeats=config.repeats,
+        ),
+        "decode": _measure_metadata_proof(
+            torch,
+            device,
+            operator=pascal,
+            context=pascal_context,
+            batch=decode_batch_pascal,
+            num_tokens=1,
+            repeats=config.repeats,
+        ),
+    }
+
     correctness, pascal_post_prefill, reference_post_prefill = _correctness(
         torch,
         core,
@@ -1064,6 +1174,7 @@ def run_benchmark(
         },
         "correctness": correctness,
         "timings": {"prefill": prefill_timing, "decode": decode_timing},
+        "metadata_proof_timings": metadata_proof_timings,
         "timing_scope": (
             "Single-layer model boundary. The device-scoped CUDA-event interval includes GPU "
             "work plus stream-idle time caused by synchronous validation/dispatch; host wall "

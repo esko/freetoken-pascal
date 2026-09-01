@@ -460,8 +460,15 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
         fla.pascal_metadata_proof = proof
         return proof
 
-    def _validate_pascal_metadata(self, fla) -> None:
-        """Reject scheduler checkpoint metadata the standalone recurrence cannot preserve."""
+    def _validate_pascal_metadata(
+        self, fla, *, num_slots: int | None = None, num_tokens: int | None = None
+    ):
+        """Validate Pascal metadata before projection/convolution/state mutation.
+
+        The returned slot and offset tensors are the proof-owned effective metadata when a
+        scheduler-issued proof is present. Generic FLA metadata remains the direct-call
+        fallback and is synchronously checked for ABI range and ragged semantics.
+        """
 
         observer = getattr(self, "_gdn_phase_observer", None)
         if observer is not None:
@@ -477,6 +484,19 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
                 raise GdnDispatchError(
                     "pascal-fp32 does not support GDN tracking/checkpoint-boundary metadata"
                 )
+            if num_slots is None or num_tokens is None:
+                return None
+            from freetoken.kernel.gdn_pascal import validate_pascal_gdn_metadata
+
+            proof = getattr(fla, "pascal_metadata_proof", None)
+            return validate_pascal_gdn_metadata(
+                fla.cache_indices,
+                fla.cu_seqlens,
+                num_slots=num_slots,
+                num_tokens=num_tokens,
+                initial_state=fla.has_initial_state,
+                metadata_proof=proof,
+            )
         finally:
             if observer is not None:
                 observer("metadata_validation", "end")
@@ -628,7 +648,13 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             batch.fla_metadata = fla
         if decision.selected_implementation == "pascal-fp32":
             self._ensure_pascal_metadata_proof(fla, hidden_states.device)
-            self._validate_pascal_metadata(fla)
+            pascal_effective_metadata = self._validate_pascal_metadata(
+                fla,
+                num_slots=int(pool.recurrent_states.shape[1]),
+                num_tokens=int(total),
+            )
+        else:
+            pascal_effective_metadata = None
 
         observer = getattr(self, "_gdn_phase_observer", None)
         if observer is not None:
@@ -652,7 +678,11 @@ class Qwen4ExpGatedDeltaNet(BaseOP):
             observer("convolution", "begin")
         try:
             if batch.is_decode:
-                if decision.selected_implementation in ("torch-reference", "pascal-fp32"):
+                if decision.selected_implementation == "pascal-fp32":
+                    assert pascal_effective_metadata is not None
+                    effective_slots = pascal_effective_metadata[0]
+                    mixed = self._reference_conv_decode(conv_in, effective_slots, pool)
+                elif decision.selected_implementation == "torch-reference":
                     mixed = self._reference_conv_decode(conv_in, fla.cache_indices, pool)
                 else:
                     # Fused fla decode kernel: gating + in-kernel l2norm + recurrent update +

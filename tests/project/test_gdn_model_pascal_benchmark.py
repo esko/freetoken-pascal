@@ -57,6 +57,13 @@ def _minimal_report() -> dict[str, object]:
             },
         }
 
+    proof_timing = {
+        phase: {
+            "samples": [{"cuda_event_ms": 0.0, "host_wall_ms": 0.0}],
+            "statistics": {},
+        }
+        for phase in ("cold_proof_construction", "warm_proof_validation")
+    }
     return {
         "format_name": "raw-pascal-gdn-model-boundary-observation",
         "format_version": 1,
@@ -66,6 +73,7 @@ def _minimal_report() -> dict[str, object]:
         "selected_behavior": {},
         "correctness": {},
         "timings": {"prefill": timing_block(), "decode": timing_block()},
+        "metadata_proof_timings": {"prefill": proof_timing, "decode": proof_timing},
         "timing_scope": "test",
         "metadata": {},
     }

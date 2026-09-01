@@ -95,6 +95,24 @@ def _proven_decode_metadata():
     return metadata
 
 
+def _proven_prefill_metadata(*, initial_values=(True,)):
+    req = Req(
+        input_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+        table_idx=1,
+        cached_len=1 if initial_values[0] else 0,
+        output_len=3,
+        uid=1,
+        sampling_params=SamplingParams(),
+        cache_handle=None,
+    )
+    batch = Batch(reqs=[req], phase="prefill")
+    batch.padded_reqs = [req]
+    metadata = build_fla_metadata(batch, torch.device("cpu"))
+    operator = object.__new__(Qwen4ExpGatedDeltaNet)
+    operator._ensure_pascal_metadata_proof(metadata, torch.device("cpu"))
+    return metadata
+
+
 def test_validator_accepts_ragged_gqa_pool_layout_and_pre_sigmoided_beta() -> None:
     launch = _require_adapter().validate_pascal_gdn_inputs(*_inputs())
 
@@ -134,9 +152,7 @@ def test_metadata_proof_rejects_forgery_tensor_replacement_and_mutation() -> Non
 
     replacement = proof.slot_indices.clone()
     with pytest.raises(adapter.PascalGdnContractError, match="stale or unbound"):
-        adapter.validate_pascal_gdn_inputs(
-            *inputs[:6], replacement, proof.cu_seqlens, metadata_proof=proof
-        )
+        proof.values_for(replacement, proof.cu_seqlens)
 
     proof.slot_indices[0] = 0
     with pytest.raises(adapter.PascalGdnContractError, match="stale or unbound"):
@@ -209,6 +225,75 @@ def test_proof_is_independent_from_mismatched_generic_tensor_and_prefill_dtype()
     )
     assert prefill.pascal_metadata_proof is not None
     assert prefill.pascal_metadata_proof.cu_seqlens.dtype == torch.int32
+
+
+@pytest.mark.parametrize(
+    ("slot_values", "offset_values", "message"),
+    [((4, 2), (0, 1, 2), "out-of-range"), ((1, 2), (0, 2, 1), "nondecreasing")],
+)
+def test_semantic_proof_validation_rejects_invalid_slot_or_offset_before_launch(
+    slot_values, offset_values, message
+) -> None:
+    adapter = _require_adapter()
+    inputs = _inputs(tokens=2)
+    proof = adapter._issue_pascal_gdn_metadata_proof(
+        torch.device("cpu"), slot_values, offset_values
+    )
+    with pytest.raises(adapter.PascalGdnContractError, match=message):
+        adapter.validate_pascal_gdn_inputs(
+            *inputs[:6], proof.slot_indices, proof.cu_seqlens, metadata_proof=proof
+        )
+
+
+def test_metadata_proof_rejects_int32_overflow_before_tensor_staging() -> None:
+    adapter = _require_adapter()
+    with pytest.raises(adapter.PascalGdnContractError, match="int32 ABI range"):
+        adapter._issue_pascal_gdn_metadata_proof(
+            torch.device("cpu"), (2**31,), (0, 1)
+        )
+
+    overflowing_slots = torch.tensor([2**31], dtype=torch.int64)
+    offsets = torch.tensor([0, 1], dtype=torch.int64)
+    with pytest.raises(adapter.PascalGdnContractError, match="int32 ABI range"):
+        adapter.validate_pascal_gdn_metadata(
+            overflowing_slots,
+            offsets,
+            num_slots=4,
+            num_tokens=1,
+        )
+
+
+def test_initial_state_proof_requires_bound_tensor_and_matching_length() -> None:
+    adapter = _require_adapter()
+    with pytest.raises(adapter.PascalGdnContractError, match="length"):
+        adapter._issue_pascal_gdn_metadata_proof(
+            torch.device("cpu"), (1, 2), (0, 1, 2), initial_values=(True,)
+        )
+
+    metadata = _proven_prefill_metadata()
+    proof = metadata.pascal_metadata_proof
+    assert proof is not None and proof.initial_state is not None
+    with pytest.raises(adapter.PascalGdnContractError, match="requires its bound tensor"):
+        proof.values_for(proof.slot_indices, proof.cu_seqlens)
+    proof.initial_state[0] = False
+    with pytest.raises(adapter.PascalGdnContractError, match="stale or unbound"):
+        proof.values_for(proof.slot_indices, proof.cu_seqlens, proof.initial_state)
+
+
+def test_pascal_decode_uses_proof_owned_effective_slots_when_generic_metadata_changes() -> None:
+    metadata = _proven_decode_metadata()
+    proof = metadata.pascal_metadata_proof
+    assert proof is not None
+    metadata.cache_indices[0] = 3
+    operator = object.__new__(Qwen4ExpGatedDeltaNet)
+    effective_slots, effective_offsets, initial = operator._validate_pascal_metadata(
+        metadata, num_slots=4, num_tokens=2
+    )
+    assert effective_slots is proof.slot_indices
+    assert effective_offsets is proof.cu_seqlens
+    assert effective_slots.tolist() == [1, 2]
+    assert effective_offsets.tolist() == [0, 1, 2]
+    assert initial is None
 
 
 @pytest.mark.parametrize(
