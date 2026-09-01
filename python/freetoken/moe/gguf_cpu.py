@@ -14,7 +14,11 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from freetoken.gguf_host import QwenGGUFHostWeights, open_qwen_host_weights
+from freetoken.gguf_host import (
+    QwenGGUFHostWeights,
+    ValidatedPLEArtifact,
+    open_qwen_host_weights,
+)
 from freetoken.moe.cpu_abi import (
     CpuAbiError,
     CpuExecutionTelemetry,
@@ -669,6 +673,7 @@ def open_qwen_gguf_cpu_expert_bundle(
     grouped: bool = False,
     supported_expert_types: Collection[int] | None = None,
     ple_artifact_path: str | Path | None = None,
+    ple_artifact_validation: ValidatedPLEArtifact | None = None,
     ple_backend: str = "mmap",
     ple_warm_mode: str = "cold",
     ple_planner_mode: str = "vectorized",
@@ -687,6 +692,7 @@ def open_qwen_gguf_cpu_expert_bundle(
         path,
         supported_expert_types=supported_expert_types,
         ple_artifact_path=ple_artifact_path,
+        ple_artifact_validation=ple_artifact_validation,
         ple_backend=ple_backend,
         ple_warm_mode=ple_warm_mode,
         ple_planner_mode=ple_planner_mode,

@@ -419,13 +419,21 @@ def _validate_expected_file_sha256(
         raise ValueError("verify_file_sha256 requires expected_file_sha256")
 
 
-def _open_validated_pread_fd(path: str | Path, *, offset: int, length: int) -> int:
+def _open_validated_pread_fd(
+    path: str | Path,
+    *,
+    offset: int,
+    length: int,
+    expected_file_identity: PLEFileIdentity | None = None,
+) -> int:
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
         raise ValueError("invalid PLE positional range offset")
     if isinstance(length, bool) or not isinstance(length, int) or length <= 0:
         raise ValueError("invalid PLE positional range length")
     fd = os.open(path, os.O_RDONLY)
     try:
+        if expected_file_identity is not None:
+            expected_file_identity.assert_fd(fd, label="PLE payload")
         file_size = os.fstat(fd).st_size
         if offset > file_size or length > file_size - offset:
             raise ValueError(
@@ -604,6 +612,71 @@ class PLEDescriptor:
     shard_path: str
     data_offset: int
     codec: PLECodecDescriptor = IQ4_NL_CODEC_DESCRIPTOR
+
+
+@dataclass(frozen=True)
+class PLEFileIdentity:
+    """Stable file identity captured while validating a PLE artifact.
+
+    The identity is carried with a preflight result so the serving opener can
+    reject replacement/truncation between the (expensive) checksum and mapping.
+    It is intentionally metadata only; it is not a substitute for the manifest
+    checksum performed during validation.
+    """
+
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+
+    @classmethod
+    def from_path(cls, path: str | Path) -> PLEFileIdentity:
+        stat = Path(path).stat()
+        return cls(stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+    @classmethod
+    def from_fd(cls, fd: int) -> PLEFileIdentity:
+        stat = os.fstat(fd)
+        return cls(stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+    def assert_path(self, path: str | Path, *, label: str) -> None:
+        try:
+            current = type(self).from_path(path)
+        except OSError as error:
+            raise ValueError(f"{label} disappeared after validation") from error
+        if current != self:
+            raise ValueError(f"{label} changed after validation")
+
+    def assert_fd(self, fd: int, *, label: str) -> None:
+        try:
+            current = type(self).from_fd(fd)
+        except OSError as error:
+            raise ValueError(f"{label} could not be inspected after open") from error
+        if current != self:
+            raise ValueError(f"{label} changed between validation and open")
+
+
+@dataclass(frozen=True)
+class ValidatedPLEArtifact:
+    """Immutable handoff from pre-CUDA PLE validation to resource acquisition."""
+
+    artifact_path: str
+    descriptor: PLEDescriptor
+    payload_sha256: str
+    manifest_identity: PLEFileIdentity
+    payload_identity: PLEFileIdentity
+
+    def assert_current(self) -> None:
+        root = Path(self.artifact_path)
+        manifest_path = root / "manifest.json"
+        self.manifest_identity.assert_path(manifest_path, label="PLE manifest")
+        self.payload_identity.assert_path(self.descriptor.shard_path, label="PLE payload")
+        try:
+            current_sha256 = json.loads(manifest_path.read_text(encoding="utf-8"))["sha256"]
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            raise ValueError("PLE manifest became unreadable after validation") from error
+        if current_sha256 != self.payload_sha256:
+            raise ValueError("PLE manifest checksum changed after validation")
 
 
 @dataclass(frozen=True)
@@ -909,7 +982,13 @@ def _read_validated_ple_artifact(path: str | Path) -> PLEDescriptor:
         r"[0-9a-f]{64}", manifest["sha256"]
     ):
         raise ValueError("invalid PLE artifact sha256")
+    before_hash_identity = PLEFileIdentity.from_path(payload)
     actual_sha256 = _sha256_file(payload)
+    # A checksum is only useful for the bytes that were actually opened.  Reject
+    # replacement/truncation while hashing instead of handing a moving file to
+    # the mapper.
+    if PLEFileIdentity.from_path(payload) != before_hash_identity:
+        raise ValueError("PLE artifact payload changed while hashing")
     if actual_sha256 != manifest["sha256"]:
         raise ValueError("PLE artifact sha256 mismatch")
     return PLEDescriptor(
@@ -952,6 +1031,46 @@ def validate_ple_artifact(
                 + ", ".join(mismatches)
             )
     return descriptor
+
+
+def validate_ple_artifact_handoff(
+    path: str | Path,
+    *,
+    source_path: str | Path | None = None,
+) -> ValidatedPLEArtifact:
+    """Validate once and return a safe, immutable opener handoff.
+
+    The payload checksum is intentionally performed here, before Engine model
+    construction.  Consumers must pass this object to the artifact opener;
+    they must not reconstruct it from a path or cache it globally.
+    """
+    root = Path(path).resolve(strict=True)
+    manifest = root / "manifest.json"
+    manifest_before = PLEFileIdentity.from_path(manifest)
+    descriptor = _read_validated_ple_artifact(root)
+    manifest_identity = PLEFileIdentity.from_path(manifest)
+    if manifest_identity != manifest_before:
+        raise ValueError("PLE artifact manifest changed during validation")
+    if source_path is not None:
+        source = inspect_qwen_host_layout(source_path).ple
+        mismatches = [
+            name
+            for name in _PLE_DESCRIPTOR_FIELDS
+            if getattr(descriptor, name) != getattr(source, name)
+        ]
+        if mismatches:
+            raise ValueError(
+                "dedicated PLE artifact does not match source GGUF descriptor: "
+                + ", ".join(mismatches)
+            )
+    payload = Path(descriptor.shard_path)
+    return ValidatedPLEArtifact(
+        artifact_path=str(root),
+        descriptor=descriptor,
+        payload_sha256=json.loads(manifest.read_text(encoding="utf-8"))["sha256"],
+        manifest_identity=manifest_identity,
+        payload_identity=PLEFileIdentity.from_path(payload),
+    )
 
 
 def host_memory_report(layout: QwenHostLayout) -> dict[str, int]:
@@ -1014,6 +1133,7 @@ class MappedFileRange:
         row_bytes: int,
         expected_file_sha256: str | None = None,
         verify_file_sha256: bool = False,
+        expected_file_identity: PLEFileIdentity | None = None,
     ) -> None:
         self.path = Path(path)
         if offset < 0 or length <= 0 or rows <= 0 or row_bytes <= 0:
@@ -1038,6 +1158,8 @@ class MappedFileRange:
         map_length = prefix + length
         self._fd = os.open(self.path, os.O_RDONLY)
         try:
+            if expected_file_identity is not None:
+                expected_file_identity.assert_fd(self._fd, label="PLE payload")
             self._mapping = mmap.mmap(
                 self._fd,
                 map_length,
@@ -1517,6 +1639,7 @@ class MappedPLETable:
         cls,
         path: str | Path,
         *,
+        validated_artifact: ValidatedPLEArtifact | None = None,
         warm_mode: str = "cold",
         backend: str = "mmap",
         prefetch_max_rows: int = 4096,
@@ -1533,7 +1656,18 @@ class MappedPLETable:
         )
         if backend not in {"mmap", "pread"}:
             raise ValueError(f"unknown PLE backend {backend!r}")
-        descriptor = validate_ple_artifact(path)
+        if validated_artifact is None:
+            validated_artifact = validate_ple_artifact_handoff(path)
+        elif not isinstance(validated_artifact, ValidatedPLEArtifact):
+            raise TypeError("validated_artifact must be a ValidatedPLEArtifact")
+        expected_root = Path(path).resolve()
+        if Path(validated_artifact.artifact_path) != expected_root:
+            raise ValueError("validated PLE artifact handoff path does not match opener path")
+        # Check the manifest and payload immediately before opening any mapping
+        # or descriptor.  The mapping/fd constructors repeat the payload identity
+        # check after open to close the remaining pathname race.
+        validated_artifact.assert_current()
+        descriptor = validated_artifact.descriptor
         payload = Path(descriptor.shard_path)
         tensor_bytes = descriptor.tensor_bytes
         mapping: MappedFileRange | None = None
@@ -1550,9 +1684,15 @@ class MappedPLETable:
                     # ``validate_ple_artifact`` has already verified the immutable
                     # payload before any mapping is acquired.
                     verify_file_sha256=False,
+                    expected_file_identity=validated_artifact.payload_identity,
                 )
             else:
-                pread_fd = _open_validated_pread_fd(payload, offset=0, length=tensor_bytes)
+                pread_fd = _open_validated_pread_fd(
+                    payload,
+                    offset=0,
+                    length=tensor_bytes,
+                    expected_file_identity=validated_artifact.payload_identity,
+                )
             table = cls(
                 descriptor,
                 mapping,
@@ -2094,6 +2234,7 @@ def open_qwen_host_weights(
     *,
     supported_expert_types: Collection[int] | None = None,
     ple_artifact_path: str | Path | None = None,
+    ple_artifact_validation: ValidatedPLEArtifact | None = None,
     ple_backend: str = "mmap",
     ple_warm_mode: str = "cold",
     ple_prefetch_max_rows: int = 4096,
@@ -2109,6 +2250,8 @@ def open_qwen_host_weights(
     PLE range remains available to standalone compatibility callers.
     """
     _validate_prefetch_config(ple_prefetch_max_rows, ple_prefetch_chunk_rows)
+    if ple_artifact_validation is not None and ple_artifact_path is None:
+        raise ValueError("PLE artifact validation requires ple_artifact_path")
     resolved_planner = _resolve_planner_config(
         ple_planner_config,
         planner_mode=ple_planner_mode,
@@ -2133,6 +2276,7 @@ def open_qwen_host_weights(
         else:
             ple = MappedPLETable.open_from_artifact(
                 ple_artifact_path,
+                validated_artifact=ple_artifact_validation,
                 warm_mode=ple_warm_mode,
                 backend=ple_backend,
                 prefetch_max_rows=ple_prefetch_max_rows,
@@ -2189,10 +2333,12 @@ __all__ = [
     "PLECodec",
     "PLECodecDescriptor",
     "PLECodecRegistry",
+    "PLEFileIdentity",
     "PLELookupPlannerConfig",
     "PLEPrefetchHandle",
     "QwenGGUFHostWeights",
     "QwenHostLayout",
+    "ValidatedPLEArtifact",
     "dequantize_iq4_nl",
     "expert_layout_from_census",
     "host_layout_document",
@@ -2201,4 +2347,5 @@ __all__ = [
     "inspect_qwen_host_layout",
     "open_qwen_host_weights",
     "validate_ple_artifact",
+    "validate_ple_artifact_handoff",
 ]

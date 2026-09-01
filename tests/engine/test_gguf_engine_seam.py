@@ -361,7 +361,11 @@ def test_engine_startup_adopts_bundle_when_composition_cleanup_close_fails(monke
         self.cpu_moe_executor = None
         self._expert_banks = None
         captured["engine"] = self
-        _initialize_qwen_gguf_cpu_composition(self.model, config)
+        _initialize_qwen_gguf_cpu_composition(
+            self.model,
+            config,
+            validated_ple_artifact=self._validated_ple_artifact,
+        )
 
     monkeypatch.setattr(Engine, "_initialize", initialize)
     monkeypatch.setattr("freetoken.engine.engine._preflight_qwen_gguf_ple_artifact", lambda _: None)

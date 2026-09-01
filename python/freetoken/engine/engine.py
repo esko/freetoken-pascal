@@ -96,7 +96,12 @@ def _qwen_gguf_cpu_workspace_max_tokens(config: EngineConfig) -> int:
     return min(value for _, value in bounds)
 
 
-def _initialize_qwen_gguf_cpu_composition(model, config: EngineConfig):
+def _initialize_qwen_gguf_cpu_composition(
+    model,
+    config: EngineConfig,
+    *,
+    validated_ple_artifact=None,
+):
     """Build the cache-zero Qwen GGUF composition as one transactional unit.
 
     The bundle is the sole owner of the heterogeneous expert mappings and PLE mapping.
@@ -120,6 +125,7 @@ def _initialize_qwen_gguf_cpu_composition(model, config: EngineConfig):
         max_routes=int(model_config.num_experts_per_tok),
         cache_size=0,
         ple_artifact_path=ple_artifact_path,
+        ple_artifact_validation=validated_ple_artifact,
         ple_backend=getattr(config, "ple_backend", "mmap"),
         ple_warm_mode=getattr(config, "ple_warm_mode", "cold"),
         ple_planner_mode=getattr(config, "ple_planner_mode", "vectorized"),
@@ -446,13 +452,14 @@ class Engine:
         # sentinel initialized before startup so rollback can use the same detach path.
         self._gguf_cpu_expert_bundle = None
         self._gguf_cpu_expert_bundle_owned = False
+        self._validated_ple_artifact = None
         try:
             # Reject the narrow Qwen GGUF contract before CUDA/model construction.  This is
             # intentionally pure: invalid TP, request, cache, graph, or artifact settings must
             # not create a model and then fail after a partial weight load.
             if _is_qwen_gguf_expert_config(getattr(config, "model_config", None)):
                 _preflight_qwen_gguf_cpu_engine_config(config, require_ple_artifact=True)
-                _preflight_qwen_gguf_ple_artifact(config)
+                self._validated_ple_artifact = _preflight_qwen_gguf_ple_artifact(config)
             self._initialize(config)
         except BaseException as error:
             # A composition helper can return ownership through its cleanup
@@ -515,8 +522,13 @@ class Engine:
         # the existing model lifecycle seam.
         if _is_qwen_gguf_expert_config(config.model_config):
             self._gguf_cpu_expert_bundle, self._host_tables_bytes = (
-                _initialize_qwen_gguf_cpu_composition(self.model, config)
+                _initialize_qwen_gguf_cpu_composition(
+                    self.model,
+                    config,
+                    validated_ple_artifact=self._validated_ple_artifact,
+                )
             )
+            self._validated_ple_artifact = None
             self._gguf_cpu_expert_bundle_owned = True
             logger.info_rank0(
                 "Qwen GGUF cache-zero startup: heterogeneous expert bundle owns routed "
@@ -1642,7 +1654,7 @@ def _preflight_qwen_gguf_cpu_engine_config(
         )
 
 
-def _preflight_qwen_gguf_ple_artifact(config: EngineConfig) -> None:
+def _preflight_qwen_gguf_ple_artifact(config: EngineConfig):
     """Validate the dedicated PLE artifact before model/CUDA initialization.
 
     This is deliberately a file/metadata-only check.  It does not construct a
@@ -1653,13 +1665,13 @@ def _preflight_qwen_gguf_ple_artifact(config: EngineConfig) -> None:
     model_path = getattr(config, "model_path", None)
     if not isinstance(artifact, (str, bytes, os.PathLike)) or not str(artifact).strip():
         # The pure config preflight reports the specific missing-path error.
-        return
+        return None
     if not isinstance(model_path, (str, bytes, os.PathLike)) or not str(model_path).strip():
         raise ValueError("Qwen GGUF PLE preflight requires a model_path")
-    from freetoken.gguf_host import validate_ple_artifact
+    from freetoken.gguf_host import validate_ple_artifact_handoff
 
     try:
-        validate_ple_artifact(artifact, source_path=model_path)
+        return validate_ple_artifact_handoff(artifact, source_path=model_path)
     except (OSError, TypeError, ValueError) as error:
         raise ValueError(
             "Qwen GGUF dedicated PLE artifact preflight failed: "
