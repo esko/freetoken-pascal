@@ -58,12 +58,6 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _repository_commit() -> str:
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-    ).strip()
-
-
 def _load_inventory(path: Path, *, expected_profile: str | None) -> dict[str, Any]:
     try:
         inventory = json.loads(path.read_text(encoding="utf-8"))
@@ -231,6 +225,7 @@ def build_evidence(
     devices: list[Mapping[str, Any]],
     operation_seconds: float,
     total_seconds: float,
+    repository_commit: str,
     observed_at: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Build the schema-shaped record from measured, injectable observations."""
@@ -252,13 +247,17 @@ def build_evidence(
     powers = [float(device["power_watts"]) for device in devices]
     limits = [float(device["power_limit_watts"]) for device in devices]
     inventory_sha256 = _sha256_file(Path(inventory_path))
+    if len(repository_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in repository_commit
+    ):
+        raise ValueError("repository_commit must be a lowercase 40-character commit")
     return {
         "schema_name": SCHEMA_NAME,
         "schema_version": 1,
         "evidence_status": "measured",
         "evidence_kind": "dual-p4-direct-device-smoke",
         "claim_status": "non-serving-device-only",
-        "repository_commit": _repository_commit(),
+        "repository_commit": repository_commit,
         "hardware_inventory": {
             "path": str(inventory_path),
             "sha256": inventory_sha256,
@@ -327,7 +326,13 @@ def _validate_evidence(document: Mapping[str, Any]) -> None:
         raise RuntimeError("generated evidence is invalid: " + "; ".join(errors))
 
 
-def run_probe(*, inventory_path: Path, output_path: Path, expected_profile: str) -> dict[str, Any]:
+def run_probe(
+    *,
+    inventory_path: Path,
+    output_path: Path,
+    expected_profile: str,
+    repository_commit: str,
+) -> dict[str, Any]:
     """Run one isolated arithmetic operation on each of the two visible P4s."""
     inventory = _load_inventory(inventory_path, expected_profile=expected_profile)
     import torch
@@ -369,6 +374,7 @@ def run_probe(*, inventory_path: Path, output_path: Path, expected_profile: str)
         devices=measured_devices,
         operation_seconds=operation_seconds,
         total_seconds=total_seconds,
+        repository_commit=repository_commit,
     )
     _validate_evidence(document)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -381,11 +387,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-profile", choices=("ecc-on", "ecc-off"), required=True)
+    parser.add_argument("--repository-commit", required=True)
     args = parser.parse_args(argv)
     run_probe(
         inventory_path=args.inventory,
         output_path=args.output,
         expected_profile=args.expected_profile,
+        repository_commit=args.repository_commit,
     )
     print(args.output)
     return 0

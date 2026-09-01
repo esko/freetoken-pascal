@@ -51,6 +51,7 @@ def test_builder_emits_schema_valid_non_serving_evidence(tmp_path: Path) -> None
         devices=_devices(),
         operation_seconds=0.2,
         total_seconds=0.4,
+        repository_commit="1" * 40,
     )
 
     assert DUAL_SHORT._load_module
@@ -72,6 +73,7 @@ def test_builder_rejects_allocation_over_hard_bound(tmp_path: Path) -> None:
             devices=devices,
             operation_seconds=0.2,
             total_seconds=0.4,
+            repository_commit="1" * 40,
         )
 
 
@@ -87,4 +89,5 @@ def test_builder_rejects_more_than_two_devices(tmp_path: Path) -> None:
             devices=[*devices, copy.deepcopy(devices[0])],
             operation_seconds=0.2,
             total_seconds=0.4,
+            repository_commit="1" * 40,
         )

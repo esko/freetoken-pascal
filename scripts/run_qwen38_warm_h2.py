@@ -49,12 +49,6 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _repository_commit() -> str:
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-    ).strip()
-
-
 def _load_module(name: str, path: Path) -> Any:
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
@@ -266,6 +260,7 @@ def build_evidence(
     warmup_seconds: float,
     request_seconds: float,
     output_token_ids: list[int],
+    repository_commit: str,
 ) -> dict[str, Any]:
     if not telemetry_samples:
         raise ValueError("warm H2 requires measured GPU telemetry")
@@ -295,13 +290,17 @@ def build_evidence(
     peak_power = max(float(sample["power_watts"]) for sample in telemetry_samples)
     power_limit = min(float(sample["power_limit_watts"]) for sample in telemetry_samples)
     topology = inventory_gpu["topology"]
+    if len(repository_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in repository_commit
+    ):
+        raise ValueError("repository_commit must be a lowercase 40-character commit")
     return {
         "schema_name": SCHEMA_NAME,
         "schema_version": 1,
         "evidence_status": "measured",
         "evidence_kind": "single-p4-warm-cache",
         "claim_status": "bounded-correctness-only",
-        "repository_commit": _repository_commit(),
+        "repository_commit": repository_commit,
         "identity": dict(identity),
         "hardware_inventory": {
             "path": str(inventory_path),
@@ -472,6 +471,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             warmup_seconds=warmup_seconds,
             request_seconds=request_seconds,
             output_token_ids=list(measured[0]["token_ids"]),
+            repository_commit=args.repository_commit,
         )
         validator = _load_module(
             "validate_generated_warm_h2", ROOT / "scripts/validate_evidence.py"
@@ -501,6 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-profile", choices=("ecc-on", "ecc-off"), required=True)
     parser.add_argument("--cpu-threads", type=int, default=8)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--repository-commit", required=True)
     args = parser.parse_args(argv)
     run(args)
     print(args.output)

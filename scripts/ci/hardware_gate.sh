@@ -6,6 +6,7 @@ image="${FREETOKEN_PASCAL_CUDA_IMAGE:-freetoken-pascal:cuda126}"
 smoke_gpu="${FREETOKEN_SMOKE_GPU:-0}"
 host_python="${FREETOKEN_HOST_PYTHON:-python3}"
 repo_root="$(git rev-parse --show-toplevel)"
+repository_commit="$(git rev-parse HEAD)"
 container_root=/workspace/freetoken-pascal
 mkdir -p results/hardware
 
@@ -165,6 +166,7 @@ run_dual_short() {
     python scripts/run_dual_p4_short.py \
       --inventory results/hardware/inventory.json \
       --output results/hardware/qwen38-dual-p4-device.json \
+      --repository-commit "$repository_commit" \
       --expected-profile "$profile_id"
 }
 
@@ -204,6 +206,7 @@ run_warm_p4() {
       --ple-backend "${FREETOKEN_PASCAL_PLE_BACKEND:-pread}" \
       --expected-profile "$profile_id" \
       --cpu-threads "${FREETOKEN_PASCAL_CPU_THREADS:-8}" \
+      --repository-commit "$repository_commit" \
       --output results/hardware/qwen38-gguf-cache-zero-warm-h2.json
 }
 

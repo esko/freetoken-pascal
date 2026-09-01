@@ -74,6 +74,7 @@ def _inputs(tmp_path: Path) -> dict:
         "warmup_seconds": 2.0,
         "request_seconds": 3.0,
         "output_token_ids": [201519, 8691],
+        "repository_commit": "1" * 40,
     }
 
 
