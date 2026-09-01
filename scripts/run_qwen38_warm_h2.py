@@ -262,10 +262,16 @@ class _HardDeadline:
     def start(self) -> None:
         if self._process is not None:
             raise RuntimeError("hard deadline already started")
+        parent_pid = os.getpid()
         code = (
-            "import os,signal,time;"
+            "import ctypes,os,signal,time;"
+            f"parent={parent_pid};"
+            "libc=ctypes.CDLL(None,use_errno=True);"
+            "result=libc.prctl(1,signal.SIGTERM);"
+            "result == 0 or (_ for _ in ()).throw(OSError(ctypes.get_errno(),'prctl'));"
+            "os.getppid() == parent or (_ for _ in ()).throw(SystemExit(0));"
             f"time.sleep({self.seconds});"
-            f"os.kill({os.getpid()},signal.SIGKILL)"
+            "os.getppid() == parent and os.kill(parent,signal.SIGKILL)"
         )
         self._process = self._popen(
             [sys.executable, "-c", code],

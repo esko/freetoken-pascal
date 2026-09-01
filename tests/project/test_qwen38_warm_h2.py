@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import signal
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -124,6 +127,25 @@ def test_hard_deadline_can_be_cancelled_without_killing_process() -> None:
 
     assert process.terminated is True
     assert "SIGKILL" in commands[0][2]
+    assert "prctl" in commands[0][2]
+    assert "getppid" in commands[0][2]
+
+
+def test_hard_deadline_expires_in_a_separate_victim_process() -> None:
+    code = f"""
+import importlib.util
+import time
+spec = importlib.util.spec_from_file_location('warm_deadline_victim', {str(SCRIPT)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+deadline = module._HardDeadline(1)
+deadline.start()
+time.sleep(10)
+"""
+
+    completed = subprocess.run([sys.executable, "-c", code], check=False, timeout=5)
+
+    assert completed.returncode == -signal.SIGKILL
 
 
 def test_model_shard_verification_rejects_same_size_content_drift(tmp_path: Path) -> None:

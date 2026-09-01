@@ -206,6 +206,9 @@ run_warm_p4() {
     -v "$FREETOKEN_PASCAL_PLE_ARTIFACT:$FREETOKEN_PASCAL_PLE_ARTIFACT:ro" \
     -w "$container_root" \
     "$image" \
+    # The outer bound includes CPU/NVMe shard hashing. The producer arms an
+    # independent 300-second process watchdog immediately before Engine/GPU
+    # acquisition and leaves it armed through shutdown.
     env PYTHONPATH=python timeout --foreground --signal=TERM --kill-after=5s 900s \
       python scripts/run_qwen38_warm_h2.py \
       --full-h2 "$full_h2" \

@@ -157,7 +157,8 @@ The short-evidence profiles deliberately keep these claims separate:
 - a warm-cache single-P4 request must stream-hash the current model split against the canonical
   full-H2 identities before GPU acquisition, and Engine startup still performs its mandatory
   dedicated-PLE integrity validation; a separate-process 300-second watchdog remains armed through
-  shutdown and the measured document is atomically published only after successful cleanup;
+  shutdown and the measured document is atomically published only after successful cleanup; the
+  outer 900-second process limit separately allows for CPU/NVMe hashing before GPU acquisition;
 - a direct dual-P4 probe measures only two-device identity, bounded allocation/arithmetic, topology,
   and instantaneous telemetry, and must identify itself as non-serving;
 - neither profile establishes steady-state TPS, a selected dual-P4 policy, or thermal qualification.

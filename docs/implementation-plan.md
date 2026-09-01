@@ -72,7 +72,8 @@ Hardware evidence must bind an immutable ECC profile to the captured inventory. 
 measurements rehash the current model shards against canonical full-H2 identities before acquiring
 GPU resources and retain the Engine's mandatory PLE integrity validation. A separate watchdog
 process bounds Engine construction, generation, telemetry cleanup, and shutdown; evidence is
-published atomically only after cleanup succeeds. Short direct dual-device probes remain
+published atomically only after cleanup succeeds. The outer 900-second process limit includes the
+CPU/NVMe identity pass; it is not the GPU thermal bound. Short direct dual-device probes remain
 non-serving evidence until issue #20
 provides a real two-P4 execution policy. None of these bounded profiles qualifies sustained
 thermals or release throughput.
