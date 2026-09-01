@@ -23,6 +23,14 @@ if [[ -n "$profile_id" ]]; then
       ;;
   esac
 fi
+inventory_path=results/hardware/inventory.json
+case "$level" in
+  warm-p4|dual-p4-short)
+    if [[ -n "$profile_id" ]]; then
+      inventory_path="results/hardware/inventory-${profile_id}-${level}.json"
+    fi
+    ;;
+esac
 
 docker image inspect "$image" >/dev/null
 software_probe="$({
@@ -53,7 +61,7 @@ print(data["triton"])
 # PCI/NUMA/NVMe capture runs on the host; CUDA runtime identity is measured in
 # the exact container used by the bounded device tests.
 "$host_python" scripts/capture_hardware_inventory.py \
-  results/hardware/inventory.json \
+  "$inventory_path" \
   --cuda-runtime "${software_fields[0]}" \
   --torch-version "${software_fields[1]}" \
   --torch-device-count "${software_fields[2]}" \
@@ -73,7 +81,7 @@ docker run --rm --gpus all \
   -w "$container_root" \
   "$image" \
   python scripts/check_hardware_inventory.py \
-    results/hardware/inventory.json \
+    "$inventory_path" \
     --minimum-gpus "$minimum_gpus" \
     "${inventory_check_profile_args[@]}"
 
@@ -164,7 +172,7 @@ run_dual_short() {
     -w "$container_root" \
     "$image" \
     python scripts/run_dual_p4_short.py \
-      --inventory results/hardware/inventory.json \
+      --inventory "$inventory_path" \
       --output results/hardware/qwen38-dual-p4-device.json \
       --repository-commit "$repository_commit" \
       --expected-profile "$profile_id"
@@ -200,7 +208,7 @@ run_warm_p4() {
     "$image" \
     env PYTHONPATH=python timeout 330 python scripts/run_qwen38_warm_h2.py \
       --full-h2 "$full_h2" \
-      --inventory results/hardware/inventory.json \
+      --inventory "$inventory_path" \
       --model "$FREETOKEN_PASCAL_MODEL_PATH" \
       --ple-artifact "$FREETOKEN_PASCAL_PLE_ARTIFACT" \
       --ple-backend "${FREETOKEN_PASCAL_PLE_BACKEND:-pread}" \
