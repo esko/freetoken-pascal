@@ -467,6 +467,17 @@ def test_qwen4_gguf_centered_norm_subtracts_before_bf16_narrowing():
         shape=(2,),
     )
 
+    centered = _centered_norm(tensor)
+
+    assert centered.dtype == torch.bfloat16
+    assert torch.count_nonzero(centered) == 2
+    torch.testing.assert_close(
+        centered.float(),
+        torch.tensor([0.001, -0.001]),
+        atol=8e-6,
+        rtol=0,
+    )
+
 
 def test_qwen4_gguf_merges_hyperconnection_down_inject_and_zero_pad(monkeypatch):
     from freetoken.models.qwen4_exp import gguf as qwen_gguf
@@ -511,18 +522,6 @@ def test_qwen4_gguf_rejects_malformed_hyperconnection_parts(monkeypatch):
             SimpleNamespace(ple_state_width=3, hc_lowrank=2, hc_count=3),
             name="hc.ffn.0",
         )
-
-    centered = _centered_norm(tensor)
-
-    assert centered.dtype == torch.bfloat16
-    assert torch.count_nonzero(centered) == 2
-    torch.testing.assert_close(
-        centered.float(),
-        torch.tensor([0.001, -0.001]),
-        atol=8e-6,
-        rtol=0,
-    )
-
 
 def test_mixed_gguf_projection_allocates_independent_buffers():
     from freetoken.layers.gguf import GGUFLinear, GGUFMergedLinear, gguf_merged_or_plain
