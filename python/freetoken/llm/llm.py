@@ -99,7 +99,14 @@ class LLM(Scheduler):
                 continue
             assert isinstance(msg, DetokenizeMsg)
             status = self.status_map[msg.uid]
-            if not (msg.finished and msg.next_token in self.eos_token_ids):
+            # Suppress an EOS only when EOS actually caused a stop.  With
+            # ignore_eos=True the same token is ordinary output and may happen to
+            # exhaust the length budget; dropping it makes max_tokens under-report.
+            if not (
+                msg.finished
+                and msg.finish_reason == "stop"
+                and msg.next_token in self.eos_token_ids
+            ):
                 status.output_ids.append(msg.next_token)
 
     def generate(
