@@ -49,6 +49,14 @@ A tiny Qwen4 model passes CPU/reference tests on the completed #77/#81 reconcili
 
 After P4 installation, one-P4 GDN end-to-end qualification, PLE I/O behavior, and safe cache-disabled decode must pass on hardware. Standalone and explicit model-boundary GDN parity now pass, but the optimized `pascal-fp32` path remains factory-disabled until same-workload end-to-end evidence improves performance outside noise.
 
+The first correctness-first vertical H2 slice now passes on Gorilla with ECC disabled and the
+pinned `UD-Q4_K_XL` artifact: both random-advised `mmap` and `pread` PLE providers completed the
+same five-token prompt and two-token ordinary-decode request through the real Engine. The run used
+the dedicated 28.8 GB IQ4_NL PLE artifact, the complete 77.0 GB mapped GGUF expert bank, verified
+eight-thread AVX2 expert execution, cache size zero, and the visible Pascal QSA/GDN reference
+fallbacks. This is integration evidence, not profile qualification or a throughput target; cold
+cache, sustained decode, long-context quality, placement, and optimized QSA/GDN work remain gated.
+
 ## Phase 2 — AVX2 host expert backend and model profiles
 
 ### Outcomes

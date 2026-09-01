@@ -58,3 +58,32 @@ Artifact retention is:
 
 The current hardware workflow uses 30 days. Issue #29 owns the separate H4 release retention and
 permanent release attachments.
+
+## Current bounded P4 evidence
+
+On 2026-09-01 Gorilla completed the first real Qwen3.8 GGUF cache-zero vertical H2 run. The exact
+model revision was `c8b5954a88c2775c546b92593eda40ea041d3176`; all four manifest shard sizes
+matched, and the dedicated IQ4_NL PLE artifact had SHA-256
+`dd55c28902f38cd88134b2a569c51282c5ffce30080487e1a645740115c56cc3`.
+
+- `mmap` at integration commit `0b5cadb0a7`: two output tokens, 11.192 seconds for the complete
+  five-token prompt plus generation call, 96 logical/unique PLE rows, 8,640 packed bytes,
+  `MADV_RANDOM`, 35 minor faults, zero observed major faults, and no block-device reads because the
+  PLE was already warm in Linux page cache.
+- `pread` at integration commit `3b52df561c`: the identical two output token IDs, 11.120 seconds
+  for the complete prompt plus generation call, the same 96 rows and 8,640 packed bytes through 96
+  positional reads, `POSIX_FADV_RANDOM`, 23 minor faults, and zero observed major faults or
+  block-device reads on the warm cache.
+- Every routed layer reported `mixed_avx2`, eight actual worker threads with verified affinity,
+  CPU execution, and a file-backed GGUF expert source. No SSD or GPU expert execution occurred.
+- Runtime allocation reached 5.86 GiB on GPU 0 with about 2.20 GiB free after initialization.
+  Peak sampled temperature was 54 C at roughly 25 W under the intentional 75 W power limit.
+- The inventory at `7594bce5b4` recorded two ECC-disabled Tesla P4 cards on separate PCI roots and
+  NUMA nodes, plus the PCIe Gen3 x4 NVMe on node 0. Seven short single-card tests and one dual-card
+  discovery test passed. Active-load PCIe link qualification and cooling remain unqualified.
+
+These were bounded correctness/integration runs, not repeated steady-state decode benchmarks.
+The reported approximately 0.18 output tokens per second divides two output tokens by the complete
+prompt-plus-generation call and must not be presented as steady-state decode TPS. Cold-cache PLE
+fault/read-amplification, ECC-on comparison, long-context, and sustained thermal evidence remain
+separate required profiles.
