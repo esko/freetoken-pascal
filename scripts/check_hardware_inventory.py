@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 ROOT = Path(__file__).resolve().parents[1]
 FORMAT_CHECKER = FormatChecker()
+PROFILE_IDS = ("ecc-on", "ecc-off")
 
 
 @FORMAT_CHECKER.checks("date-time", raises=ValueError)
@@ -31,7 +32,12 @@ def _is_rfc3339_datetime(value: object) -> bool:
     return parsed.tzinfo is not None
 
 
-def validate_pascal_inventory(data: Any, *, minimum_gpus: int = 1) -> list[str]:
+def validate_pascal_inventory(
+    data: Any,
+    *,
+    minimum_gpus: int = 1,
+    expected_profile: str | None = None,
+) -> list[str]:
     if not isinstance(data, dict):
         return ["inventory root must be an object"]
     gpus = data.get("gpus")
@@ -40,10 +46,27 @@ def validate_pascal_inventory(data: Any, *, minimum_gpus: int = 1) -> list[str]:
     errors: list[str] = []
     if data.get("evidence_status") != "measured":
         return ["hardware gate requires evidence_status 'measured'"]
+    profile_id = data.get("profile_id")
+    if profile_id is not None and profile_id not in PROFILE_IDS:
+        errors.append(f"profile_id must be one of {PROFILE_IDS}, found {profile_id!r}")
+    if expected_profile is not None and expected_profile not in PROFILE_IDS:
+        errors.append(f"expected_profile must be one of {PROFILE_IDS}, got {expected_profile!r}")
+    if expected_profile is not None and profile_id != expected_profile:
+        errors.append(f"inventory profile_id must be {expected_profile!r}, found {profile_id!r}")
     if len(gpus) < minimum_gpus:
         errors.append(f"expected at least {minimum_gpus} GPUs, found {len(gpus)}")
     uuids: list[str] = []
     buses: list[str] = []
+    current_ecc_modes: list[str] = []
+    pending_ecc_modes: list[str] = []
+    selected_profile = expected_profile or profile_id
+    profile_expected_mode = (
+        "enabled"
+        if selected_profile == "ecc-on"
+        else "disabled"
+        if selected_profile == "ecc-off"
+        else None
+    )
     for index, gpu in enumerate(gpus):
         if not isinstance(gpu, dict):
             errors.append(f"gpus[{index}] must be an object")
@@ -56,12 +79,29 @@ def validate_pascal_inventory(data: Any, *, minimum_gpus: int = 1) -> list[str]:
                 f"found {gpu.get('compute_capability')!r}"
             )
         ecc_mode = gpu.get("ecc_mode")
+        ecc_pending_mode = gpu.get("ecc_pending_mode")
         memory_mib = gpu.get("memory_mib")
         valid_memory = memory_mib == 7680 if ecc_mode == "enabled" else memory_mib in (7680, 8192)
         if ecc_mode not in ("enabled", "disabled") or not valid_memory:
             errors.append(
                 f"gpus[{index}] has invalid ECC/memory profile {ecc_mode!r}/{memory_mib!r} MiB"
             )
+        elif ecc_mode in ("enabled", "disabled"):
+            current_ecc_modes.append(ecc_mode)
+        if ecc_pending_mode in ("enabled", "disabled"):
+            pending_ecc_modes.append(ecc_pending_mode)
+        if profile_expected_mode is not None:
+            if ecc_mode != profile_expected_mode or ecc_pending_mode != profile_expected_mode:
+                errors.append(
+                    f"gpus[{index}] current/pending ECC must both be "
+                    f"{profile_expected_mode!r} for profile {selected_profile!r}"
+                )
+        elif ecc_pending_mode is not None and ecc_pending_mode not in (
+            "enabled",
+            "disabled",
+            "n/a",
+        ):
+            errors.append(f"gpus[{index}].ecc_pending_mode is invalid")
         uuid = gpu.get("uuid")
         if not isinstance(uuid, str) or re.fullmatch(r"GPU-[0-9a-fA-F-]{36}", uuid) is None:
             errors.append(f"gpus[{index}].uuid must be a GPU UUID")
@@ -109,6 +149,19 @@ def validate_pascal_inventory(data: Any, *, minimum_gpus: int = 1) -> list[str]:
         errors.append("gpus UUIDs must be unique")
     if len(buses) != len(set(buses)):
         errors.append("gpus PCI bus IDs must be unique")
+    if profile_expected_mode is None:
+        if len(set(current_ecc_modes)) > 1:
+            errors.append("gpus current ECC modes must be uniform")
+        if len(set(pending_ecc_modes)) > 1:
+            errors.append("gpus pending ECC modes must be uniform")
+        if current_ecc_modes and pending_ecc_modes:
+            for index, gpu in enumerate(gpus):
+                if (
+                    gpu.get("ecc_mode") in ("enabled", "disabled")
+                    and gpu.get("ecc_pending_mode") in ("enabled", "disabled")
+                    and gpu["ecc_mode"] != gpu["ecc_pending_mode"]
+                ):
+                    errors.append(f"gpus[{index}] current and pending ECC modes disagree")
 
     thermal = data.get("thermal_qualification")
     if not isinstance(thermal, dict):
@@ -149,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Reject non-Pascal hardware evidence")
     parser.add_argument("inventory", type=Path)
     parser.add_argument("--minimum-gpus", type=int, default=1)
+    parser.add_argument("--expected-profile", choices=PROFILE_IDS)
     args = parser.parse_args(argv)
     try:
         data = json.loads(args.inventory.read_text(encoding="utf-8"))
@@ -162,7 +216,13 @@ def main(argv: list[str] | None = None) -> int:
         f"schema {'.'.join(str(part) for part in error.path) or '$'}: {error.message}"
         for error in schema_errors
     ]
-    errors.extend(validate_pascal_inventory(data, minimum_gpus=args.minimum_gpus))
+    errors.extend(
+        validate_pascal_inventory(
+            data,
+            minimum_gpus=args.minimum_gpus,
+            expected_profile=args.expected_profile,
+        )
+    )
     if errors:
         print("\n".join(f"ERROR: {error}" for error in errors), file=sys.stderr)
         return 1

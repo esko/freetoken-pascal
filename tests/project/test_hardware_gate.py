@@ -137,6 +137,94 @@ def test_ecc_off_inventory_accepts_full_physical_memory() -> None:
     assert CHECK_HARDWARE.validate_pascal_inventory(measured) == []
 
 
+@pytest.mark.parametrize(("profile", "mode"), [("ecc-on", "enabled"), ("ecc-off", "disabled")])
+def test_ecc_profile_requires_uniform_current_and_pending_modes(profile: str, mode: str) -> None:
+    measured = inventory(["6.1", "6.1"])
+    measured["profile_id"] = profile
+    for gpu in measured["gpus"]:
+        gpu["ecc_mode"] = mode
+        gpu["ecc_pending_mode"] = mode
+        if profile == "ecc-off":
+            gpu["memory_mib"] = 8192
+
+    assert CHECK_HARDWARE.validate_pascal_inventory(measured) == []
+
+
+def test_ecc_profile_rejects_mixed_or_pending_modes() -> None:
+    measured = inventory(["6.1", "6.1"])
+    measured["profile_id"] = "ecc-off"
+    measured["gpus"][0]["ecc_mode"] = "disabled"
+    measured["gpus"][0]["ecc_pending_mode"] = "disabled"
+    measured["gpus"][0]["memory_mib"] = 8192
+    measured["gpus"][1]["ecc_mode"] = "enabled"
+    measured["gpus"][1]["ecc_pending_mode"] = "enabled"
+
+    errors = CHECK_HARDWARE.validate_pascal_inventory(measured)
+
+    assert any("current/pending ECC" in error for error in errors)
+
+
+def test_unprofiled_inventory_rejects_mixed_ecc_modes() -> None:
+    measured = inventory(["6.1", "6.1"])
+    measured["gpus"][1]["ecc_mode"] = "disabled"
+    measured["gpus"][1]["memory_mib"] = 8192
+    measured["gpus"][1]["ecc_pending_mode"] = "disabled"
+
+    assert CHECK_HARDWARE.validate_pascal_inventory(measured) == [
+        "gpus current ECC modes must be uniform",
+    ]
+
+
+def test_expected_ecc_profile_is_checked() -> None:
+    measured = inventory(["6.1"])
+    measured["profile_id"] = "ecc-on"
+    measured["gpus"][0]["ecc_pending_mode"] = "enabled"
+
+    errors = CHECK_HARDWARE.validate_pascal_inventory(measured, expected_profile="ecc-off")
+
+    assert "inventory profile_id must be 'ecc-off', found 'ecc-on'" in errors
+    assert any("'disabled'" in error for error in errors if "current/pending ECC" in error)
+
+
+def test_profile_schema_requires_pending_mode_and_matching_values() -> None:
+    schema = json.loads(
+        (ROOT / "schemas" / "hardware-inventory.schema.json").read_text(encoding="utf-8")
+    )
+    measured = inventory(["6.1"])
+    measured["profile_id"] = "ecc-on"
+
+    errors = list(Draft202012Validator(schema).iter_errors(measured))
+
+    assert any(
+        error.validator == "required" and "ecc_pending_mode" in error.message for error in errors
+    )
+
+
+def test_profile_schema_accepts_matching_ecc_on_descriptor() -> None:
+    schema = json.loads(
+        (ROOT / "schemas" / "hardware-inventory.schema.json").read_text(encoding="utf-8")
+    )
+    measured = inventory(["6.1", "6.1"])
+    measured["profile_id"] = "ecc-on"
+    for gpu in measured["gpus"]:
+        gpu["ecc_pending_mode"] = "enabled"
+
+    Draft202012Validator(schema).validate(measured)
+
+
+def test_expected_profile_cli_rejects_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    measured = inventory(["6.1"])
+    measured["profile_id"] = "ecc-on"
+    measured["gpus"][0]["ecc_pending_mode"] = "enabled"
+    path = tmp_path / "inventory.json"
+    path.write_text(json.dumps(measured), encoding="utf-8")
+
+    assert CHECK_HARDWARE.main([str(path), "--expected-profile", "ecc-off"]) == 1
+    assert "profile_id must be 'ecc-off'" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "timestamp",
     [
