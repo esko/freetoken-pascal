@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Run one bounded warm-cache Qwen request without rehashing model shards.
+"""Run one bounded warm-cache Qwen request with verified model identity.
 
 The canonical full-H2 document remains authoritative for model-shard content.
-This probe verifies its schema and SHA-256, checks the current shard names and
-sizes, then lets normal Engine startup perform the dedicated PLE integrity
-hash.  One request warms the selected working set and one identical request is
-measured.  The result deliberately makes no steady-state TPS or thermal claim.
+This probe verifies the current shard hashes against the canonical full-H2
+document before acquiring GPU resources, then lets normal Engine startup
+perform the dedicated PLE integrity hash. One request warms the selected
+working set and one identical request is measured. The result deliberately
+makes no steady-state TPS or thermal claim.
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -25,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_NAME = "qwen38-gguf-cache-zero-warm-h2-evidence.schema.json"
 PROMPT = "Write one short greeting."
 MAX_NEW_TOKENS = 2
+HARD_TIMEOUT_SECONDS = 300
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -68,6 +72,17 @@ def _read_json(path: Path, *, label: str) -> dict[str, Any]:
     return value
 
 
+def _verify_model_shards(shards: list[Path], expected_shards: list[Mapping[str, Any]]) -> None:
+    observed = [(path.name, path.stat().st_size, _sha256_file(path)) for path in shards]
+    expected = [
+        (str(item["name"]), int(item["size"]), str(item["sha256"])) for item in expected_shards
+    ]
+    if observed != expected:
+        raise RuntimeError(
+            "current model shard names/sizes/hashes do not match canonical full-H2 evidence"
+        )
+
+
 def load_inputs(
     *,
     full_h2_path: Path,
@@ -109,13 +124,7 @@ def load_inputs(
 
     shards = list(gguf_shard_paths(model_path))
     expected_shards = full_h2["model"]["shards"]
-    observed = [(path.name, path.stat().st_size) for path in shards]
-    expected = [(item["name"], int(item["size"])) for item in expected_shards]
-    if observed != expected:
-        raise RuntimeError(
-            "current model shard names/sizes do not match canonical full-H2 evidence; "
-            "content hashes were not recomputed"
-        )
+    _verify_model_shards(shards, expected_shards)
     base_ple = full_h2["ple_artifact"]
     manifest_path = ple_artifact_path / "manifest.json"
     manifest = _read_json(manifest_path, label="PLE manifest")
@@ -173,10 +182,10 @@ def canonical_identity(
         "hash_reuse": {
             "source_identity": "full-h2-canonical",
             "repository_commit": "reused-from-full-h2",
-            "model_shards": "reused-from-full-h2",
+            "model_shards": "verified-against-full-h2",
             "ple_payload": "reused-from-full-h2",
             "runtime_ple_integrity_hash": "performed",
-            "model_shard_hashes_recomputed": False,
+            "model_shard_hashes_recomputed": True,
             "ple_identity_recomputed": False,
         },
     }
@@ -240,6 +249,41 @@ class _Monitor:
         self.samples.append(_telemetry_row())
         if self.error is not None:
             raise RuntimeError("GPU telemetry monitor failed") from self.error
+
+
+class _HardDeadline:
+    """Use a separate process to bound GPU ownership across native-code hangs."""
+
+    def __init__(self, seconds: int, *, popen: Any = subprocess.Popen) -> None:
+        self.seconds = seconds
+        self._popen = popen
+        self._process: Any = None
+
+    def start(self) -> None:
+        if self._process is not None:
+            raise RuntimeError("hard deadline already started")
+        code = (
+            "import os,signal,time;"
+            f"time.sleep({self.seconds});"
+            f"os.kill({os.getpid()},signal.SIGKILL)"
+        )
+        self._process = self._popen(
+            [sys.executable, "-c", code],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def cancel(self) -> None:
+        if self._process is None:
+            return
+        self._process.terminate()
+        try:
+            self._process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait(timeout=5)
+        self._process = None
 
 
 def _counter_delta(after: Mapping[str, Any], before: Mapping[str, Any], key: str) -> int:
@@ -324,7 +368,7 @@ def build_evidence(
             "context_tokens": 5,
             "max_new_tokens": MAX_NEW_TOKENS,
             "temperature": 0.0,
-            "timeout_seconds": 300,
+            "timeout_seconds": HARD_TIMEOUT_SECONDS,
         },
         "warmup": {
             "cache_state": "warm",
@@ -414,9 +458,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     from freetoken.llm import LLM
 
     llm = None
+    document: dict[str, Any] | None = None
     monitor = _Monitor()
+    deadline = _HardDeadline(HARD_TIMEOUT_SECONDS)
     started = time.monotonic()
     try:
+        deadline.start()
         llm = LLM(
             str(args.model),
             dtype=torch.bfloat16,
@@ -476,16 +523,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         errors = validator.validate_document(document, schema_dir=ROOT / "schemas")
         if errors:
             raise RuntimeError("generated warm-H2 evidence is invalid: " + "; ".join(errors))
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(
-            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        return document
     finally:
         if monitor._thread.is_alive():
             monitor.stop()
         if llm is not None:
             llm.shutdown()
+        deadline.cancel()
+    if document is None:
+        raise RuntimeError("warm-H2 run completed without evidence")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = args.output.with_name(args.output.name + ".tmp")
+    temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(args.output)
+    return document
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -124,6 +124,8 @@ match are recorded without claiming a cryptographic content check. The dedicated
   `f4d0ad2189e62615554c7f15136921a60af11a8251a1b7e01871bf6b66e06385`; its dedicated
   ECC-off inventory has SHA-256
   `51d6e6654444b5b0983b83f3da5f0525888eccb5c1de894c1037bcafc6745a98`.
+  This retained observation predates the strengthened producer contract and is historical only:
+  same-size model content drift was not excluded cryptographically during that short run.
 
 The complete 77.0 GiB expert bank was mapped/file-backed for this slice. No evidence was collected
 that all expert pages were prefaulted into DDR4 or protected from swap, so this run must not be
@@ -143,9 +145,10 @@ separate required profiles.
 
 The short-evidence profiles deliberately keep these claims separate:
 
-- a warm-cache single-P4 request may reuse the canonical full-H2 model-shard identities instead of
-  streaming the roughly 100 GiB model split again, but Engine startup still performs its mandatory
-  dedicated-PLE integrity validation;
+- a warm-cache single-P4 request must stream-hash the current model split against the canonical
+  full-H2 identities before GPU acquisition, and Engine startup still performs its mandatory
+  dedicated-PLE integrity validation; a separate-process 300-second watchdog remains armed through
+  shutdown and the measured document is atomically published only after successful cleanup;
 - a direct dual-P4 probe measures only two-device identity, bounded allocation/arithmetic, topology,
   and instantaneous telemetry, and must identify itself as non-serving;
 - neither profile establishes steady-state TPS, a selected dual-P4 policy, or thermal qualification.

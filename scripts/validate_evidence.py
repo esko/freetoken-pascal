@@ -850,6 +850,46 @@ def _qwen38_q3_triad_semantic_errors(document: dict[str, Any], *, schema_dir: Pa
     return errors
 
 
+def _qwen38_dual_p4_semantic_errors(document: dict[str, Any]) -> list[str]:
+    """Validate identity bindings that JSON Schema cannot express across arrays."""
+    errors: list[str] = []
+    inventory = document["hardware_inventory"]
+    inventory_gpus = inventory["gpu_identities"]
+    devices = document["devices"]
+    profile = inventory["profile_id"]
+
+    for label, records in (
+        ("hardware_inventory.gpu_identities", inventory_gpus),
+        ("devices", devices),
+    ):
+        uuids = [record["uuid"] for record in records]
+        buses = [record["pci_bus_id"] for record in records]
+        if len(uuids) != len(set(uuids)):
+            errors.append(f"{label} UUIDs must be unique")
+        if len(buses) != len(set(buses)):
+            errors.append(f"{label} PCI bus IDs must be unique")
+
+    inventory_by_index = {record["index"]: record for record in inventory_gpus}
+    for index, record in enumerate(inventory_gpus):
+        if record["ecc_profile"] != profile:
+            errors.append(
+                f"hardware_inventory.gpu_identities[{index}].ecc_profile must match profile_id"
+            )
+    for index, device in enumerate(devices):
+        expected = inventory_by_index.get(device["index"])
+        if expected is None:
+            errors.append(f"devices[{index}].index must identify a bound inventory GPU")
+            continue
+        for field in ("uuid", "pci_bus_id", "pci_root", "numa_node"):
+            if device[field] != expected[field]:
+                errors.append(f"devices[{index}].{field} must match the bound inventory GPU")
+        if device["ecc_profile"] != profile:
+            errors.append(f"devices[{index}].ecc_profile must match hardware_inventory.profile_id")
+        if device["ecc_profile"] != expected["ecc_profile"]:
+            errors.append(f"devices[{index}].ecc_profile must match the inventory GPU profile")
+    return errors
+
+
 def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
     if not isinstance(document, dict):
         return ["document root must be an object"]
@@ -945,6 +985,8 @@ def validate_document(document: Any, *, schema_dir: Path) -> list[str]:
         errors.extend(_target_cpu_benchmark_semantic_errors(document))
     elif schema_name == "qwen38-q3-triad.schema.json":
         errors.extend(_qwen38_q3_triad_semantic_errors(document, schema_dir=schema_dir))
+    elif schema_name == "qwen38-dual-p4-device-evidence.schema.json":
+        errors.extend(_qwen38_dual_p4_semantic_errors(document))
     if document.get("evidence_status") == "measured" and document.get("commit") == "0" * 40:
         errors.append("measured evidence cannot use the placeholder commit")
     return errors

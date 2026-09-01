@@ -14,7 +14,7 @@
   "properties": {
     "schema_name": {"const": "qwen38-dual-p4-device-evidence.schema.json"},
     "schema_version": {"const": 1},
-    "evidence_status": {"const": "measured"},
+    "evidence_status": {"enum": ["synthetic", "measured"]},
     "evidence_kind": {"const": "dual-p4-direct-device-smoke"},
     "claim_status": {"const": "non-serving-device-only"},
     "repository_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
@@ -123,11 +123,52 @@
     "hardware_inventory": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256", "profile_id"],
+      "required": ["path", "sha256", "profile_id", "gpu_identities"],
       "properties": {
         "path": {"type": "string", "minLength": 1},
         "sha256": {"$ref": "#/$defs/sha256"},
-        "profile_id": {"enum": ["ecc-on", "ecc-off"]}
+        "profile_id": {"enum": ["ecc-on", "ecc-off"]},
+        "gpu_identities": {"$ref": "#/$defs/gpu_identities"}
+      }
+    },
+    "gpu_identities": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": ["index"],
+            "properties": {"index": {"const": 0}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["index"],
+            "properties": {"index": {"const": 1}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ],
+      "items": {"$ref": "#/$defs/gpu_identity"}
+    },
+    "gpu_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "uuid", "pci_bus_id", "pci_root", "numa_node", "ecc_profile"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0, "maximum": 1},
+        "uuid": {"type": "string", "pattern": "^GPU-[A-Za-z0-9-]+$"},
+        "pci_bus_id": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "pci_root": {"type": "string", "pattern": "^pci[0-9a-f]{4}:[0-9a-f]{2}$"},
+        "numa_node": {"type": "integer", "minimum": 0, "maximum": 1},
+        "ecc_profile": {"enum": ["ecc-on", "ecc-off"]}
       }
     },
     "devices": {

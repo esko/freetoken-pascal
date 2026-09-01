@@ -3,8 +3,10 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,7 +42,8 @@ def test_warm_cache_evidence_reuses_full_h2_identity_without_rehash() -> None:
     evidence = load("qwen38-gguf-cache-zero-warm-h2.json")
 
     assert VALIDATE_EVIDENCE.validate_document(evidence, schema_dir=SCHEMA_DIR) == []
-    assert evidence["identity"]["hash_reuse"]["model_shard_hashes_recomputed"] is False
+    assert evidence["evidence_status"] == "synthetic"
+    assert evidence["identity"]["hash_reuse"]["model_shard_hashes_recomputed"] is True
     assert evidence["identity"]["hash_reuse"]["runtime_ple_integrity_hash"] == "performed"
     assert evidence["identity"]["hash_reuse"]["source_identity"] == "full-h2-canonical"
     assert evidence["performance"]["decode_tokens_per_second"] is None
@@ -52,14 +55,12 @@ def test_warm_cache_evidence_rejects_rehash_and_unbounded_claims() -> None:
         (
             "identity.hash_reuse.model_shard_hashes_recomputed",
             lambda value: value["identity"]["hash_reuse"].update(
-                model_shard_hashes_recomputed=True
+                model_shard_hashes_recomputed=False
             ),
         ),
         (
             "identity.source_full_h2_evidence_sha256",
-            lambda value: value["identity"].update(
-                source_full_h2_evidence_sha256="not-a-sha256"
-            ),
+            lambda value: value["identity"].update(source_full_h2_evidence_sha256="not-a-sha256"),
         ),
         (
             "performance.decode_tokens_per_second",
@@ -94,6 +95,7 @@ def test_dual_p4_device_evidence_is_explicitly_non_serving() -> None:
     evidence = load("qwen38-dual-p4-device.json")
 
     assert VALIDATE_EVIDENCE.validate_document(evidence, schema_dir=SCHEMA_DIR) == []
+    assert evidence["evidence_status"] == "synthetic"
     assert evidence["serving"] == {
         "classification": "non-serving",
         "model_loaded": False,
@@ -129,9 +131,7 @@ def test_dual_p4_device_evidence_rejects_serving_tps_and_thermal_claims() -> Non
         ),
         (
             "devices",
-            lambda value: value["devices"].__setitem__(
-                1, copy.deepcopy(value["devices"][0])
-            ),
+            lambda value: value["devices"].__setitem__(1, copy.deepcopy(value["devices"][0])),
         ),
     )
     for expected_path, mutate in cases:
@@ -141,6 +141,50 @@ def test_dual_p4_device_evidence_rejects_serving_tps_and_thermal_claims() -> Non
         errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=SCHEMA_DIR)
 
         assert errors, expected_path
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    (
+        (
+            lambda value: value["devices"][1].update(uuid=value["devices"][0]["uuid"]),
+            "devices UUIDs must be unique",
+        ),
+        (
+            lambda value: value["devices"][1].update(pci_bus_id=value["devices"][0]["pci_bus_id"]),
+            "devices PCI bus IDs must be unique",
+        ),
+        (
+            lambda value: value["devices"][0].update(ecc_profile="ecc-on"),
+            "must match hardware_inventory.profile_id",
+        ),
+        (
+            lambda value: value["devices"][1].update(pci_root="pci0000:00"),
+            "must match the bound inventory GPU",
+        ),
+        (
+            lambda value: value["hardware_inventory"]["gpu_identities"][1].update(
+                uuid=value["hardware_inventory"]["gpu_identities"][0]["uuid"]
+            ),
+            "hardware_inventory.gpu_identities UUIDs must be unique",
+        ),
+        (
+            lambda value: value["hardware_inventory"]["gpu_identities"][0].update(
+                ecc_profile="ecc-on"
+            ),
+            "ecc_profile must match profile_id",
+        ),
+    ),
+)
+def test_dual_p4_device_evidence_rejects_identity_mismatches(
+    mutate: Callable[[dict], None], message: str
+) -> None:
+    invalid = copy.deepcopy(load("qwen38-dual-p4-device.json"))
+    mutate(invalid)
+
+    errors = VALIDATE_EVIDENCE.validate_document(invalid, schema_dir=SCHEMA_DIR)
+
+    assert any(message in error for error in errors), errors
 
 
 def test_benchmark_requires_selected_runtime_behavior() -> None:

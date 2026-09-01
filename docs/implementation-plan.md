@@ -69,9 +69,11 @@ Those clean commits provide source provenance for the earlier observations; the 
 run supplies independent reproducibility evidence for the pread path.
 
 Hardware evidence must bind an immutable ECC profile to the captured inventory. Short warm-cache
-measurements may reuse the canonical full-H2 model-shard hashes, while retaining the Engine's
-mandatory PLE integrity validation, so they do not evict the expert working set merely to repeat
-the model census. Short direct dual-device probes remain non-serving evidence until issue #20
+measurements rehash the current model shards against canonical full-H2 identities before acquiring
+GPU resources and retain the Engine's mandatory PLE integrity validation. A separate watchdog
+process bounds Engine construction, generation, telemetry cleanup, and shutdown; evidence is
+published atomically only after cleanup succeeds. Short direct dual-device probes remain
+non-serving evidence until issue #20
 provides a real two-P4 execution policy. None of these bounded profiles qualifies sustained
 thermals or release throughput.
 

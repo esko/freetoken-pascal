@@ -216,6 +216,97 @@ def _device_record(
     }
 
 
+def _inventory_gpu_identities(inventory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return the exact identity projection bound into dual-device evidence."""
+    profile = inventory.get("profile_id")
+    if profile not in {"ecc-on", "ecc-off"}:
+        raise ValueError("dual-p4-short requires an ecc-on or ecc-off inventory profile")
+    expected_ecc = "enabled" if profile == "ecc-on" else "disabled"
+    gpus = inventory.get("gpus")
+    if not isinstance(gpus, list) or len(gpus) != 2:
+        raise ValueError("dual-p4-short requires exactly two inventory GPUs")
+
+    identities: list[dict[str, Any]] = []
+    seen_uuids: set[str] = set()
+    seen_buses: set[str] = set()
+    for gpu in gpus:
+        if not isinstance(gpu, Mapping):
+            raise ValueError("dual-p4-short inventory GPU records must be objects")
+        index = gpu.get("index")
+        uuid = gpu.get("uuid")
+        pci_bus_id = gpu.get("pci_bus_id")
+        topology = gpu.get("topology")
+        if not isinstance(index, int) or isinstance(index, bool) or index not in (0, 1):
+            raise ValueError("dual-p4-short inventory GPU indices must be 0 and 1")
+        if not isinstance(uuid, str) or not uuid:
+            raise ValueError(f"inventory GPU {index} has no UUID")
+        if uuid in seen_uuids:
+            raise ValueError("dual-p4-short inventory GPU UUIDs must be unique")
+        seen_uuids.add(uuid)
+        if not isinstance(pci_bus_id, str) or not pci_bus_id:
+            raise ValueError(f"inventory GPU {index} has no PCI bus ID")
+        if pci_bus_id in seen_buses:
+            raise ValueError("dual-p4-short inventory PCI bus IDs must be unique")
+        seen_buses.add(pci_bus_id)
+        if gpu.get("ecc_mode") != expected_ecc or gpu.get("ecc_pending_mode") != expected_ecc:
+            raise ValueError(f"inventory GPU {index} does not match profile {profile!r}")
+        if not isinstance(topology, Mapping):
+            raise ValueError(f"inventory GPU {index} has no measured topology")
+        pci_root = topology.get("pci_root")
+        numa_node = topology.get("numa_node")
+        if not isinstance(pci_root, str) or not pci_root:
+            raise ValueError(f"inventory GPU {index} has no PCI root")
+        if not isinstance(numa_node, int) or isinstance(numa_node, bool) or numa_node < 0:
+            raise ValueError(f"inventory GPU {index} has no valid NUMA node")
+        identities.append(
+            {
+                "index": index,
+                "uuid": uuid,
+                "pci_bus_id": pci_bus_id,
+                "pci_root": pci_root,
+                "numa_node": numa_node,
+                "ecc_profile": profile,
+            }
+        )
+    if {identity["index"] for identity in identities} != {0, 1}:
+        raise ValueError("dual-p4-short inventory GPU indices must be exactly 0 and 1")
+    identities.sort(key=lambda identity: identity["index"])
+    return identities
+
+
+def _validate_device_identity_consistency(
+    inventory: Mapping[str, Any], devices: list[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Ensure device observations are bound to the profiled inventory identities."""
+    identities = _inventory_gpu_identities(inventory)
+    expected_by_index = {identity["index"]: identity for identity in identities}
+    seen_uuids: set[str] = set()
+    seen_buses: set[str] = set()
+    for device in devices:
+        index = device.get("index")
+        if index not in expected_by_index:
+            raise ValueError(f"dual-p4-short device index {index!r} is not in the inventory")
+        expected = expected_by_index[index]
+        uuid = device.get("uuid")
+        pci_bus_id = device.get("pci_bus_id")
+        if not isinstance(uuid, str) or not uuid:
+            raise ValueError(f"dual-p4-short device {index} has no UUID")
+        if not isinstance(pci_bus_id, str) or not pci_bus_id:
+            raise ValueError(f"dual-p4-short device {index} has no PCI bus ID")
+        if uuid in seen_uuids:
+            raise ValueError("dual-p4-short device UUIDs must be unique")
+        if pci_bus_id in seen_buses:
+            raise ValueError("dual-p4-short device PCI bus IDs must be unique")
+        seen_uuids.add(uuid)
+        seen_buses.add(pci_bus_id)
+        for field in ("uuid", "pci_bus_id", "pci_root", "numa_node"):
+            if device.get(field) != expected[field]:
+                raise ValueError(f"dual-p4-short device {index} {field} disagrees with inventory")
+        if device.get("ecc_profile") != expected["ecc_profile"]:
+            raise ValueError(f"dual-p4-short device {index} ECC profile disagrees with inventory")
+    return identities
+
+
 def build_evidence(
     inventory: Mapping[str, Any],
     *,
@@ -236,6 +327,7 @@ def build_evidence(
         raise ValueError("operation_seconds must be in (0, 30]")
     if total_seconds <= 0 or total_seconds > 300:
         raise ValueError("total_seconds must be in (0, 300]")
+    gpu_identities = _validate_device_identity_consistency(inventory, devices)
     for device in devices:
         if int(device["iterations"]) > MAX_ITERATIONS:
             raise ValueError("device iteration count exceeds the hard bound")
@@ -260,6 +352,7 @@ def build_evidence(
             "path": str(inventory_path),
             "sha256": inventory_sha256,
             "profile_id": inventory["profile_id"],
+            "gpu_identities": gpu_identities,
         },
         "request": {
             "kind": "direct-device-smoke",

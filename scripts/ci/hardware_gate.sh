@@ -206,7 +206,8 @@ run_warm_p4() {
     -v "$FREETOKEN_PASCAL_PLE_ARTIFACT:$FREETOKEN_PASCAL_PLE_ARTIFACT:ro" \
     -w "$container_root" \
     "$image" \
-    env PYTHONPATH=python timeout 330 python scripts/run_qwen38_warm_h2.py \
+    env PYTHONPATH=python timeout --foreground --signal=TERM --kill-after=5s 900s \
+      python scripts/run_qwen38_warm_h2.py \
       --full-h2 "$full_h2" \
       --inventory "$inventory_path" \
       --model "$FREETOKEN_PASCAL_MODEL_PATH" \

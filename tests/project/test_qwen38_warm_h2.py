@@ -80,15 +80,13 @@ def _inputs(tmp_path: Path) -> dict:
 
 def test_builder_emits_schema_valid_bounded_non_performance_evidence(tmp_path: Path) -> None:
     evidence = WARM_H2.build_evidence(**_inputs(tmp_path))
-    validator = WARM_H2._load_module(
-        "validate_test_warm_h2", ROOT / "scripts/validate_evidence.py"
-    )
+    validator = WARM_H2._load_module("validate_test_warm_h2", ROOT / "scripts/validate_evidence.py")
 
     assert validator.validate_document(evidence, schema_dir=ROOT / "schemas") == []
     assert evidence["performance"]["claim"] is False
     assert evidence["claims"]["thermal_qualification"] is False
     assert evidence["claims"]["dual_p4_serving"] is False
-    assert evidence["identity"]["hash_reuse"]["model_shard_hashes_recomputed"] is False
+    assert evidence["identity"]["hash_reuse"]["model_shard_hashes_recomputed"] is True
     assert evidence["identity"]["hash_reuse"]["runtime_ple_integrity_hash"] == "performed"
 
 
@@ -98,6 +96,43 @@ def test_builder_rejects_request_over_thermal_bound(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="300-second hard bound"):
         WARM_H2.build_evidence(**inputs)
+
+
+def test_hard_deadline_can_be_cancelled_without_killing_process() -> None:
+    class FakeProcess:
+        terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, *, timeout: int) -> int:
+            assert timeout == 5
+            return 0
+
+    process = FakeProcess()
+    commands: list[list[str]] = []
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        commands.append(command)
+        assert kwargs
+        return process
+
+    deadline = WARM_H2._HardDeadline(1, popen=fake_popen)
+
+    deadline.start()
+    deadline.cancel()
+
+    assert process.terminated is True
+    assert "SIGKILL" in commands[0][2]
+
+
+def test_model_shard_verification_rejects_same_size_content_drift(tmp_path: Path) -> None:
+    shard = tmp_path / "model-00001-of-00001.gguf"
+    shard.write_bytes(b"actual")
+    expected = [{"name": shard.name, "size": 6, "sha256": "0" * 64}]
+
+    with pytest.raises(RuntimeError, match="names/sizes/hashes"):
+        WARM_H2._verify_model_shards([shard], expected)
 
 
 def test_builder_rejects_inventory_identity_drift(tmp_path: Path) -> None:

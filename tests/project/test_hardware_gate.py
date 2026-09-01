@@ -306,9 +306,9 @@ def test_dual_short_gate_isolated_from_model_serving_path() -> None:
     assert "run_dual_short" in gate
     assert "run_single_h2" not in gate.split("dual-p4-short)", 1)[1].split("release)", 1)[0]
     assert "scripts/run_dual_p4_short.py" in gate
-    assert 'inventory-${profile_id}-${level}.json' in gate
+    assert "inventory-${profile_id}-${level}.json" in gate
     assert "--gpus all" in gate
-    assert "--expected-profile \"$profile_id\"" in gate
+    assert '--expected-profile "$profile_id"' in gate
 
 
 def test_warm_gate_is_single_device_bounded_and_reuses_full_h2_identity() -> None:
@@ -318,7 +318,8 @@ def test_warm_gate_is_single_device_bounded_and_reuses_full_h2_identity() -> Non
     assert "run_warm_p4" in branch
     assert "run_single_h2" not in branch
     assert "scripts/run_qwen38_warm_h2.py" in gate
-    assert 'env PYTHONPATH=python timeout 330 python scripts/run_qwen38_warm_h2.py' in gate
+    assert "timeout --foreground --signal=TERM --kill-after=5s 900s" in gate
+    assert "python scripts/run_qwen38_warm_h2.py" in gate
     assert '--full-h2 "$full_h2"' in gate
     assert '--inventory "$inventory_path"' in gate
     assert '--gpus "device=$smoke_gpu"' in gate

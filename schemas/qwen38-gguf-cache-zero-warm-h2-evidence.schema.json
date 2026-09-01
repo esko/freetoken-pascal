@@ -14,7 +14,7 @@
   "properties": {
     "schema_name": {"const": "qwen38-gguf-cache-zero-warm-h2-evidence.schema.json"},
     "schema_version": {"const": 1},
-    "evidence_status": {"const": "measured"},
+    "evidence_status": {"enum": ["synthetic", "measured"]},
     "evidence_kind": {"const": "single-p4-warm-cache"},
     "claim_status": {"const": "bounded-correctness-only"},
     "repository_commit": {"$ref": "#/$defs/commit"},
@@ -120,10 +120,10 @@
       "properties": {
         "source_identity": {"const": "full-h2-canonical"},
         "repository_commit": {"const": "reused-from-full-h2"},
-        "model_shards": {"const": "reused-from-full-h2"},
+        "model_shards": {"const": "verified-against-full-h2"},
         "ple_payload": {"const": "reused-from-full-h2"},
         "runtime_ple_integrity_hash": {"const": "performed"},
-        "model_shard_hashes_recomputed": {"const": false},
+        "model_shard_hashes_recomputed": {"const": true},
         "ple_identity_recomputed": {"const": false}
       }
     },
