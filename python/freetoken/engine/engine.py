@@ -1158,6 +1158,7 @@ class Engine:
 
         for req in batch.reqs:
             req.complete_one()
+        batch.can_decode_after_forward = tuple(req.can_decode for req in batch.reqs)
 
         batch_logits = logits[: batch.size]
         next_tokens_gpu = self.sampler.sample(batch_logits, args).to(torch.int32)
