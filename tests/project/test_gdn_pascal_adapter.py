@@ -7,7 +7,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-torch = pytest.importorskip("torch")
 from freetoken.attention.linear import build_fla_metadata
 from freetoken.core import Batch, Context, Req, SamplingParams
 from freetoken.distributed import set_tp_info, try_get_tp_info
@@ -19,10 +18,17 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "python/freetoken/kernel/csrc/jit/gdn_pascal.cu"
 ADAPTER = ROOT / "python/freetoken/kernel/gdn_pascal.py"
 
-_ADAPTER = importlib.import_module("freetoken.kernel.gdn_pascal")
+try:
+    import torch
+except ModuleNotFoundError:  # pragma: no cover - hosted source-only environments
+    torch = None
+
+_ADAPTER = importlib.import_module("freetoken.kernel.gdn_pascal") if torch is not None else None
 
 
 def _require_adapter():
+    if _ADAPTER is None:
+        pytest.skip("Torch is unavailable")
     return _ADAPTER
 
 

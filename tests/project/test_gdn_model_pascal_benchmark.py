@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
-torch = pytest.importorskip("torch")
+import torch
 from freetoken.models.qwen4_exp.gdn import Qwen4ExpGatedDeltaNet
 from freetoken.utils import torch_dtype
 
