@@ -238,10 +238,7 @@ def test_qsa_h2_fixture_is_synthetic_bounded_and_explicitly_unmeasured() -> None
         ),
         (
             lambda value: value["samples"][0]["allocator_after"].update(
-                driver_free_bytes=value["samples"][0]["allocator_after"][
-                    "driver_total_bytes"
-                ]
-                + 1
+                driver_free_bytes=value["samples"][0]["allocator_after"]["driver_total_bytes"] + 1
             ),
             "free bytes exceed driver capacity",
         ),
