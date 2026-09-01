@@ -575,6 +575,34 @@ def test_real_qwen_q4_and_q3_rows_match_pinned_reference_outputs():
         assert digest == row["reference_f32_sha256"]
 
 
+def test_sensitive_q8_0_scale_and_dequant_match_pinned_oracle():
+    from freetoken.gguf_types import GGML_Q8_0
+    from freetoken.models.gguf.dequant import dequantize, dequantize_reference
+
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/sensitive/q8-0-packed-scale-parity.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    packed_bytes = base64.b64decode(fixture["packed_base64"])
+    assert hashlib.sha256(packed_bytes).hexdigest() == fixture["packed_sha256"]
+    packed = torch.frombuffer(bytearray(packed_bytes), dtype=torch.uint8)
+
+    output = dequantize(packed, GGML_Q8_0, torch.float32)
+    oracle = dequantize_reference(packed, GGML_Q8_0, torch.float32)
+
+    torch.testing.assert_close(output, oracle, atol=0, rtol=0)
+    torch.testing.assert_close(
+        output,
+        torch.tensor(fixture["expected_values"], dtype=torch.float32),
+        atol=0,
+        rtol=0,
+    )
+    assert hashlib.sha256(output.numpy().astype("<f4").tobytes()).hexdigest() == fixture[
+        "reference_f32_sha256"
+    ]
+
+
 def test_metadata_export_accepts_a_zero_tensor_first_shard(tmp_path: Path):
     from freetoken.models.gguf.reader import OUTPUT_WEIGHT_PRESENT_KV, write_metadata_gguf
 
