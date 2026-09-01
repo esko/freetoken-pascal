@@ -61,26 +61,41 @@ permanent release attachments.
 
 ## Current bounded P4 evidence
 
-On 2026-09-01 Gorilla completed the first real Qwen3.8 GGUF cache-zero vertical H2 run. The exact
-model revision was `c8b5954a88c2775c546b92593eda40ea041d3176`; all four manifest shard sizes
-matched, and the dedicated IQ4_NL PLE artifact had SHA-256
+On 2026-09-01 Gorilla completed the first real Qwen3.8 GGUF cache-zero vertical H2 run. The
+selected model revision was `c8b5954a88c2775c546b92593eda40ea041d3176`; all four manifest shard
+sizes matched. This gate did not stream-hash the model shard bytes, so the revision and size
+match are recorded without claiming a cryptographic content check. The dedicated IQ4_NL PLE artifact had SHA-256
 `dd55c28902f38cd88134b2a569c51282c5ffce30080487e1a645740115c56cc3`.
 
-- `mmap` at integration commit `0b5cadb0a7`: two output tokens, 11.192 seconds for the complete
+- `mmap`: evidence captured at superseded stacked commit `0b5cadb0a7`; its exact patch is
+  reproduced by clean-branch commit `d924ba4b9a` (diff-equivalent): two output tokens, 11.192 seconds for the complete
   five-token prompt plus generation call, 96 logical/unique PLE rows, 8,640 packed bytes,
   `MADV_RANDOM`, 35 minor faults, zero observed major faults, and no block-device reads because the
   PLE was already warm in Linux page cache.
-- `pread` at integration commit `3b52df561c`: the identical two output token IDs, 11.120 seconds
+- `pread`: evidence captured at superseded stacked commit `3b52df561c`; its exact patch is
+  reproduced by clean-branch commit `c34648dbbe` (diff-equivalent): the identical two output token IDs, 11.120 seconds
   for the complete prompt plus generation call, the same 96 rows and 8,640 packed bytes through 96
   positional reads, `POSIX_FADV_RANDOM`, 23 minor faults, and zero observed major faults or
   block-device reads on the warm cache.
-- Every routed layer reported `mixed_avx2`, eight actual worker threads with verified affinity,
-  CPU execution, and a file-backed GGUF expert source. No SSD or GPU expert execution occurred.
+- Run telemetry reported every routed layer as `mixed_avx2`, eight actual worker threads with
+  verified affinity, CPU execution, and a file-backed GGUF expert source. This is an observation
+  from the retained run record; an H2 gate assertion for each layer and worker/affinity field is
+  still required before treating it as a qualification claim. No SSD or GPU expert execution
+  occurred.
 - Runtime allocation reached 5.86 GiB on GPU 0 with about 2.20 GiB free after initialization.
   Peak sampled temperature was 54 C at roughly 25 W under the intentional 75 W power limit.
-- The inventory at `7594bce5b4` recorded two ECC-disabled Tesla P4 cards on separate PCI roots and
-  NUMA nodes, plus the PCIe Gen3 x4 NVMe on node 0. Seven short single-card tests and one dual-card
-  discovery test passed. Active-load PCIe link qualification and cooling remain unqualified.
+- The inventory at clean commit `0cb4bb3500` (patch-equivalent to superseded stacked commit
+  `7594bce5b4`) recorded two ECC-disabled Tesla P4 cards on separate PCI roots and NUMA nodes,
+  plus the PCIe Gen3 x4 NVMe on node 0. Seven short single-card tests and one dual-card discovery
+  test passed. Active-load PCIe link qualification and cooling remain unqualified.
+
+The complete 77.0 GiB expert bank was mapped/file-backed for this slice. No evidence was collected
+that all expert pages were prefaulted into DDR4 or protected from swap, so this run must not be
+described as proving resident/no-swap expert-bank behavior. The H2 run also did not provide cold-cache
+fault/read-amplification or model-shard cryptographic-hash evidence.
+
+The clean-branch commit mappings above establish source equivalence but do not replace a rerun at
+the clean branch tip; that rerun is still required for strict reproducibility.
 
 These were bounded correctness/integration runs, not repeated steady-state decode benchmarks.
 The reported approximately 0.18 output tokens per second divides two output tokens by the complete
