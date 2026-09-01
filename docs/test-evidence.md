@@ -108,6 +108,18 @@ match are recorded without claiming a cryptographic content check. The dedicated
   both UUID/PCI-root/NUMA identities, and explicit non-serving/no-TPS/no-thermal-qualification
   claims. Raw evidence is retained on Gorilla as
   `results/hardware/qwen38-dual-p4-device.json` for the H2/H3 investigation window.
+- The bounded warm-cache producer at `fe6e7ca91c` reused canonical full-H2 artifact
+  SHA-256 `740e0c1ab79acf5f5473c70751f645bd6f1e91235cc0b826cb14e18529f16b7e`
+  instead of rehashing the four model shards; normal Engine startup still performed the dedicated
+  PLE integrity hash. Startup took 151.029 seconds. One deterministic two-token warmup took
+  114.488 seconds and included first-use GGUF CUDA extension compilation; the immediately repeated
+  identical five-token prompt plus two-token request took 5.244 seconds and returned the same IDs
+  `[201519, 8691]`. The measured request read 96 unique PLE rows/8,640 packed bytes through
+  `pread`, with zero major faults and zero observed physical storage-read bytes. Peak sampled GPU
+  state across the two requests was 52 C and 29.93 W under the 75 W limit. This is a single bounded
+  warm-call observation, not decode-only or steady-state TPS. Raw evidence is retained on Gorilla
+  as `results/hardware/qwen38-gguf-cache-zero-warm-h2.json` with SHA-256
+  `9f35348c8338db3d87d8be9c3af2d1b70a487564e8233e193001e5a33811eac4`.
 
 The complete 77.0 GiB expert bank was mapped/file-backed for this slice. No evidence was collected
 that all expert pages were prefaulted into DDR4 or protected from swap, so this run must not be
