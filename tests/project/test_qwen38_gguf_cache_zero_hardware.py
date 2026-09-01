@@ -173,6 +173,9 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
 
     model_path = Path(model_value)
     artifact_path = Path(ple_value)
+    ple_backend = os.environ.get("FREETOKEN_PASCAL_PLE_BACKEND", "mmap")
+    if ple_backend not in {"mmap", "pread"}:
+        pytest.fail(f"unsupported FREETOKEN_PASCAL_PLE_BACKEND={ple_backend!r}")
     model_identity, _shards = _pinned_model_identity(model_path)
     ple_identity = _pinned_ple_identity(artifact_path)
 
@@ -213,7 +216,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
                 cuda_graph_max_bs=0,
                 cache_type="naive",
                 ple_artifact_path=str(artifact_path),
-                ple_backend="mmap",
+                ple_backend=ple_backend,
                 ple_warm_mode="cold",
                 ple_planner_mode="vectorized",
             )
@@ -263,7 +266,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
         }
         ple_backends = {str(item.get("backend")) for item in ple_telemetry.values()}
         ple_sources = {str(item.get("source_kind")) for item in ple_telemetry.values()}
-        assert ple_backends == {"mmap"}
+        assert ple_backends == {ple_backend}
         assert ple_sources == {"dedicated-artifact"}
         assert {int(item["mapped_bytes"]) for item in ple_telemetry.values()} == {
             ple_identity["tensor_bytes"]
@@ -302,6 +305,7 @@ def test_qwen38_gguf_cache_zero_real_engine_prefill_decode() -> None:
                 "cuda_graph_max_bs": engine.config.cuda_graph_max_bs,
                 "offload_moe_cache": False,
                 "cache_type": engine.config.cache_type,
+                "ple_backend": ple_backend,
             },
             "expert_quant_census": dict(census),
             "expert_source": {
