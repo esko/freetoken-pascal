@@ -57,7 +57,7 @@ dependencies = [
     "torch>=2.11,<2.12",
     "tqdm>=4.66,<5",
     "transformers>=5.5,<6",
-    "triton==3.6.0; platform_system == 'Linux'",
+    "triton==3.8.0; platform_system == 'Linux'",
     "uvicorn>=0.30,<1",
 ]
 
