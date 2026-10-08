@@ -97,7 +97,7 @@ jobs:
           kc="$(ls dist/freetoken_kernel_cache-*.whl 2>/dev/null | wc -l)"
           [ "$rt" -eq 4 ] || { echo "expected 4 manylinux runtime wheels, got $rt" >&2; exit 1; }
           [ "$kc" -eq 1 ] || { echo "expected 1 kernel-cache wheel, got $kc" >&2; exit 1; }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: release-wheels
           path: dist/*.whl
